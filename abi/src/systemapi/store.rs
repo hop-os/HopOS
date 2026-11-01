@@ -28,6 +28,17 @@ pub const MAX_STORE_LIST: usize = 8 << 10;
 /// de call-timeout van een client (10 s), zodat een lange wacht nooit een
 /// timeout wordt.
 pub const MAX_WAIT_MS: u64 = 5_000;
+/// De vlag in `off` van [`super::PrivOp::NextStore`]: kom ook terug zodra
+/// er nieuwe logregels zijn, van de kern (`NEXT_LOG` 0) of van een app.
+/// Het antwoord is dan `size` [`LOG_NEWS`] zonder data. Zo wacht Hop met
+/// één verbinding, zijn store-taak, op allebei (H8), en pollt hij
+/// `NEXT_LOG` niet per tik. Wie zo wacht, logt niet per wek: elke
+/// consoleregel wekt hem.
+pub const NEXT_STORE_LOGS: u64 = 1;
+/// `size` van het antwoord op [`super::PrivOp::NextStore`] met
+/// [`NEXT_STORE_LOGS`]: er zijn nieuwe logregels sinds het vorige
+/// antwoord; haal ze met `NEXT_LOG` tot leeg. Een store-opdracht gaat voor.
+pub const LOG_NEWS: u64 = 2;
 
 /// De lengte van [`TaskHead`] op de draad.
 pub const TASK_HEAD_LEN: usize = 24;

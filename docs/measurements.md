@@ -65,8 +65,9 @@ alle zeven borden. De geschiedenis van een cel staat in git.
 | Last op een app-core | job met `"env":{"BURN":"1"}` (`BURN_WORK`, `BURN_REST` in s) | `HOPOS_BENCH_BURN` |
 | Geheugen onder druk | job met `"env":{"THRASH":"1"}` | `HOPOS_BENCH_THRASH` |
 | Multicast tussen twee apps | een job met `"env":{"MCAST":"listen"}`, dan een met `"env":{"MCAST":"send"}` | `HOPOS_BENCH_MCAST recv=N` |
-| De OS-core in rust | `hopos.idlestat=1` in `hopos.cfg` of op de cmdline | `HOPOS_IDLESTAT` |
-| Schijf, rauw en door hopfs | `hopos.nvmebench=1`, of de feature `nvmebench` in een meetkern | `HOPOS_NVMEBENCH`, `_SEQ`, `_RAND`, `_RANDQ` |
+| De OS-core in rust | `hopos.tick=1` in `hopos.cfg` of op de cmdline | `HOPOS_TICK` |
+| hopfs vanuit een app | job met `"env":{"BENCH":"disk"}` | `HOPOS_BENCH_DISK` |
+| De watchdog | `POST :9080/restart` met een image dat geen Hop is (appspike), zoals `tools/qemu-test-hop-fail.sh`: Hop valt, de pets stoppen, de reset volgt | `HOPOS_HOP_DOWN`, dan `HOPOS_BOOT` |
 | Kern en Hop in rust | `GET :9080/v1/agents` (`kern_cpu_percent`, `kern_mem_bytes`, `hop_cpu_percent`, `hop_mem_bytes`, `temp_milli_c`), drie peilingen 10 s uit elkaar, alleen welcome geplaatst | |
 | De keten op QEMU | `sh tools/qemu-test-bench.sh` | `bench-keten groen` |
 | Uren lang plaatsen en stoppen | `sh tools/soak.sh NODE` (`FLIP=1` voor de flip erbij) | `SOAK` |

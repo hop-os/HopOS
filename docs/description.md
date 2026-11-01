@@ -361,11 +361,13 @@ procedure).
   (`tools/qemu-test-hop-fail.sh`).
 - **Telemetrie** (`hopos/src/telemetry.rs`): thermiek en klokbeleid per
   board, met `driver/dvfs` als governor.
-- **Console**: de tee gaat naar zwarte doos, UART, een ring van 256 KiB en
-  het glas, en regel voor regel naar de ring van de kern voor `NEXT_LOG` 0
-  (64 KiB, `kern::system::KernLog`, zonder de regels van de apps): zo toont
-  Hop de console van de kern naast die van zijn apps. `nc NODE 5555` speelt de ring af en leest mee (hoogstens 4
-  lezers; `kern/src/conport.rs`, `hopos/src/conport.rs`).
+- **Console**: één ring van 32 KiB op de plek van de zwarte doos
+  (`kern/src/conport.rs`, `hopos/src/conport.rs`), die een flip en een
+  reset overleeft, met drie lezers: de UART (een pomp, de schrijver wacht
+  niet op de baudrate), `nc NODE 5555` (eerst de ring, dan live; hoogstens
+  4 lezers, gewekt door de schrijver) en Hop met `NEXT_LOG` 0, regel voor
+  regel. De tee schrijft verder alleen het glas. Na een reset staat de
+  console van de dode kern vóór de nieuwe boot (`HOPOS_CONSOLE_CARRIED`).
 - **Config**: een venster van 16 KiB (`#HOPCFG1`) in elke kern
   (`board/src/cfgwin.rs`), gevuld door `image/hopcfg.py` of `hop image`.
   Een gevuld venster wint van de oude bronnen (ESP-`hopos.cfg`, initrd,
@@ -466,12 +468,12 @@ In `net/` verder: `flows` (conntrack, 4096 flows, 512 per slot), `host`
 De binary (11k): `main.rs` (kmain, setup, tick), en de lijm die de traits
 van kern invult en de taken spawnt: `slots`, `kooi`, `cage`/`cage_riscv`,
 `glue`, `config`, `net`, `storage`, `flip`, `codec`, `optical`, `gui`,
-`usb`, `off`, `conport`, `watchdog`, `telemetry`, `seed`, `clock`,
-`load`, `bench`, `mem`.
-Features buiten het board: `gui`, `media`, `vhe`, en de meetkernen
-`nvmebench`, `wdtest` en `hopcost`. Headless is zonder flag; `gui` en
-`media` staan los en trekken elk de interne bouwsteen `usb` mee; wat een
-build niet heeft, staat als stub in `off.rs`.
+`usb`, `off`, `conport`, `watchdog`, `telemetry`, `seed`, `clock`, `mem`.
+Features buiten het board: `gui`, `media` en `vhe`. Headless is zonder
+flag; `gui` en `media` staan los en trekken elk de interne bouwsteen `usb`
+mee; wat een build niet heeft, staat als stub in `off.rs`. Meten gaat op
+één manier (sequence-hopos.md §14.6): tellers op de control-page,
+`SLOT_STATUS`, Hop rekent.
 
 ### 5.7 gui, media en usb
 

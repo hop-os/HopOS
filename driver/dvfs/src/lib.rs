@@ -58,7 +58,8 @@ const SHORT_NUM: u64 = 3;
 const SHORT_DEN: u64 = 10;
 /// De kern (bron 0) is pas druk boven 70% van zijn core: zijn console is een
 /// UART die hij pollt (115200 baud, 87 us per teken), en vijf regels
-/// `HOPOS_SLOT_LOAD` elke 30 s zijn ~23 ms in één venster van 50 ms. Onder
+/// van 70 tekens (de meetregels van toen) zijn ~23 ms in één venster van
+/// 50 ms. Onder
 /// de drempel van de bewoners hield dat de klok met de cooldown van 30 s
 /// voorgoed vol. Een OS-core die het net, de switch of de system-API
 /// draagt, haalt 70% wel.

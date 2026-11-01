@@ -74,9 +74,7 @@ RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_PART_QUARANTINE|left=bell|left=gone|HOPOS
 
 JOB='{"name":"welcome","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/welcome.elf"}],"memory_limit":33554432,"ports":{"http":80}}'
 
-# after N: de console vanaf de N-de HOPOS_BOOT (1 = alles). Alleen de
-# eigen bootregel telt: de koude boot drukt de zwarte doos van de vorige
-# kern af, met "  | " ervoor.
+# after N: de console vanaf de N-de HOPOS_BOOT (1 = alles).
 BOOTED='^boot: .*HOPOS_BOOT gen='
 after() {
 	tr -d '\r' <"$LOG" | awk -v n="$1" '/^boot: .*HOPOS_BOOT gen=/ { b++ } b >= n && !/^  \| /'

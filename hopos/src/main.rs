@@ -12,14 +12,12 @@
 #![no_main]
 #![allow(clippy::expect_used)] // boot-code: vóór de agent draait is falen parkeren (handboek §12)
 
-mod bench; // de meetbanken achter hopos.nvmebench en hopos.idlestat (bench.rs)
 mod clock;
 mod config;
 mod conport; // de console over TCP: de ring achter de UART (conport.rs)
 mod flip; // FLIP: de kern-flip (flip.rs)
 mod glue; // `DevMem`, `KernConsole` en de outbox van een slot (glue.rs)
 mod kooi; // de kooi als beleid, voor elke architectuur (kooi.rs)
-mod load; // de meetlat per slot: idle en wekken op de console (load.rs)
 #[cfg(all(
     target_arch = "aarch64",
     target_os = "none",
@@ -124,8 +122,7 @@ extern crate board_uefi as vboard;
 /// traits); daarnaast alleen het plan in `vboard::slots`.
 type Machine = vboard::Machine;
 
-/// De schijf van het board (`Board::probe_disk`): de bench leent hem, de
-/// opslag neemt hem.
+/// De schijf van het board (`Board::probe_disk`): de opslag neemt hem.
 type Disk = <Machine as Board>::Disk;
 
 static BOARD: Machine = Machine::new();
@@ -172,9 +169,10 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     let board: &'static Machine = &BOARD;
     let uart = board.console();
     cpu::console::set_sink(uart);
-    // De ring van de TCP-console achter de UART (conport.rs); het glas komt
-    // er in `setup` achter, in dezelfde tee.
-    conport::install(uart);
+    // De console-ring op de plek van de zwarte doos (conport.rs): wat een
+    // vorige kern erin liet blijft staan, de UART is zijn eerste lezer; het
+    // glas komt er in `setup` achter, in dezelfde tee.
+    conport::install();
 
     println!();
     for line in BUNNY {
@@ -200,11 +198,6 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
 
     board.init_heap(&HEAP);
     board.discover(dtb);
-    // De ring van 5555 opnieuw aan deze core: op de M4 kent `this_core`
-    // de cores pas na de ADT (in `discover`), en daarvóór was dit core 0.
-    // Zonder deze regel viel alles tot `conport::here` weg, de landing van
-    // een flip en de zwarte doos incluis (01-10).
-    conport::here();
     // De OS-core (PORT.md beslissing 2): de kern woont op de core die de
     // bootparameter kiest. Staat hij daar nog niet, dan verhuist hij nu,
     // vóór er één lijn, timer of bewoner aan deze core hangt; deze core
@@ -308,9 +301,8 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         env!("HOPOS_STAMP"),
     );
 
-    // De ring van de TCP-console is vanaf hier van de OS-core (na een
-    // verhuizing schreef de boot-core hem tot nu), dan de console op het
-    // glas, op dezelfde core (gui.rs): de bunny als kop, de log eronder.
+    // Het glas is van de OS-core (gui.rs; na een verhuizing is dat een
+    // andere dan de boot-core): de bunny als kop, de log eronder.
     // Zonder framebuffer of kaal gebouwd: één regel of niets.
     conport::here();
     gui::init_framebuffer_console(board);
@@ -378,11 +370,8 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         );
     }
     // De opslag vóór de system-API: die krijgt de hopfs-actor alleen als
-    // er een schijf is (anders weigert elke bestandscall luid). De schijf
-    // wordt één keer geprobed; de meetbanken (bench.rs, alleen met
-    // hopos.nvmebench of hopos.idlestat) lenen hem vóór de opslag hem mount.
-    let disk = bench::start(exec, storage::probe());
-    let disk = storage::start(exec, disk);
+    // er een schijf is (anders weigert elke bestandscall luid).
+    let disk = storage::start(exec, storage::probe());
     // MEDIA: de codec-dienst ná de opslag, want de firmware-blobs staan op
     // het volume (codec.rs); zonder VPU meldt hij luid dat er geen is.
     codec::up(exec);
@@ -391,7 +380,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // De IRQ-dispatch spawnt als eerste: hij is de pomp van alle lijnen.
     // Faalt de controller, dan draait de node door op de vangrail van de
     // slaap (interrupts zijn een verbetering, geen voorwaarde).
-    // De schijf kwam ervóór op (de bench en de mount pollen); zijn lijn
+    // De schijf kwam ervóór op (de mount pollt); zijn lijn
     // komt nu.
     match board.start_interrupts() {
         Ok(bell) => {
@@ -403,13 +392,10 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         Err(e) => println!("irq: {e}, running on the sleep failsafe HOPOS_IRQ_FAIL"),
     }
     exec.spawn(tick(exec)).expect("spawn tick");
-    #[cfg(feature = "hopcost")]
-    exec.spawn(hopcost(exec)).expect("spawn hopcost");
     // De node-watchdog (op een flip-boot meteen met de boot-guard) en de
     // telemetrie: thermiek en klokbeleid.
     watchdog::start(exec, hop_here);
     telemetry::start(exec);
-    load::start(exec); // de meetlat per slot (docs/apps.md)
     gui::start_screen_status(exec); // de meetregels naast de bunny
 
     // De config van de node: het bestand en de bootargs van het board
@@ -617,7 +603,7 @@ static STORE: kern::store::StoreQueue = kern::store::StoreQueue::new();
 fn system(privilege: Option<Privilege>, fs: bool, max_slots: usize) -> &'static KernSystem {
     let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, max_slots)
         .with_logs(&slots::LOGS)
-        .with_kern_log(&conport::KERN_LOG)
+        .with_console(&conport::RING)
         .with_store(&STORE);
     if fs {
         s = s.with_fs(&storage::FS_INBOX);
@@ -790,22 +776,6 @@ static OS_ASID: AtomicBool = AtomicBool::new(true);
 /// Het tiknummer: de hartslag van slot 0, de kern (SLOT_STATUS).
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// De meetlat van een hop tussen twee bewoners van de OS-core (feature
-/// `hopcost`, cpu/src/hopcost.rs): de rondreizen op de console zodra het
-/// 200 ms stil is, zodat de UART niet in de meting valt.
-#[cfg(feature = "hopcost")]
-async fn hopcost(exec: &'static Executor) {
-    let mut seen = 0;
-    loop {
-        exec.after(core::time::Duration::from_millis(200)).await;
-        let n = cpu::hopcost::recorded();
-        if n == seen {
-            cpu::hopcost::drain(&mut |a| println!("{a}"));
-        }
-        seen = n;
-    }
-}
-
 async fn tick(exec: &'static Executor) {
     let start = exec.now();
     let mut n: u64 = 0;
@@ -815,16 +785,15 @@ async fn tick(exec: &'static Executor) {
     let (mut refused, mut dropped) = (0u64, 0u64);
     loop {
         n += 1;
-        // Een late lezer (de M4 over de dockchannel) krijgt de boot alsnog:
-        // elke N tikken de kop, de oudste 16 KiB van de ring en de staart,
-        // zodat een lezer die pas na een kabel-herplug aanhaakt er een vangt.
+        // Een late lezer (de M4 over de dockchannel) krijgt de ring alsnog:
+        // elke N tikken zet de UART hem opnieuw, zodat een lezer die pas na
+        // een kabel-herplug aanhaakt er een vangt.
         let replay_at = REPLAY_AT.load(Relaxed);
         if replay_at != 0 && n.is_multiple_of(replay_at) {
             println!(
-                "console: replaying the first 16 KiB of this boot for a late reader (hopos.replay={replay_at}) HOPOS_CONSOLE_REPLAY"
+                "console: replaying the ring for a late reader (hopos.replay={replay_at}) HOPOS_CONSOLE_REPLAY"
             );
-            let bytes = conport::replay(16 * 1024);
-            println!("console: end of the replay ({bytes} bytes) HOPOS_CONSOLE_REPLAY_END");
+            conport::rewind();
         }
         // De diagnose van de NIC op 5 en 30 s (de RP1-keten van de Pi 5, de
         // flip-jacht van 30-09): een koude boot geeft de referentie, een

@@ -65,16 +65,13 @@ impl Console for KernConsole {
         println!("{args}");
     }
 
-    /// Een regel van een app, als `slot N: ...`; niet in de regelring van
-    /// de kern (`conport::KERN_LOG`): Hop haalt hem al per slot.
+    /// Een regel van een app, als `slot N: ...`.
     fn app_line(&self, slot: Slot, line: &[u8]) {
         let line = line.trim_ascii_end();
-        crate::conport::KERN_LOG.app(true);
         match core::str::from_utf8(line) {
             Ok(s) => println!("slot {slot}: {s}"),
             Err(_) => println!("slot {slot}: {}", line.escape_ascii()),
         }
-        crate::conport::KERN_LOG.app(false);
     }
 }
 

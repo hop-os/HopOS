@@ -44,7 +44,6 @@ pub mod console;
 pub mod drbg;
 pub mod el2;
 pub mod gicv3;
-pub mod hopcost;
 pub mod idle;
 pub mod irq;
 pub mod memattr;

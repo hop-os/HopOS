@@ -10,7 +10,7 @@
 //! van Go (`NETMETER_BEGIN phase=...`, `NETMETER phase=... bytes= ms=
 //! MBps=`, `NETMETER_FAIL`, `NETMETER_DONE`), zodat de regels naast de
 //! oude te leggen zijn; wat eruit ging zijn de GC- en allocatietellers (de
-//! node heeft geen GC meer, en zijn eigen meetlat is `hopos.idlestat=1`).
+//! node heeft geen GC meer, en zijn eigen tellers staan in `HOPOS_TICK`).
 //! MB/s is decimaal, zoals in measurements.md (Go rekende MiB/s).
 //!
 //! ```text

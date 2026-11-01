@@ -23,7 +23,7 @@
 //! [`POLL_PERIOD`], en wekt de anderen waarvan de completion binnenkwam.
 //! Tijdens het wachten draait de executor door. Zo kost een node met
 //! zestien opdrachten in de lucht één poll per ronde, niet zestien.
-//! GEMETEN 01-10 op de M4 (`hopos.nvmebench=1`): willekeurig 4 KiB lezen
+//! GEMETEN 01-10 op de M4 (de schijf-bench van toen in de kern): willekeurig 4 KiB lezen
 //! haalt 11.888 per seconde met één opdracht tegelijk (~84 us per lees) en
 //! 175.055 met zestien tegelijk door deze wachtrij. De wachtrij is er voor
 //! de node, niet voor de app.

@@ -264,11 +264,12 @@ pub enum PrivOp {
     /// een korte ring.
     ///
     /// Slot 0 is de kern zelf, zoals bij [`PrivOp::SlotStatus`]: de
-    /// volgende regel die de kern op zijn console zette, zonder de regels
-    /// van de apps (die staan in de ring van hun slot, nooit dubbel), in
-    /// een ruimere ring (64 KiB, `kern::system::KERN_LOG_BYTES`) zodat de
-    /// boot er nog in staat als Hop opkomt. Vol is ook daar de oudste regel
-    /// eruit. Een kern van 3.0.16 of ouder weigert `off` 0 (een fout-status).
+    /// volgende regel van zijn console, dezelfde bytes als de UART en
+    /// tcp/5555, dus ook de regels van de apps (`slot N: ...`); een regel
+    /// langer dan `n` komt in stukken. Eén ring van 32 KiB
+    /// (`kern::conport`) die een flip en een reset overleeft, met de
+    /// positie van Hop erin: na een flip leest Hop verder, na een reset
+    /// krijgt de nieuwe Hop eerst wat de vorige nog niet las.
     NextLog = 0x44,
     /// Zet de klok: `n` de Unix-tijd in nanoseconden.
     SetClock = 0x45,
@@ -284,8 +285,11 @@ pub enum PrivOp {
     Flip = 0x46,
     /// De volgende store-opdracht van een app ([`store`]): `n` de langste
     /// wachttijd in ms (0 = niet wachten, de kern kapt af op
-    /// [`store::MAX_WAIT_MS`]). Het antwoord: `size` 1 en een
-    /// [`store::StoreTask`] in `data`, of `size` 0 als er niets klaarstaat.
+    /// [`store::MAX_WAIT_MS`]), `off` de vlaggen. Het antwoord: `size` 1 en
+    /// een [`store::StoreTask`] in `data`, of `size` 0 als er niets
+    /// klaarstaat. Met [`store::NEXT_STORE_LOGS`] in `off` komt de wacht
+    /// ook terug met `size` [`store::LOG_NEWS`] zodra er nieuwe logregels
+    /// zijn (`NEXT_LOG`, slot 0 en de apps): één lange wacht voor beide.
     NextStore = 0x47,
     /// Lees een stuk van het bestand van een opdracht (push): `off` het
     /// ticket, `n` de offset in het bestand, `path` het lokale pad van de

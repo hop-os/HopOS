@@ -188,8 +188,8 @@ pub const FLIP_FACTS_PA: u64 = BOOT_SCRATCH_PA + 0x3000;
 /// Hoeveel ruimte die feiten hebben.
 pub const FLIP_FACTS_LEN: u64 = 0x2000;
 
-/// De zwarte doos van de kern-flip (`kern::kernflip`, de tee van de
-/// console): hetzelfde gat als op virt en de Pi's (direct onder het
+/// De zwarte doos: de console-ring van de kern (`kern::conport`, hopos
+/// conport.rs): hetzelfde gat als op virt en de Pi's (direct onder het
 /// handoff-blob), maar boven de feitenpagina van de stub. De loader-regio
 /// van het kernvenster is die van de recorder; de stub schrijft er alleen
 /// het staging-woord en de feiten.

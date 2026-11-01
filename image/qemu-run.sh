@@ -85,6 +85,8 @@
 #                                    laatste waarde wint; het venster wint
 #                                    van de bootargs, en die van QEMU_CFG
 #                                    van de kern (voor Hop)
+#   CONPORT=5555 image/qemu-run.sh   een hostfwd naar de console over TCP
+#                                    (:5555, `nc 127.0.0.1 $CONPORT`)
 #   WEBPORT=8081 image/qemu-run.sh   een vierde hostfwd: 127.0.0.1:$WEBPORT
 #   DNSPORT=15353 image/qemu-run.sh  een UDP-hostfwd naar :5353 (hopdns)
 #                                    naar poort 80 van de gast, de poort die
@@ -171,9 +173,8 @@ case "${WDT:-}" in
 	exit 2
 	;;
 esac
-# FEATURES=hopcost (of een andere lijst) komt achter de board-feature,
-# zoals in uefi-run.sh: de meetlat van een hop op de OS-core
-# (cpu/src/hopcost.rs).
+# FEATURES=gui (of een andere lijst) komt achter de board-feature, zoals
+# in uefi-run.sh.
 FEATURES="$FEATURES${EXTRA_FEATURES:+,$EXTRA_FEATURES}"
 cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURES"
 KERNEL="$DIR/target/$TARGET/release/hopos"
@@ -261,6 +262,10 @@ FWD="hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100"
 FWD="$FWD,hostfwd=tcp:127.0.0.1:${AGENTPORT}-:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT}-:9080"
 if [ -n "${WEBPORT:-}" ]; then
 	FWD="$FWD,hostfwd=tcp:127.0.0.1:${WEBPORT}-:80"
+fi
+# CONPORT=5555: een hostfwd naar de console over TCP (:5555).
+if [ -n "${CONPORT:-}" ]; then
+	FWD="$FWD,hostfwd=tcp:127.0.0.1:${CONPORT}-:5555"
 fi
 # DNSPORT=15353: een UDP-hostfwd naar :5353 van de gast, voor hopdns in een
 # slot (de kern publiceert tcp én udp; slirp doet UDP alleen met deze knop).

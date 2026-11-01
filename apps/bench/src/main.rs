@@ -6,6 +6,7 @@
 //! | (niets), of `BENCH=serve` | TCP echo, sink en source plus UDP-echo op `ER_PORT_HTTP`, `BENCH_PORT` of 9000 ([`serve`]) | `HOPOS_BENCH_UP role=serve` |
 //! | `BENCH=ping BENCH_PEER=ip:poort` | rtt tegen een andere bench in de node, warm en koud ([`client`]) | `HOPOS_BENCH_RTT`, `HOPOS_BENCH_COLD` |
 //! | `BENCH=pull`, `BENCH=push` (met `BENCH_PEER`, `BENCH_BYTES`) | doorvoer app naar app door de switch | `HOPOS_BENCH_PULL`, `HOPOS_BENCH_PUSH` |
+//! | `BENCH=disk` | hopfs door de system-API: schrijven, lezen, willekeurig 4 KiB ([`disk`]) | `HOPOS_BENCH_DISK` |
 //! | `BURN=1` (`BURN_WORK`, `BURN_REST`) | rekenen in een werk/rust-ritme ([`load::burn`]) | `HOPOS_BENCH_BURN` |
 //! | `BURN=1 BENCH=serve` | rekenen náást de server, op dezelfde core: de rtt van een bezette app (`BENCH=ping` ertegen) | `HOPOS_BENCH_BURN`, `HOPOS_BENCH_UP role=serve` |
 //! | `THRASH=1` | de heap tot 3/5 vullen en churnen ([`load::thrash`]) | `HOPOS_BENCH_THRASH` |
@@ -35,6 +36,7 @@
 extern crate alloc;
 
 mod client;
+mod disk;
 mod load;
 mod proto;
 mod serve;
@@ -76,6 +78,7 @@ async fn bench(app: &'static applib::App) {
         (_, Some("ping")) => client::run(app, client::Role::Ping).await,
         (_, Some("pull")) => client::run(app, client::Role::Pull).await,
         (_, Some("push")) => client::run(app, client::Role::Push).await,
+        (_, Some("disk")) => disk::run(app).await,
         (_, None | Some("serve" | "")) => {
             let env = app.env("ER_PORT_HTTP").or_else(|| app.env("BENCH_PORT"));
             let port = applib::app::port_of(env, DEFAULT_PORT);
@@ -83,7 +86,7 @@ async fn bench(app: &'static applib::App) {
             0
         }
         (_, Some(other)) => {
-            log!("bench: BENCH={other:?} is not serve, ping, pull or push HOPOS_BENCH_FAIL");
+            log!("bench: BENCH={other:?} is not serve, ping, pull, push or disk HOPOS_BENCH_FAIL");
             1
         }
     };

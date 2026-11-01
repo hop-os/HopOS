@@ -1,6 +1,6 @@
 //! De kern-flip: de overdracht (het handoff-blob), de adoptie door de nieuwe
-//! kern ([`adopted`]), de vluchtrecorder met zijn archief, en de zwarte doos
-//! van de console ([`box_open`], [`box_write`], [`box_take`]).
+//! kern ([`adopted`]) en de vluchtrecorder met zijn archief. De zwarte doos
+//! van de console is de console-ring zelf ([`crate::conport`]).
 //!
 //! Alles in het blob is BOEKHOUDING, geen inhoud: de app-werelden blijven
 //! staan waar ze staan. Bij een onbruikbare overdracht stopt de nieuwe boot;
@@ -356,10 +356,6 @@ pub struct FlipPlan {
     pub stage_pa: u64,
     /// Het einde van de eigen RAM-declaratie: daar MOET het blob liggen.
     pub own_ram_end: u64,
-    /// De zwarte doos van de console ([`BOX_LEN`] bytes), 0 = geen. Zelfde
-    /// soort plek als de recorder: buiten elk kern-RAM, de pool, de DMA en
-    /// alles wat de firmware bij een verse boot beschrijft.
-    pub black_box_pa: u64,
 }
 
 /// De uitlijning van het nieuwe beeld in de staging: een cacheregel is
@@ -454,8 +450,7 @@ pub fn adopted(mem: &mut impl PhysMem, plan: &FlipPlan, jumped: bool) -> Result<
         Ok(h) => {
             archive_stage(mem, plan, h.generation);
             // Met de generatie (Go schreef 0): een koude boot na een dood
-            // hier meldt dan welke kern het was, dezelfde als in de kop van
-            // de zwarte doos.
+            // hier meldt dan welke kern het was.
             stage(mem, plan, Stage::Landed, h.generation);
             Ok(Boot::Adopted(h))
         }
@@ -631,141 +626,6 @@ pub fn mark_early_boot(mem: &mut impl PhysMem, plan: &FlipPlan) {
         && let Some((Stage::Jumping, generation)) = stage_of(mem.read64(plan.stage_pa))
     {
         stage(mem, plan, Stage::EarlyMain, generation);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// De zwarte doos: de console van de kern in een ring die een reset overleeft.
-// ---------------------------------------------------------------------------
-//
-// De vluchtrecorder zegt WAAR een geflipte kern stierf (één woord); de doos
-// zegt WAT hij daarvoor zei. Op de Pi 5 zonder UART was de TCP-console
-// (hopos/src/conport.rs) het enige oor, en die ring ligt in de BSS van de
-// dode kern: na de watchdog-reset overschreven (30-09). Dezelfde truc als de
-// recorder, met tekst: een vaste plek buiten elk kernimage, elke schrijf
-// meteen naar DRAM geveegd, want een watchdog-reset spoelt geen cache.
-//
-// Afgekeken van de Go-kern (`driver/conlog/blackbox.go`, "HOPBBX1"): een kop
-// met magic en een monotone schrijfpositie, daarachter de ring. Anders dan
-// in Go draagt de kop de generatie van de schrijver, begint elke boot een
-// verse doos (pas NA het lezen, zie `hopos/src/flip.rs`) en veegt de schrijf
-// zelf naar DRAM: in Go was de doos Device-gemapt, op de Pi's ligt hij in
-// Normal-geheugen.
-
-/// "HOPBOX02" little-endian: een andere vorm dan de doos van Go (die had
-/// geen generatie), dus een andere magic.
-pub const BOX_MAGIC: u64 = u64::from_le_bytes(*b"HOPBOX02");
-/// De kop: magic, generatie, schrijfpositie, ringmaat; één cacheregel.
-pub const BOX_HEAD: u64 = 64;
-/// De ring: 16 KiB, zo'n vijftig seconden boot of een minuut tikken.
-pub const BOX_RING: u64 = 16 << 10;
-/// De hele doos: kop plus ring.
-pub const BOX_LEN: u64 = BOX_HEAD + BOX_RING;
-/// Hoeveel een koude boot er hoogstens van laat zien: de staart, want daar
-/// stierf de kern, en 4 KiB is een scherm vol zonder de boot te verdrinken.
-pub const BOX_SHOW: usize = 4096;
-const BOX_GEN_OFF: u64 = 8;
-const BOX_POS_OFF: u64 = 16;
-const BOX_RING_OFF: u64 = 24;
-
-const _: () = assert!(BOX_SHOW as u64 <= BOX_RING && BOX_RING.is_multiple_of(8));
-
-/// Begint een verse doos voor `generation`: de kop eerst zonder magic, dan
-/// de magic, elk woord naar DRAM geveegd. Een reset halverwege laat dus een
-/// doos zonder magic achter, nooit een met een halve kop.
-pub fn box_open(mem: &mut impl PhysMem, plan: &FlipPlan, generation: u64) {
-    let base = plan.black_box_pa;
-    if base == 0 {
-        return;
-    }
-    mem.write64(base, 0);
-    mem.write64(base + BOX_GEN_OFF, generation);
-    mem.write64(base + BOX_POS_OFF, 0);
-    mem.write64(base + BOX_RING_OFF, BOX_RING);
-    mem.clean_inv(base, BOX_HEAD);
-    mem.write64(base, BOX_MAGIC);
-    mem.clean_inv(base, 8);
-}
-
-/// Schrijft `b` achter in de ring. Eerst de bytes, geveegd, dan pas de
-/// positie, geveegd: een reset ertussen verliest hoogstens dit stuk, en de
-/// positie wijst nooit voorbij wat er echt staat. Een doos zonder magic
-/// (nooit geopend, of gewist) blijft onaangeroerd.
-pub fn box_write(mem: &mut impl PhysMem, plan: &FlipPlan, b: &[u8]) {
-    let base = plan.black_box_pa;
-    if base == 0 || b.is_empty() || mem.read64(base) != BOX_MAGIC {
-        return;
-    }
-    let pos = mem.read64(base + BOX_POS_OFF);
-    // Meer dan de ring: alleen de staart telt.
-    let b = b
-        .get(b.len().saturating_sub(BOX_RING as usize)..)
-        .unwrap_or(b);
-    let at = pos % BOX_RING;
-    let room = usize::try_from(BOX_RING - at).unwrap_or(usize::MAX);
-    let (x, y) = b.split_at(b.len().min(room));
-    let data = base + BOX_HEAD;
-    for (pa, part) in [(data + at, x), (data, y)] {
-        if !part.is_empty() {
-            mem.copy_in(pa, part);
-            mem.clean_inv(pa, part.len() as u64);
-        }
-    }
-    mem.write64(base + BOX_POS_OFF, pos.wrapping_add(b.len() as u64));
-    mem.clean_inv(base + BOX_POS_OFF, 8);
-}
-
-/// Wat een eerdere boot in de doos achterliet.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct BoxTail {
-    /// De generatie van de kern die schreef.
-    pub generation: u64,
-    /// Hoeveel bytes er in de uitvoer staan (de staart).
-    pub len: usize,
-    /// Hoeveel die kern er in totaal schreef.
-    pub written: u64,
-}
-
-/// Leest de staart van de doos in `out` (hoogstens `out.len()` bytes) en
-/// wist de doos: een tweede boot drukt hem niet nog eens af. Alleen een doos
-/// met de magic, de eigen ringmaat en een generatie (een kern heeft er altijd
-/// een, 1 of meer); DRAM-rommel na een koude start is geen console.
-pub fn box_take(mem: &mut impl PhysMem, plan: &FlipPlan, out: &mut [u8]) -> Option<BoxTail> {
-    let base = plan.black_box_pa;
-    if base == 0 || mem.read64(base) != BOX_MAGIC {
-        return None;
-    }
-    let generation = mem.read64(base + BOX_GEN_OFF);
-    let written = mem.read64(base + BOX_POS_OFF);
-    let ring = mem.read64(base + BOX_RING_OFF);
-    mem.write64(base, 0);
-    mem.clean_inv(base, 8);
-    if ring != BOX_RING || generation == 0 {
-        return None;
-    }
-    let n = written.min(BOX_RING).min(out.len() as u64);
-    let len = usize::try_from(n).ok()?;
-    let start = written.wrapping_sub(n) % BOX_RING;
-    let first = usize::try_from(BOX_RING - start)
-        .unwrap_or(usize::MAX)
-        .min(len);
-    let data = base + BOX_HEAD;
-    let (x, y) = out.get_mut(..len)?.split_at_mut(first);
-    read_bytes(mem, data + start, x);
-    read_bytes(mem, data, y);
-    Some(BoxTail {
-        generation,
-        len,
-        written,
-    })
-}
-
-/// Leest bytes vanaf een willekeurig (ook niet-8-uitgelijnd) adres, per
-/// uitgelijnd woord: `PhysMem::copy_out` eist een uitgelijnd begin, en de
-/// staart van de ring begint waar hij begint. Een koud pad, 4 KiB.
-fn read_bytes(mem: &impl PhysMem, pa: u64, out: &mut [u8]) {
-    for (a, b) in (pa..).zip(out.iter_mut()) {
-        *b = (mem.read64(a & !7) >> (8 * (a & 7))) as u8;
     }
 }
 
@@ -1257,7 +1117,6 @@ mod tests {
         handoff_ptr_pa: 0x1000,
         stage_pa: 0x2000,
         own_ram_end: 0x10_0000,
-        black_box_pa: 0x4_0000,
     };
 
     #[test]
@@ -1429,110 +1288,6 @@ mod tests {
         assert_eq!(mem.read64(PLAN.stage_pa), 0);
         assert!(Stage::NetUp.describe().contains("network"));
     }
-    /// Geheugen dat bijhoudt welke woorden nog niet naar DRAM geveegd zijn:
-    /// een watchdog-reset spoelt geen cache, dus alles wat de doos schrijft
-    /// moet na de aanroep geveegd zijn.
-    #[derive(Default)]
-    struct Dirty {
-        mem: SparseMem,
-        dirty: std::collections::BTreeSet<u64>,
-    }
-
-    impl PhysMem for Dirty {
-        fn read64(&self, pa: u64) -> u64 {
-            self.mem.read64(pa)
-        }
-        fn write64(&mut self, pa: u64, v: u64) {
-            self.mem.write64(pa, v);
-            self.dirty.insert(pa);
-        }
-        fn clean_inv(&mut self, pa: u64, len: u64) {
-            // Per cacheregel van 64 bytes, zoals `dc civac`.
-            let (lo, hi) = (pa & !63, pa + len);
-            self.dirty
-                .retain(|w| *w + 8 <= lo || *w >= hi.next_multiple_of(64));
-        }
-    }
-
-    fn pattern(n: usize) -> Vec<u8> {
-        (0..n).map(|i| b'a' + (i % 26) as u8).collect()
-    }
-
-    #[test]
-    fn black_box_keeps_the_tail_and_is_read_once() {
-        let mut mem = Dirty::default();
-        let mut out = [0u8; BOX_SHOW];
-        // Nooit geopend: schrijven doet niets, lezen geeft niets.
-        box_write(&mut mem, &PLAN, b"lost");
-        assert!(mem.mem.0.is_empty(), "wrote into a box nobody opened");
-        assert_eq!(box_take(&mut mem, &PLAN, &mut out), None);
-
-        box_open(&mut mem, &PLAN, 3);
-        assert!(mem.dirty.is_empty(), "head not swept: {:x?}", mem.dirty);
-        // Oneven stukken op oneven adressen, tot ver voorbij de ring.
-        let all = pattern(40_000);
-        for chunk in all.chunks(97) {
-            box_write(&mut mem, &PLAN, chunk);
-            assert!(mem.dirty.is_empty(), "not swept: {:x?}", mem.dirty);
-        }
-        let t = box_take(&mut mem, &PLAN, &mut out).unwrap();
-        assert_eq!((t.generation, t.len, t.written), (3, BOX_SHOW, 40_000));
-        assert_eq!(&out[..], &all[all.len() - BOX_SHOW..]);
-        assert!(mem.dirty.is_empty(), "wipe not swept");
-        // Gelezen is gewist; ook schrijven komt er niet meer in.
-        assert_eq!(box_take(&mut mem, &PLAN, &mut out), None);
-        box_write(&mut mem, &PLAN, b"after");
-        assert_eq!(box_take(&mut mem, &PLAN, &mut out), None);
-    }
-
-    #[test]
-    fn black_box_short_and_oversized_writes() {
-        let mut mem = SparseMem::default();
-        let mut out = [0u8; BOX_SHOW];
-        box_open(&mut mem, &PLAN, 7);
-        box_write(&mut mem, &PLAN, b"flip: landed\n");
-        let t = box_take(&mut mem, &PLAN, &mut out).unwrap();
-        assert_eq!((t.generation, t.len, t.written), (7, 13, 13));
-        assert_eq!(&out[..t.len], b"flip: landed\n");
-        // Een verse doos na een oude: de oude inhoud telt niet meer mee.
-        box_open(&mut mem, &PLAN, 8);
-        box_write(&mut mem, &PLAN, b"x");
-        let big = pattern(BOX_RING as usize + 1000);
-        box_write(&mut mem, &PLAN, &big);
-        let mut all = [0u8; BOX_RING as usize];
-        let t = box_take(&mut mem, &PLAN, &mut all).unwrap();
-        assert_eq!((t.generation, t.len), (8, BOX_RING as usize));
-        assert_eq!(t.written, 1 + BOX_RING);
-        assert_eq!(&all[..], &big[1000..]);
-    }
-
-    #[test]
-    fn black_box_refuses_rubbish_and_a_board_without_one() {
-        let mut out = [0u8; 64];
-        // Rommel met toevallig de magic maar een andere ring, of zonder
-        // generatie: geen console, wel geconsumeerd.
-        for (ring, generation) in [(BOX_RING / 2, 1), (BOX_RING, 0)] {
-            let mut mem = SparseMem::default();
-            let base = PLAN.black_box_pa;
-            mem.write64(base, BOX_MAGIC);
-            mem.write64(base + BOX_GEN_OFF, generation);
-            mem.write64(base + BOX_POS_OFF, 40);
-            mem.write64(base + BOX_RING_OFF, ring);
-            assert_eq!(box_take(&mut mem, &PLAN, &mut out), None);
-            assert_eq!(mem.read64(base), 0, "rubbish not consumed");
-        }
-        // Geen plek: alles is een no-op.
-        let none = FlipPlan {
-            black_box_pa: 0,
-            ..PLAN
-        };
-        let mut mem = SparseMem::default();
-        box_open(&mut mem, &none, 2);
-        box_write(&mut mem, &none, b"nothing");
-        assert!(mem.0.is_empty());
-        assert_eq!(box_take(&mut mem, &none, &mut out), None);
-    }
-
     /// Een minimale ELF64 met één PT_LOAD: `code` op `paddr`, `memsz` groot.
     fn mini_elf(entry: u64, paddr: u64, code: &[u8], memsz: u64) -> Vec<u8> {
         let mut e = vec![0u8; 128];

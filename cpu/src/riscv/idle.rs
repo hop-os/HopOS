@@ -170,7 +170,6 @@ impl RvSleeper {
 
 impl Sleeper for RvSleeper {
     fn sleep(&mut self, now: u64, until: Option<u64>, ready: &dyn Fn() -> bool) {
-        crate::hopcost::mark(crate::hopcost::SLEEP);
         let prev = csr::mask();
         if ready() {
             csr::restore(prev);

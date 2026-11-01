@@ -205,14 +205,12 @@ impl OsCore {
         let mie = csr::mie();
         self.clint.set_timecmp(self.hart, deadline);
         csr::mie_set(BACK);
-        crate::hopcost::mark(crate::hopcost::ENTER);
         let cause = arch::enter(
             ctx.0,
             u64::from(fresh),
             SAVE.as_ptr() as u64,
             u64::from(flush),
         );
-        crate::hopcost::mark(crate::hopcost::BACK);
         csr::mie_clear(BACK);
         csr::mie_set(mie & BACK);
         self.clint.set_timecmp(self.hart, NEVER);
@@ -535,9 +533,6 @@ __hopos_os_enter:
     .option push
     .option arch, +f, +d
     beqz a1, 2f
-"#,
-            crate::hopcost::rv_in!(),
-            r#"
     // Koud: de ingang, a0 = het argument, alle andere registers nul (geen
     // kern-adres en niets van een voorganger lekt de kooi in).
     .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
@@ -604,9 +599,6 @@ __hopos_os_enter:
     csrc mstatus, t0
     li t0, 1 << 11
     csrs mstatus, t0
-"#,
-            crate::hopcost::rv_in!(),
-            r#"
     mv x31, a0
     ld x1, {gprs}+0(x31)
     ld x2, {gprs}+8(x31)
@@ -651,9 +643,6 @@ __hopos_os_trap:
     sd t0, {sscratch}+0(sp)
     sd t1, {sscratch}+8(sp)
     sd t2, {sscratch}+16(sp)
-"#,
-            crate::hopcost::rv_out!(),
-            r#"
     ld t0, {sctx}(sp)
     sd x1, {gprs}+0(t0)
     csrr t1, mscratch

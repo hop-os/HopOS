@@ -102,8 +102,9 @@ pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline (Normal, want het laadvenster is RAM).
 pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 
-/// De zwarte doos van de kern-flip (`kern::kernflip`, de tee van de
-/// console): de 32 KiB direct onder het handoff-blob, boven de trampoline.
+/// De zwarte doos: de console-ring van de kern (`kern::conport`, hopos
+/// conport.rs), die een flip en een reset overleeft: de 32 KiB direct onder
+/// het handoff-blob, boven de trampoline.
 /// Die pagina's liggen met de recorder in hetzelfde gat van de
 /// boot-scratch, en daar schrijft alleen de flip: de recorder en de
 /// trampoline eronder, het blob erboven.

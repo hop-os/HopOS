@@ -98,8 +98,8 @@ pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline van de sprong.
 pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 
-/// Geen zwarte doos van de kern-flip: nog geen plek die bewezen een reset
-/// overleeft (de LicheeRV legt zijn kooien in dezelfde staart).
+/// Geen zwarte doos: nog geen plek die bewezen een reset overleeft, dus de
+/// console-ring van de kern staat hier in .bss (hopos conport.rs) (de LicheeRV legt zijn kooien in dezelfde staart).
 pub const BLACK_BOX: Region = Region::new(0, 0);
 /// De uit-stub van een app-hart (`cpu::riscv::switch::off_stub`): een
 /// eigen pagina, want het hart wacht er nog terwijl de trampoline op

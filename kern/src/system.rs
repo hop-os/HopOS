@@ -81,13 +81,10 @@ use alloc::vec::Vec;
 use bounded::BoundedVec;
 use core::fmt;
 use core::future::Future;
-use core::sync::atomic::{
-    AtomicBool,
-    Ordering::{AcqRel, Relaxed},
-};
+use core::sync::atomic::{AtomicBool, Ordering::AcqRel};
 use core::time::Duration;
 use sync::mpsc::Mailbox;
-use sync::{Either, LocalCell, select};
+use sync::{Either, LocalCell, Signal, select};
 
 // De framing, de kop van een call en het adresplan zijn van `abi`: de kern
 // codeert ze met dezelfde encoders als applib (review 01-10, "abi als
@@ -115,20 +112,6 @@ pub const MAX_HEAD: usize = 64 << 10;
 pub const LOG_RING_BYTES: usize = 2048;
 /// De langste regel in die ring; langer wordt afgekapt.
 pub const LOG_LINE_MAX: usize = 256;
-/// De ring van de kern zelf voor `NEXT_LOG` 0 ([`KernLog`]), in bytes.
-///
-/// Ruimer dan die van een app, want de kern praat meer, en de bootregels
-/// moeten er nog staan als Hop opkomt en pompt: tot `HOP_UP` zet de kern
-/// 16 KB op zijn console (QEMU virt, 23-10; de Pi 5 10 KB, 30-09), en met
-/// `hopos.tick=1` komt er elke seconde een `HOPOS_TICK` van 380 bytes bij.
-/// 64 KiB houdt de boot plus ruim twee minuten tikken vast. In .bss en niet
-/// op de heap, omdat de kern al logt vóór er een heap is (de bunny, de
-/// firmware-regel); op het kleinste board (de LicheeRV, 40 MB kern-RAM) is
-/// het 0,16 % van de kern-RAM.
-pub const KERN_LOG_BYTES: usize = 64 << 10;
-/// De langste regel van de kern in die ring; de langste op de console van
-/// 23-10 was 382 bytes (de env van Hop, een `HOPOS_TICK`).
-pub const KERN_LINE_MAX: usize = 512;
 /// Hoe vaak een wachtende verbinding kijkt of haar levensduur nog loopt.
 ///
 /// De stopbel van de servicer heeft één wachter (de servicer zelf), dus een
@@ -369,45 +352,38 @@ fn refuse(out: &mut [u8], op: u8, seq: u32, status: u16, text: &[u8]) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Eén ring van logregels: `[len u16][bytes]`, de oudste valt eruit; de
-/// schrijver wacht op niemand. De opslag `B` bepaalt de maat: een `Vec`
-/// die pas bij de eerste regel komt (de ring van een app, [`SlotLogs`]:
-/// een slot dat nooit logt kost niets), of een vaste array in .bss (de
-/// ring van de kern, [`KernLog`]: die logt al vóór er een heap is). Een
-/// lege opslag neemt niets aan.
+/// schrijver wacht op niemand. De buffer komt pas bij de eerste regel: een
+/// slot dat nooit logt kost niets.
 #[derive(Debug, Default)]
-struct LineRing<B> {
-    buf: B,
+struct LineRing {
+    buf: Vec<u8>,
     /// De leespositie.
     head: usize,
     /// Het aantal bezette bytes.
     used: usize,
 }
 
-impl<B: AsRef<[u8]> + AsMut<[u8]>> LineRing<B> {
-    const fn with(buf: B) -> LineRing<B> {
+impl LineRing {
+    const fn new() -> LineRing {
         LineRing {
-            buf,
+            buf: Vec::new(),
             head: 0,
             used: 0,
         }
     }
 
     fn cap(&self) -> usize {
-        self.buf.as_ref().len()
+        self.buf.len()
     }
 
     fn byte(&self, i: usize) -> u8 {
         let cap = self.cap().max(1);
-        self.buf
-            .as_ref()
-            .get((self.head + i) % cap)
-            .copied()
-            .unwrap_or(0)
+        self.buf.get((self.head + i) % cap).copied().unwrap_or(0)
     }
 
     fn put(&mut self, at: usize, b: u8) {
         let cap = self.cap().max(1);
-        if let Some(x) = self.buf.as_mut().get_mut(at % cap) {
+        if let Some(x) = self.buf.get_mut(at % cap) {
             *x = b;
         }
     }
@@ -461,12 +437,6 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> LineRing<B> {
         self.head = 0;
         self.used = 0;
     }
-}
-
-impl LineRing<Vec<u8>> {
-    const fn new() -> LineRing<Vec<u8>> {
-        LineRing::with(Vec::new())
-    }
 
     /// Een regel van een app: de buffer komt bij de eerste (faalbaar).
     fn push_app(&mut self, line: &[u8]) {
@@ -487,7 +457,9 @@ impl LineRing<Vec<u8>> {
 /// [`LogTee`], de system-API leest; elke lening duurt één regel, zonder
 /// `.await`. Vol is de oudste regel eruit; niets blokkeert.
 pub struct SlotLogs {
-    rings: LocalCell<[LineRing<Vec<u8>>; SLOT_CAP + 1]>,
+    rings: LocalCell<[LineRing; SLOT_CAP + 1]>,
+    /// Een nieuwe regel voor Hop (`NEXT_STORE` met `NEXT_STORE_LOGS`).
+    news: Signal,
 }
 
 impl SlotLogs {
@@ -496,6 +468,7 @@ impl SlotLogs {
     pub const fn new() -> SlotLogs {
         SlotLogs {
             rings: LocalCell::cell([const { LineRing::new() }; SLOT_CAP + 1]),
+            news: Signal::new(),
         }
     }
 
@@ -504,6 +477,12 @@ impl SlotLogs {
         if let Some(r) = self.rings.borrow_mut().get_mut(slot.get()) {
             r.push_app(line);
         }
+        self.news.set();
+    }
+
+    /// De bel voor Hop: er kwam een regel bij sinds hij hem nam.
+    pub fn news(&self) -> &Signal {
+        &self.news
     }
 
     /// Haalt de oudste regel van `slot` in `dst` (afgekapt op de lengte van
@@ -549,98 +528,6 @@ impl<C: Console> Console for LogTee<'_, C> {
     fn app_line(&self, slot: Slot, line: &[u8]) {
         self.logs.push(slot, line);
         self.inner.app_line(slot, line);
-    }
-}
-
-/// De console van de kern zelf, regel voor regel, voor `NEXT_LOG` 0: Hop
-/// toont hem naast die van zijn apps.
-///
-/// Gevuld door de console-sink van de kern-binary (de tee achter de UART,
-/// waar ook de TCP-console zijn bytes krijgt) met [`KernLog::feed`]: de
-/// bytes komen in stukken, dus deze ring zet ze tot regels. De regels van
-/// de apps (de kern zet ze op zijn console als `slot N: ...`) horen er
-/// niet in: die haalt Hop al per slot uit [`SlotLogs`]. Hun schrijver zet
-/// [`KernLog::app`] rond die ene regel; aan een voorvoegsel zijn ze niet
-/// te herkennen, want de kern schrijft zelf ook `slot N:`-regels.
-///
-/// Een leesbare tabel (handboek §1.1) op de OS-core: de tee schrijft, de
-/// system-API leest, elke lening één aanroep; een lening die al loopt (een
-/// noodregel midden in een regel) slaat de ring over. Vol is de oudste
-/// regel eruit; de schrijver wacht op niemand. `N` is de maat, standaard
-/// [`KERN_LOG_BYTES`] (een parameter, zodat de ring als `const` in een
-/// `static` kan zonder een array van 64 KiB in een functie).
-pub struct KernLog<const N: usize = KERN_LOG_BYTES> {
-    lines: LocalCell<KernLines<N>>,
-    /// De regel die nu binnenkomt, is van een app.
-    app: AtomicBool,
-}
-
-/// De ring van [`KernLog`] en de regel die nog niet af is.
-struct KernLines<const N: usize> {
-    ring: LineRing<[u8; N]>,
-    line: [u8; KERN_LINE_MAX],
-    len: usize,
-}
-
-impl<const N: usize> KernLog<N> {
-    /// Een lege ring, voor in een `static` (.bss).
-    #[must_use]
-    pub const fn new() -> KernLog<N> {
-        const { assert!(KERN_LINE_MAX + 2 <= N) };
-        KernLog {
-            lines: LocalCell::cell(KernLines {
-                ring: LineRing::with([0; N]),
-                line: [0; KERN_LINE_MAX],
-                len: 0,
-            }),
-            app: AtomicBool::new(false),
-        }
-    }
-
-    /// Voert bytes van de console in. Een regel is af bij `\n` en gaat
-    /// dan de ring in, tenzij hij van een app is of leeg; langer dan
-    /// [`KERN_LINE_MAX`] wordt afgekapt.
-    pub fn feed(&self, b: &[u8]) {
-        let Ok(mut l) = self.lines.try_borrow_mut() else {
-            return;
-        };
-        let KernLines { ring, line, len } = &mut *l;
-        for &c in b {
-            match c {
-                b'\n' => {
-                    if *len > 0 && !self.app.load(Relaxed) {
-                        ring.push(line.get(..*len).unwrap_or(&[]), KERN_LINE_MAX);
-                    }
-                    *len = 0;
-                }
-                b'\r' => {}
-                _ => {
-                    if let Some(x) = line.get_mut(*len) {
-                        *x = c;
-                        *len += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Markeert de regels die nu komen als die van een app (`true`) of
-    /// weer van de kern (`false`); de schrijver van een app-regel zet hem
-    /// eromheen.
-    pub fn app(&self, on: bool) {
-        self.app.store(on, Relaxed);
-    }
-
-    /// Haalt de oudste regel in `dst` (afgekapt op de lengte van `dst`);
-    /// `None` als er niets klaarstaat.
-    pub fn pop(&self, dst: &mut [u8]) -> Option<usize> {
-        self.lines.try_borrow_mut().ok()?.ring.pop(dst)
-    }
-}
-
-impl<const N: usize> Default for KernLog<N> {
-    fn default() -> Self {
-        KernLog::new()
     }
 }
 
@@ -1554,7 +1441,7 @@ pub struct System<'i, 'r, const N: usize> {
     /// lezer ziet het oude of het nieuwe blob, nooit een mengsel.
     state: LocalCell<Vec<u8>>,
     logs: Option<&'i SlotLogs>,
-    kern_log: Option<&'i KernLog>,
+    console: Option<&'i crate::conport::Ring>,
     fs: Option<&'i FsInbox<'r>>,
     devices: Option<&'i crate::deviceabi::Inbox<'r>>,
     store: Option<&'i crate::store::StoreQueue>,
@@ -1578,7 +1465,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             streams: LocalCell::cell([const { None }; MAX_STREAMS]),
             state: LocalCell::cell(Vec::new()),
             logs: None,
-            kern_log: None,
+            console: None,
             fs: None,
             devices: None,
             store: None,
@@ -1611,12 +1498,12 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         self
     }
 
-    /// Koppelt de ring van de kern zelf voor `NEXT_LOG` 0 (gevuld door de
-    /// console-sink, [`KernLog::feed`]). Zonder ring antwoordt `NEXT_LOG` 0
-    /// altijd leeg.
+    /// Koppelt de console van de kern voor `NEXT_LOG` 0
+    /// ([`crate::conport::Ring::hop_line`]). Zonder ring antwoordt
+    /// `NEXT_LOG` 0 altijd leeg.
     #[must_use]
-    pub const fn with_kern_log(mut self, log: &'i KernLog) -> Self {
-        self.kern_log = Some(log);
+    pub const fn with_console(mut self, console: &'i crate::conport::Ring) -> Self {
+        self.console = Some(console);
         self
     }
 
@@ -1880,6 +1767,10 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             reply,
             timer,
             log,
+            news: [
+                self.console.map(crate::conport::Ring::news),
+                self.logs.map(SlotLogs::news),
+            ],
         };
         crate::store::serve(&cx, h, buf, out).await
     }
@@ -1941,7 +1832,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 let dst = data.get_mut(..max).unwrap_or(&mut []);
                 // Slot 0 is de kern zelf, zoals bij SLOT_STATUS.
                 let line = if c.off == 0 {
-                    self.kern_log.and_then(|k| k.pop(dst))
+                    self.console.and_then(|k| k.hop_line(dst))
                 } else {
                     let slot = target(c)?;
                     self.logs.and_then(|l| l.pop(slot, dst))
@@ -4135,61 +4026,17 @@ mod tests {
     }
 
     #[test]
-    fn the_kern_log_makes_lines_and_leaves_the_apps_out() {
-        let log: std::boxed::Box<KernLog> = std::boxed::Box::default();
-        let mut buf = [0u8; KERN_LINE_MAX + 8];
-        assert_eq!(log.pop(&mut buf), None);
-        // In stukken, zoals `println!` ze levert; lege regels en `\r` vallen weg.
-        log.feed(b"boot: HopOS v3 ");
-        log.feed(b"HOPOS_BOOT gen=1\r\n\nslot 1: stopped HOPOS_SLOT_STOPPED\n");
-        // Een regel van een app (de kern zet hem als `slot N:` op zijn
-        // console) komt er niet in; een eigen `slot N:`-regel wel.
-        log.app(true);
-        log.feed(b"slot 2: welcome: serving\n");
-        log.app(false);
-        log.feed(b"half");
-        assert_eq!(log.pop(&mut buf), Some(31));
-        assert_eq!(&buf[..31], b"boot: HopOS v3 HOPOS_BOOT gen=1");
-        let own = b"slot 1: stopped HOPOS_SLOT_STOPPED";
-        assert_eq!(log.pop(&mut buf), Some(own.len()));
-        assert_eq!(&buf[..own.len()], own);
-        assert_eq!(log.pop(&mut buf), None, "a half line is not a line");
-        log.feed(b" done\n");
-        assert_eq!(log.pop(&mut buf), Some(9));
-        assert_eq!(&buf[..9], b"half done");
-        // Te lang: afgekapt; vol: de oudste eruit, de nieuwste blijven.
-        log.feed(&[b'x'; KERN_LINE_MAX + 100]);
-        log.feed(b"\n");
-        assert_eq!(log.pop(&mut buf), Some(KERN_LINE_MAX));
-        for i in 0..2000u32 {
-            log.feed(std::format!("HOPOS_TICK {i:05} {}\n", "y".repeat(40)).as_bytes());
-        }
-        let mut last = None;
-        let mut n = 0;
-        while let Some(k) = log.pop(&mut buf) {
-            last = Some(std::string::String::from_utf8_lossy(&buf[..k]).into_owned());
-            n += 1;
-        }
-        assert!(last.unwrap().starts_with("HOPOS_TICK 01999 "));
-        assert_eq!(
-            n,
-            KERN_LOG_BYTES / (57 + 2),
-            "the ring holds the newest lines"
-        );
-    }
-
-    #[test]
     fn next_log_zero_is_the_console_of_the_kern_and_privileged() {
         let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
         let tee = LogTee::new(&con, &logs);
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let kern: std::boxed::Box<KernLog> = std::boxed::Box::default();
+        let kern = crate::conport::tests::ring(256);
         let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8)
             .with_logs(&logs)
-            .with_kern_log(&kern);
-        kern.feed(b"net: 10.0.2.15 HOPOS_NET_UP\n");
+            .with_console(&kern);
+        kern.append(b"net: 10.0.2.15 HOPOS_NET_UP\n");
         logs.push(s(2), b"an app line");
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         // Een app mag hem niet lezen.
@@ -4207,7 +4054,7 @@ mod tests {
                 op(PrivOp::NextLog, 4, 0, 3),
             ],
         );
-        kern.feed(b"second line\n");
+        kern.append(b"second line\n");
         let _ = drive(
             &sys, &mut a, &inbox, &reply, &mut hop, &mut mem, &hooks, &tee, None,
         );
@@ -4215,7 +4062,7 @@ mod tests {
         assert_eq!((res[0].1, res[0].3), (STATUS_OK, 1));
         assert_eq!(&res[0].4[..], b"net: 10.0.2.15 HOPOS_NET_UP");
         assert_eq!(&res[1].4[..], b"second line");
-        // Slot 2 houdt zijn eigen ring: de kern-ring kent die regel niet.
+        // Slot 2 houdt zijn eigen ring.
         assert_eq!(&res[2].4[..], b"an app line");
         assert_eq!((res[3].1, res[3].3), (STATUS_OK, 0), "drained");
     }

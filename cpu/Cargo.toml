@@ -18,9 +18,6 @@ bounded = { path = "../bounded" }
 # LicheeRV-board zet hem aan; op QEMU zijn het ongeldige instructies.
 [features]
 thead = ["dev/thead"]
-# De tijdelijke meetlat van een hop tussen twee bewoners van de OS-core
-# (hopcost.rs); niet in productie.
-hopcost = []
 
 [lints]
 workspace = true

@@ -160,8 +160,7 @@ impl core::fmt::Display for DevStats {
 }
 
 /// Zoekt de schijf van het board, één keer voor de hele boot: `probe_disk`
-/// mag maar één keer, en de schijf gaat eerst langs de bench (bench.rs)
-/// en dan naar [`start`]. Geen schijf of een fout is één regel en `None`:
+/// mag maar één keer, en de schijf gaat naar [`start`]. Geen schijf of een fout is één regel en `None`:
 /// de node draait door en weigert elke bestandscall luid.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn probe() -> Option<Disk> {

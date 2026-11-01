@@ -26,11 +26,10 @@
 #                                            bij STAGE=): de eerste bewoner,
 #                                            in slot 1 met de bevoegdheid,
 #                                            zoals op elk board (de release)
-#   FEATURES=hopcost image/licheerv-agent.sh
+#   FEATURES=gui image/licheerv-agent.sh
 #                                          → met die features van hopos
 #                                            achter board-licheerv (zoals
-#                                            uefi-run.sh; hopcost: de meetlat
-#                                            van een hop op de OS-core)
+#                                            uefi-run.sh)
 #   APP=appspike image/licheerv-agent.sh   → met appspike in de kern
 #                                            gebakken als app (ROLE=app): de
 #                                            kern plaatst hem bij de boot

@@ -14,13 +14,6 @@ bench = false
 
 [features]
 default = []
-# De schijf-bench vast aan, voor een meetkern die je flipt zonder de
-# kernregel op de stick aan te raken (anders: hopos.nvmebench=1).
-nvmebench = []
-# De watchdogtoets: na een minuut stopt de kern Hop en pet hij niet meer;
-# de hardware-watchdog moet de node terugzetten op de kern van de kaart of
-# stick. Alleen voor een meetkern die je flipt.
-wdtest = []
 board-qemuvirt = ["dep:board-qemuvirt"]
 # De Pi's (board/raspi): image/rpi4.sh en image/rpi5.sh bouwen er een
 # kaart-image van; `link-raspi.ld` in plaats van `link.ld` (build.rs).
@@ -122,9 +115,6 @@ media = [
     "board-o6n?/media",
 ]
 
-# De meetlat van een hop tussen twee bewoners van de OS-core (cpu/src/hopcost.rs):
-# per rondreis de vijf fasen op de console (HOPOS_HOPCOST). Niet in productie.
-hopcost = ["cpu/hopcost"]
 
 # Alleen wat de binary gebruikt (een ongebruikte dep bouwt alleen mee).
 [dependencies]

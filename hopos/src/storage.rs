@@ -95,13 +95,6 @@ pub(crate) async fn freeze_for_flip(
     }
 }
 
-/// De flip ging niet door: de actor weer open. `false` als het bericht de
-/// actor niet bereikte (volle brievenbus).
-#[must_use]
-pub(crate) fn thaw_after_flip() -> bool {
-    !is_up() || rpc::thaw(&FS_INBOX)
-}
-
 /// De klok en de timers van de executor als `blkdev::Pace`: waarop de
 /// hopfs-actor tijdens een blok-verzoek wacht.
 pub(crate) struct ExecPace(pub(crate) &'static Executor);
@@ -187,7 +180,11 @@ pub(crate) type DiskQueue = Queue<Disk, ExecPace>;
 /// `Board::wire_disk`); zonder schijf draait de node door en weigert elke
 /// bestandscall luid (de regel gaf [`probe`] al).
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
-pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'static DiskQueue> {
+pub(crate) fn start(
+    exec: &'static Executor,
+    disk: Option<Disk>,
+    keep: bool,
+) -> Option<&'static DiskQueue> {
     let board = &crate::BOARD;
     let disk = disk?;
     let sectors = blkdev::Disk::sectors(&disk);
@@ -210,11 +207,8 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'sta
     // staan.
     // De default is stateless: bij een koude boot wordt het indexbestand
     // genegeerd en begint de boom leeg. Alleen `hopos.storage=stateful`
-    // laadt hem. Een flip-landing (een gevonden overdracht, warm of koud)
-    // houdt altijd de boom van de vorige kern; een firmware-boot niet, ook
-    // niet op riscv waar elke boot als sprong telt (`flip::jumped`).
-    let stateless =
-        crate::BOARD.boot_param("hopos.storage") != "stateful" && !crate::flip::landed();
+    // laadt hem, en `keep`: de boom die de vorige kern vastlegde (de flip).
+    let stateless = crate::BOARD.boot_param("hopos.storage") != "stateful" && !keep;
     if stateless {
         println!(
             "hopfs: stateless (hopos.storage), the index is ignored and the tree starts empty HOPOS_FS_STATELESS"

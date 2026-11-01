@@ -39,6 +39,7 @@ use core::time::Duration;
 use cpu::println;
 use dev::Pa;
 use executor::{Clock, Executor, Sleeper};
+use kern::kernflip;
 use kern::slots::Reply;
 use kern::system::{Admitted, Conn, End, MAX_HOP_CONNS, MAX_IO_CHUNK, MAX_PAYLOAD};
 use leandhcp::{Action, Client, Instant, KeepAction, Keeper, Lease};
@@ -48,11 +49,11 @@ use net::nat::{Neighbors, Uplink};
 use net::plan::MAX_LAN_FRAME;
 use net::pump::Pump;
 use net::ring::{AbiTx, KIND_UPLINK, Reader as _, Writer as _};
-use net::switch::{self, Ack, Command, Commands, Doorbell, Published, Switch, Wiring};
+use net::switch::{self, Ack, Command, Commands, Doorbell, NatReply, Published, Switch, Wiring};
 use net::{Egress, Ingress, Stats};
 use netdev::Device;
 use sync::mpsc::Mailbox;
-use sync::{Doors, Either, LocalCell, Signal, select};
+use sync::{Doors, Either, LocalCell, Signal, Stop, select};
 
 /// De leeskant van een ring zoals de switch en poort 0 hem zien.
 type RingRx = AbiTx;
@@ -134,6 +135,13 @@ static SWITCH_UP: AtomicBool = AtomicBool::new(false);
 /// De node-stack, gezet door de host-taak na de lease. Zie de moduledoc
 /// voor waarom dit een `LocalCell` is en geen actor.
 static STACK: LocalCell<Option<Stack>> = LocalCell::cell(None);
+/// De lease zoals de keeper hem houdt, met de tellerstand van zijn laatste
+/// ACK: wat de kern-flip meegeeft ([`capture`]). Eén schrijver, de keeper.
+static LEASE: LocalCell<Option<(Lease, u64)>> = LocalCell::cell(None);
+/// De system-listener luistert: de stap na het net in de bootreeks. De
+/// plaatsing van Hop wacht hierop (`slots.rs`), dus de listener staat er
+/// vóór Hop zijn eerste call doet.
+pub(crate) static NET_READY: Stop = Stop::new();
 
 /// De datacapaciteit van elk van de twee host-ringen: die van een slot-ring,
 /// zodat een burst van een app en een jumboframe (64 KB, hoogstens de halve
@@ -261,6 +269,19 @@ pub(crate) struct Params {
     pub(crate) resident: fn(usize) -> bool,
 }
 
+/// Het net van de vorige kern (de warme flip): de lease, de gepubliceerde
+/// poorten van de bewoners (`(slot, poort)`) en de conntrack. De switch
+/// neemt het over vóór zijn eerste ronde, de host-taak slaat DHCP over.
+pub(crate) struct Carried {
+    /// De lease van de uplink; `None` (een vorige kern die hem niet
+    /// meegaf): DHCP, zoals bij een koude boot.
+    pub(crate) lease: Option<kernflip::Lease>,
+    /// De poorten die open stonden.
+    pub(crate) ports: Vec<(usize, u16)>,
+    /// De flows door de masquerade.
+    pub(crate) nat: abi::NatState<Vec<abi::FlowState>>,
+}
+
 /// Wat de system-listener van de lifecycle-kant krijgt: de system-API en de
 /// lijm die `serve` vraagt, alle `static` (alle verbindingstaken lenen ze).
 pub(crate) struct SystemApi {
@@ -306,11 +327,16 @@ impl fmt::Display for Error {
 /// handboek §4 (de pompen eerst): de RX-pomp, de switch, de flow-expiry, de
 /// host-taak. De host-taak haalt de lease, zet de stack op en spawnt dan de
 /// DHCP-keeper en de system-listener.
+///
+/// Met `carried` (het net van de vorige kern) begint de switch niet leeg
+/// maar met diens uplink, poorten en conntrack, en neemt de host-taak de
+/// lease over in plaats van DHCP.
 pub(crate) fn start<D: Device + 'static>(
     exec: &'static Executor,
     nic: D,
     p: Params,
     api: SystemApi,
+    carried: Option<Carried>,
 ) -> Result<(), Error> {
     let mac = nic.mac().0;
     let [a, b, c, d, e, f] = mac;
@@ -349,6 +375,10 @@ pub(crate) fn start<D: Device + 'static>(
     )
     .map_err(Error::Net)?;
     sw.attach_host(sw_tx, sw_rx);
+    let lease = match carried {
+        Some(c) => restore(&mut sw, c, mac)?,
+        None => None,
+    };
 
     // De stop van de switch ([`net::switch::Xoff`]): de pomp opent hem als
     // de NIC weer frames neemt.
@@ -394,10 +424,100 @@ pub(crate) fn start<D: Device + 'static>(
         tx: hop_tx,
         buf: host_buf,
     };
-    exec.spawn(node.run(api))
+    exec.spawn(node.run(api, lease))
         .map_err(|_| Error::Spawn("host"))?;
     Ok(())
 }
+
+/// Geeft de switch het net van de vorige kern terug, vóór zijn eerste
+/// ronde, en de lease voor de host-taak.
+fn restore(
+    sw: &mut Switch<'static, RingRx, RingTx>,
+    c: Carried,
+    mac: [u8; 6],
+) -> Result<Option<(Lease, u64)>, Error> {
+    let lease = c.lease.as_ref().map(from_carried);
+    let uplink = match &lease {
+        Some((l, _)) => Some(
+            Uplink::new(u32::from(l.ip), l.cidr().prefix, mac, u32::from(l.gateway))
+                .map_err(Error::Net)?,
+        ),
+        None => None,
+    };
+    let nat = abi::NatState {
+        flows: c.nat.flows.as_slice(),
+        masq_next: c.nat.masq_next,
+    };
+    let n = sw.restore(uplink, &c.ports, &nat).map_err(Error::Net)?;
+    println!(
+        "net: carried over: lease {}, {} published port(s), {n} of {} NAT flow(s) HOPOS_NET_CARRIED flows={n} of={}",
+        Ipv4Addr::from(c.lease.map_or(0, |l| l.ip)),
+        c.ports.len(),
+        c.nat.flows.len(),
+        c.nat.flows.len()
+    );
+    Ok(lease)
+}
+
+/// De lease uit het blob, en de tellerstand van zijn ACK.
+fn from_carried(l: &kernflip::Lease) -> (Lease, u64) {
+    let [lease_secs, t1_secs, t2_secs] = l.secs;
+    let lease = Lease {
+        ip: Ipv4Addr::from(l.ip),
+        mask: Ipv4Addr::from(l.mask),
+        gateway: Ipv4Addr::from(l.gateway),
+        dns: Ipv4Addr::from(l.dns),
+        server: Ipv4Addr::from(l.server),
+        lease_secs,
+        t1_secs,
+        t2_secs,
+    };
+    (lease, l.bound_ns)
+}
+
+/// De lease en de conntrack voor de kern-flip. De vangst zet de masquerade
+/// dicht (`net::switch::Command::CaptureNat`). Zonder switch (geen NIC)
+/// niets; een switch die niet binnen `wait` antwoordt, is een fout.
+pub(crate) async fn capture(
+    exec: &'static Executor,
+    wait: Duration,
+) -> Result<(Option<kernflip::Lease>, abi::NatState<Vec<abi::FlowState>>), &'static str> {
+    if !switch_up() {
+        return Ok((None, abi::NatState::default()));
+    }
+    let lease = LEASE.borrow().map(|(l, bound_ns)| kernflip::Lease {
+        ip: u32::from(l.ip),
+        mask: u32::from(l.mask),
+        gateway: u32::from(l.gateway),
+        dns: u32::from(l.dns),
+        server: u32::from(l.server),
+        secs: [l.lease_secs, l.t1_secs, l.t2_secs],
+        bound_ns,
+    });
+    let mut buf: Vec<abi::FlowState> = Vec::new();
+    if buf.try_reserve_exact(net::MAX_FLOWS).is_err() {
+        return Err("out of memory for the conntrack buffer");
+    }
+    buf.resize(net::MAX_FLOWS, abi::FlowState::default());
+    let cmd = Command::CaptureNat {
+        buf,
+        reply: &NAT_REPLY,
+    };
+    match select(
+        sync::oneshot::call(&COMMANDS, &NAT_REPLY, cmd),
+        exec.after(wait),
+    )
+    .await
+    {
+        Either::Left(Ok(nat)) => Ok((lease, nat)),
+        Either::Left(Err(_)) => Err("switch mailbox full"),
+        Either::Right(()) => Err("the switch did not answer"),
+    }
+}
+
+/// De antwoordplek van [`capture`] bij de switch-actor (één aanroeper: de
+/// flip-taak).
+static NAT_REPLY: NatReply = NatReply::new();
 
 /// De console als `LogFn` voor de switch.
 fn log_line(args: fmt::Arguments<'_>) {
@@ -454,32 +574,25 @@ struct Node {
 }
 
 impl Node {
-    /// De levensloop: lease, uplink, stack, keeper en listener, en dan de
-    /// lus van poort 0 tot de stop.
-    async fn run(mut self, api: SystemApi) {
+    /// De levensloop, in één reeks: de lease, de uplink, de stack, de
+    /// keeper en de listeners, en dan de lus van poort 0 tot de stop. Met
+    /// een meegegeven lease (de warme flip) geen DHCP en geen `SetUplink`:
+    /// de switch kreeg de uplink al in [`restore`]. Tot de listener luistert
+    /// staat er geen `.await` meer in de weg, dus hij staat er vóór Hop een
+    /// beurt krijgt.
+    async fn run(mut self, api: SystemApi, carried: Option<(Lease, u64)>) {
         let exec = self.exec;
-        let lease = self.lease().await;
-        let cidr = lease.cidr();
-        let ip = u32::from(lease.ip);
         let mac = self.mac;
-
-        // De switch moet het externe adres kennen vóór de stack praat: pas
-        // dan scheidt de NAT gepubliceerde poorten en masquerade-flows van
-        // verkeer voor de node zelf.
-        match Uplink::new(ip, cidr.prefix, mac, u32::from(lease.gateway)) {
-            Ok(uplink) => {
-                let cmd = Command::SetUplink {
-                    uplink,
-                    ack: &UPLINK_ACK,
-                };
-                match sync::oneshot::call(&COMMANDS, &UPLINK_ACK, cmd).await {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => println!("net: switch refused the uplink: {e} HOPOS_NET_FAIL"),
-                    Err(_) => println!("net: switch mailbox full, uplink not set HOPOS_NET_FAIL"),
-                }
+        let (lease, bound) = match carried {
+            Some(c) => c,
+            None => {
+                let lease = self.lease().await;
+                let bound = exec.now();
+                set_uplink(&lease, mac).await;
+                (lease, bound)
             }
-            Err(e) => println!("net: uplink /{}: {e} HOPOS_NET_FAIL", cidr.prefix),
-        }
+        };
+        let ip = u32::from(lease.ip);
 
         let stack = match Stack::new(stack_config(&lease, mac), iss_seed(exec, mac)) {
             Ok(s) => s,
@@ -498,13 +611,22 @@ impl Node {
             lease.gateway
         );
 
-        if exec.spawn(keep_lease(exec, mac, lease)).is_err() {
+        *LEASE.borrow_mut() = Some((lease, bound));
+        if exec.spawn(keep_lease(exec, mac, lease, bound)).is_err() {
             println!("net: dhcp keeper not spawned, the lease will lapse HOPOS_DHCP_LOST");
             crate::watchdog::request_reset("dhcp keeper not spawned");
         }
-        if exec.spawn(system_listener(exec, lease.ip, api)).is_err() {
-            println!("system: listener not spawned HOPOS_SYSTEM_FAIL");
+        // De listen-socket hier, vóór de lus van poort 0: een SYN die al in
+        // de ring ligt (Hop na een warme flip) vindt hem dan.
+        match io(|st| st.tcp_listen(PORT)) {
+            Ok(l) => {
+                if exec.spawn(system_listener(exec, lease.ip, api, l)).is_err() {
+                    println!("system: listener not spawned HOPOS_SYSTEM_FAIL");
+                }
+            }
+            Err(e) => println!("system: listen on {PORT}: {e} HOPOS_SYSTEM_FAIL"),
         }
+        NET_READY.set();
         if crate::conport::enabled() {
             if exec.spawn(console_listener(exec, lease.ip)).is_err() {
                 println!("console: listener not spawned, serial line only HOPOS_CONPORT_FAIL");
@@ -594,6 +716,32 @@ impl Node {
                 }
             }
         }
+    }
+}
+
+/// De switch moet het externe adres kennen vóór de stack praat: pas dan
+/// scheidt de NAT gepubliceerde poorten en masquerade-flows van verkeer voor
+/// de node zelf.
+async fn set_uplink(lease: &Lease, mac: [u8; 6]) {
+    let cidr = lease.cidr();
+    match Uplink::new(
+        u32::from(lease.ip),
+        cidr.prefix,
+        mac,
+        u32::from(lease.gateway),
+    ) {
+        Ok(uplink) => {
+            let cmd = Command::SetUplink {
+                uplink,
+                ack: &UPLINK_ACK,
+            };
+            match sync::oneshot::call(&COMMANDS, &UPLINK_ACK, cmd).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => println!("net: switch refused the uplink: {e} HOPOS_NET_FAIL"),
+                Err(_) => println!("net: switch mailbox full, uplink not set HOPOS_NET_FAIL"),
+            }
+        }
+        Err(e) => println!("net: uplink /{}: {e} HOPOS_NET_FAIL", cidr.prefix),
     }
 }
 
@@ -763,7 +911,7 @@ fn poll_stack<T>(
 /// adresconflict: het adres blijft in gebruik en een keeper op een proeflease
 /// blijft rebinden tot een server het bevestigt. Alleen een NAK of een ander
 /// adres kost het adres.
-async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease) {
+async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease, bound: u64) {
     let now = || Instant::from_duration(Duration::from_nanos(exec.now()));
     let h = match io(|st| st.udp_bind(leandhcp::CLIENT_PORT)) {
         Ok(h) => h,
@@ -776,7 +924,11 @@ async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease) {
             return;
         }
     };
-    let mut k = Keeper::new(mac, lease, now());
+    let mut k = Keeper::new(
+        mac,
+        lease,
+        Instant::from_duration(Duration::from_nanos(bound)),
+    );
     // Gezet na het verlopen: de mislukte pogingen zwijgen tot de eerste ACK.
     let mut held = false;
     let mut out = [0u8; leannet::UDP_MAX_PAYLOAD];
@@ -792,8 +944,9 @@ async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease) {
             }
             Ok(KeepAction::Wait(until)) => Keep::Wait(until),
             Ok(KeepAction::Event(e)) => {
-                if matches!(e, leandhcp::Event::Extended { .. }) {
+                if let leandhcp::Event::Extended { lease, .. } = e {
                     held = false;
+                    *LEASE.borrow_mut() = Some((lease, exec.now()));
                 }
                 if !held {
                     println!("{e}");
@@ -821,6 +974,7 @@ async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease) {
                     ..*k.lease()
                 };
                 k = Keeper::new(mac, probe, now());
+                *LEASE.borrow_mut() = Some((probe, exec.now()));
                 continue;
             }
             Err(e) => {
@@ -911,14 +1065,7 @@ static DOORS: Doors<Job, SYSTEM_WORKERS> = Doors::new();
 /// [`MAX_SYSTEM_CONNS`]) en dan de verbinding naar een vrije taak uit de
 /// pool. De listener zelf leest nooit van een verbinding, dus hij staat
 /// altijd weer bij `accept`: een zwijgende peer houdt niemand op.
-async fn system_listener(exec: &'static Executor, ip: Ipv4Addr, api: SystemApi) {
-    let l = match io(|st| st.tcp_listen(PORT)) {
-        Ok(l) => l,
-        Err(e) => {
-            println!("system: listen on {PORT}: {e} HOPOS_SYSTEM_FAIL");
-            return;
-        }
-    };
+async fn system_listener(exec: &'static Executor, ip: Ipv4Addr, api: SystemApi, l: ListenHandle) {
     let workers = spawn_workers(exec, &api);
     DOORS.staffed(workers);
     if workers == 0 {

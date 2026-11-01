@@ -22,8 +22,11 @@
 #               beeld gerelokeerd) en HOPOS_FLIP_JUMP gen=2;
 #   kern B      HOPOS_BOOT gen=2 stamp=B, HOPOS_FLIP_BOOT gen=2,
 #               "HOPOS_FLIP_ADOPT 2 of 2 resident(s)" (Hop en FLIPCONN),
-#               HOPOS_HOP_RESUMED en HOPOS_FLIP_SETTLED (de guard: adoptie
-#               en net binnen de gratie);
+#               HOPOS_HOP_RESUMED en HOPOS_FLIP_SETTLED (de guard: een
+#               luisterend net binnen de gratie);
+#   de lease    (warm en koud) kern B neemt de lease van kern A over
+#               (HOPOS_NET_CARRIED met het adres) en doet geen DHCP: geen
+#               HOPOS_DHCP_BOUND na HOPOS_FLIP_BOOT (H1, 01-11);
 #   dezelfde Hop  precies één "HOP_BOOT" en één HOPOS_HOP_START in de hele
 #               console (Hop is niet herstart, zijn kooi is geadopteerd), en
 #               GET /tasks antwoordt na de flip;
@@ -52,8 +55,8 @@
 #               via de adoptie;
 #   conntrack   HOPOS_FLIP_NAT_CAPTURED flows=K vóór de sprong (K >= 2: de
 #               download van de bundel en FLIPCONN gingen door de
-#               masquerade), en na de landing "HOPOS_FLIP_NAT restored=K
-#               of=K": elke flow terug;
+#               masquerade), en na de landing "HOPOS_NET_CARRIED flows=K
+#               of=K": elke flow terug, vóór de eerste ronde van de switch;
 #   een verbinding  een TCP-verbinding van de host naar de agent-poort van
 #               Hop, geopend vóór de sprong en pas ná de landing afgemaakt
 #               (GET /tasks in twee helften): de gepubliceerde poort en de
@@ -448,12 +451,12 @@ echoes() {
 A_MARKS="HOPOS_BOOT gen=1 stamp=A|HOPOS_HOP_START slot=1|slot 1: 2 port\\(s\\) published tcp\\+udp on the uplink: :8080 :9080 HOPOS_SLOT_PUBLISH|slot 1: .*HOP_UP"
 [ "$BOARD:$MODE" = virt:warm ] && A_MARKS="HOPOS_FLIP_STALE|$A_MARKS"
 WORK_MARKS="slot 1: .*HOP_JOB_PLACED slot=[2-9]|HOPOS_SLOT_START slot=[2-9]|slot [0-9]+: HOPOS_APPSPIKE_DONE pass=9 fail=0"
-BASE_RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_FLIP_BLOB_BAD|HOPOS_FLIP_GUARD|HOPOS_FS_FREEZE_FAIL|HOPOS_CAGE_FAIL|HOPOS_CFG_BAD|HOPOS_FLIP_CFG_NONE|HOPOS_FLIP_CFG_OWN"
+BASE_RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_FATAL|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_FLIP_BLOB_BAD|HOPOS_FLIP_GUARD|HOPOS_FS_FREEZE_FAIL|HOPOS_CAGE_FAIL|HOPOS_CFG_BAD|HOPOS_FLIP_CFG_NONE|HOPOS_FLIP_CFG_OWN"
 case "$MODE" in
 warm)
-	FLIP_MARKS="HOPOS_FLIP_SWITCHCODE_OK|HOPOS_FLIP_STAGED|HOPOS_FS_FROZEN generation=|HOPOS_FLIP_NAT_CAPTURED flows=|HOPOS_FLIP_JUMP gen=2|HOPOS_BOOT gen=2 stamp=B|HOPOS_FLIP_BOOT gen=2|HOPOS_FLIP_ADOPT 2 of 2 resident\\(s\\)|HOPOS_HOP_RESUMED|HOPOS_FLIP_NAT restored=|HOPOS_FLIP_SETTLED"
+	FLIP_MARKS="HOPOS_FLIP_SWITCHCODE_OK|HOPOS_FLIP_STAGED|HOPOS_FS_FROZEN generation=|HOPOS_FLIP_NAT_CAPTURED flows=|HOPOS_FLIP_JUMP gen=2|HOPOS_BOOT gen=2 stamp=B|HOPOS_FLIP_BOOT gen=2|HOPOS_FLIP_ADOPT 2 of 2 resident\\(s\\)|HOPOS_HOP_RESUMED|HOPOS_NET_CARRIED flows=|HOPOS_FLIP_SETTLED"
 	WORK_MARKS="$WORK_MARKS|slot [0-9]+: HOPOS_APPSPIKE_FLIPCONN ok before="
-	RED="$BASE_RED|HOPOS_FLIP_REFUSED|HOPOS_FLIP_FAIL|HOPOS_FLIP_ADOPT_FAIL|HOPOS_FLIP_NAT_FAIL|HOP_FLIP_FAIL|HOPOS_APPSPIKE_FLIPCONN FAIL|HOPOS_APPSPIKE_FLIPCONN_ERR"
+	RED="$BASE_RED|HOPOS_FLIP_REFUSED|HOPOS_FLIP_FAIL|HOPOS_FLIP_ADOPT_FAIL|HOP_FLIP_FAIL|HOPOS_APPSPIKE_FLIPCONN FAIL|HOPOS_APPSPIKE_FLIPCONN_ERR"
 	;;
 mismatch)
 	FLIP_MARKS="HOPOS_FLIP_REFUSED switch code mismatch|slot 1: .*HOP_FLIP_FAIL"
@@ -462,7 +465,7 @@ mismatch)
 	;;
 cold)
 	# De warme weigering hoort erbij (één keer); de rest is de koude weg.
-	FLIP_MARKS="HOPOS_FLIP_REFUSED switch code mismatch|slot 1: .*HOP_FLIP_FAIL|HOPOS_FLIP_COLD_ASKED|HOPOS_FLIP_STAGED|slot 1: .*HOP_FLIP_COLD_STOP|HOPOS_FS_FROZEN generation=|HOPOS_FLIP_COLD stopped=|HOPOS_FLIP_JUMP gen=2|HOPOS_BOOT gen=2 stamp=B|HOPOS_FLIP_BOOT gen=2|HOPOS_FLIP_COLD_BOOT|HOPOS_FLIP_SETTLED"
+	FLIP_MARKS="HOPOS_FLIP_REFUSED switch code mismatch|slot 1: .*HOP_FLIP_FAIL|HOPOS_FLIP_COLD_ASKED|HOPOS_FLIP_STAGED|slot 1: .*HOP_FLIP_COLD_STOP|HOPOS_FS_FROZEN generation=|HOPOS_FLIP_COLD stopped=|HOPOS_FLIP_JUMP gen=2|HOPOS_BOOT gen=2 stamp=B|HOPOS_FLIP_BOOT gen=2|HOPOS_FLIP_COLD_BOOT|HOPOS_NET_CARRIED flows=0|HOPOS_FLIP_SETTLED"
 	AFTER_MARKS="HOPOS_CAGE_UP|HOPOS_HOP_START slot=1|slot 1: .*HOP_UP"
 	RED="$BASE_RED|HOPOS_FLIP_FAIL|HOPOS_FLIP_ADOPT|HOPOS_HOP_RESUMED|HOPOS_FLIP_COLD_CORE|HOPOS_FLIP_COLD_STOP_FAIL|HOPOS_FLIP_REFUSED (sha256|bundle|flip ABI|image|same|firmware|cold)"
 	;;
@@ -710,11 +713,24 @@ if [ "$MODE" = warm ]; then
 	# De conntrack: gevangen is hersteld; de download van de bundel en
 	# FLIPCONN gingen door de masquerade.
 	CAUGHT="$(tr -d '\r' <"$LOG" | sed -n 's/.*HOPOS_FLIP_NAT_CAPTURED flows=\([0-9]*\).*/\1/p' | head -1)"
-	BACK="$(tr -d '\r' <"$LOG" | sed -n 's/.*HOPOS_FLIP_NAT restored=\([0-9]*\) of=\([0-9]*\).*/\1 \2/p' | head -1)"
+	BACK="$(tr -d '\r' <"$LOG" | sed -n 's/.*HOPOS_NET_CARRIED flows=\([0-9]*\) of=\([0-9]*\).*/\1 \2/p' | head -1)"
 	if [ -n "$CAUGHT" ] && [ "$CAUGHT" -ge 2 ] && [ "$BACK" = "$CAUGHT $CAUGHT" ]; then
 		echo "   ok  conntrack: $CAUGHT flow(s) gevangen door kern A, alle $CAUGHT hersteld door kern B"
 	else
 		echo "   ROOD conntrack: gevangen '${CAUGHT:-?}', hersteld/van '${BACK:-?}'"
+		fail=1
+	fi
+fi
+if [ "$MODE" != mismatch ]; then
+	# De lease ging mee (H1): kern B deed geen DHCP.
+	CARRIED="$(tr -d '\r' <"$LOG" | sed -n 's/.*net: carried over: lease \([0-9.]*\),.*/\1/p' | head -1)"
+	if after "HOPOS_DHCP_BOUND"; then
+		echo "   ROOD de lease: kern B deed DHCP ($(tr -d '\r' <"$LOG" | awk '/HOPOS_FLIP_BOOT/ { f = 1 } f' | grep -m1 HOPOS_DHCP_BOUND))"
+		fail=1
+	elif [ -n "$CARRIED" ] && [ "$CARRIED" != 0.0.0.0 ]; then
+		echo "   ok  de lease: $CARRIED van kern A overgenomen, geen DHCP op kern B"
+	else
+		echo "   ROOD de lease: niet overgenomen ('${CARRIED:-geen HOPOS_NET_CARRIED}')"
 		fail=1
 	fi
 fi

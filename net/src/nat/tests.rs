@@ -902,65 +902,20 @@ fn antwoorden_houden_de_next_hop_vers() {
 
 // --- adoption_test.go ------------------------------------------------------
 
+/// Na de vangst geen nieuwe mapping: hij zou het blob missen.
 #[test]
-fn adoption_keeps_app_ports_away_from_node_stack() {
+fn capture_closes_the_masquerade() {
     let (mut nat, mut io) = setup();
-    nat.hold_adoption(&[18090, MASQ_BASE]).unwrap();
-    for proto in [PROTO_TCP, PROTO_UDP] {
-        for port in [18090, MASQ_BASE] {
-            let mut f = mk_frame(proto, NIC_MAC, LAN_MAC0, LAN_IP, NODE_IP, 1234, port, &[]);
-            assert!(
-                nat.inbound(&mut io, &mut f, T0),
-                "adopterende poort {port} bereikte de node-stack"
-            );
-        }
-    }
-    let mut mgmt = mk_frame(
-        PROTO_TCP,
-        NIC_MAC,
-        LAN_MAC0,
-        LAN_IP,
-        NODE_IP,
-        1234,
-        5555,
-        &[],
-    );
-    assert!(
-        !nat.inbound(&mut io, &mut mgmt, T0),
-        "adoptie blokkeerde de node-console"
-    );
-    io.attach(1);
-    nat.publish(Proto::Tcp, 18090, 1, 18090, SLOT_CAP).unwrap();
-    nat.finish_adoption();
-    let mut f = mk_frame(
-        PROTO_TCP,
-        NIC_MAC,
-        LAN_MAC0,
-        LAN_IP,
-        NODE_IP,
-        1234,
-        18090,
-        b"continued",
-    );
-    assert!(nat.inbound(&mut io, &mut f, T0) && io.read(1).is_some());
-    let mut f = mk_frame(
-        PROTO_TCP,
-        NIC_MAC,
-        LAN_MAC0,
-        LAN_IP,
-        NODE_IP,
-        1234,
-        MASQ_BASE,
-        &[],
-    );
-    assert!(
-        !nat.inbound(&mut io, &mut f, T0),
-        "tijdelijke claim overleefde de adoptie"
-    );
+    assert!(flow_for(&mut nat, &mut io, PROTO_UDP, 1, 5555, EXT_IP, 443, T0).is_some());
+    let mut out = [FlowState::default(); 8];
+    assert_eq!(nat.capture(T0, &mut out).flows.len(), 1);
+    assert!(flow_for(&mut nat, &mut io, PROTO_UDP, 1, 5556, EXT_IP, 443, T0).is_none());
 }
 
+/// Een hersteld uitgaand tupel houdt op de nieuwe kern zijn oude
+/// node-poort: de peer ziet dezelfde verbinding.
 #[test]
-fn adoption_defers_outbound_until_old_mapping_restored() {
+fn a_restored_flow_keeps_the_port_the_peer_sees() {
     for proto in [PROTO_TCP, PROTO_UDP] {
         let (mut nat, mut io) = setup();
         leer_gateway(&mut io);
@@ -980,32 +935,21 @@ fn adoption_defers_outbound_until_old_mapping_restored() {
             flows: &flows[..],
             masq_next: 0,
         };
-        nat.hold_adoption(&[old_port]).unwrap();
-        let send = |nat: &mut Nat, io: &mut TestIo, sport: u16| {
-            let mut f = mk_frame(
-                proto,
-                HOST_MAC,
-                port_mac(1),
-                port_ip4(1),
-                EXT_IP,
-                sport,
-                443,
-                b"continued",
-            );
-            assert!(nat.outbound(io, 1, &mut f, T0), "outbound niet geclaimd");
-        };
-        send(&mut nat, &mut io, 5555);
-        nat.masq_next = old_port;
-        send(&mut nat, &mut io, 5556);
-        assert!(
-            io.sent.is_empty() && nat.flows.len() == 0,
-            "alloceerde vóór het herstel"
+        assert_eq!(nat.restore(&state, T0), 1);
+        let mut f = mk_frame(
+            proto,
+            HOST_MAC,
+            port_mac(1),
+            port_ip4(1),
+            EXT_IP,
+            5555,
+            443,
+            b"continued",
         );
-        assert_eq!(nat.restore(&state, |s| io.attached[s], T0), 1);
-        send(&mut nat, &mut io, 5555);
-        assert!(io.sent.is_empty(), "adoptie losgelaten vóór finish");
-        nat.finish_adoption();
-        send(&mut nat, &mut io, 5555);
+        assert!(
+            nat.outbound(&mut io, 1, &mut f, T0),
+            "outbound niet geclaimd"
+        );
         assert_eq!(io.sent.len(), 1);
         let sent = &io.sent[0];
         let ip = ipv4_l4(sent).unwrap();
@@ -1018,15 +962,6 @@ fn adoption_defers_outbound_until_old_mapping_restored() {
     }
 }
 
-#[test]
-fn adoption_without_ports_also_defers_new_flows() {
-    let (mut nat, mut io) = setup();
-    nat.hold_adoption(&[]).unwrap();
-    assert!(flow_for(&mut nat, &mut io, PROTO_UDP, 1, 5555, EXT_IP, 443, T0).is_none());
-    nat.finish_adoption();
-    assert!(flow_for(&mut nat, &mut io, PROTO_UDP, 1, 5555, EXT_IP, 443, T0).is_some());
-}
-
 /// De snapshot-vorm (Go: `SnapshotNAT`): verlopen flows gaan niet mee, en
 /// een restore op een verse NAT geeft dezelfde mappings terug.
 #[test]
@@ -1037,21 +972,18 @@ fn snapshot_and_restore_round_trip() {
     let dead = flow_for(&mut nat, &mut io, PROTO_UDP, 2, 1002, EXT_IP, 53, T0).unwrap();
     age(&mut nat, dead, T0 - UDP_IDLE - SEC);
     let mut out = [FlowState::default(); 8];
-    let s = nat.snapshot(T0, &mut out);
+    let s = nat.capture(T0, &mut out);
     assert_eq!(s.flows.len(), 1);
     assert_eq!(s.flows[0].fins, 1);
     let np = s.flows[0].node_port;
 
     let (mut fresh, _) = setup();
-    assert_eq!(fresh.restore(&s, |slot| slot == 1, T0), 1);
+    assert_eq!(fresh.restore(&s, T0), 1);
     let id = fresh
         .flows
         .by_rev(&RKey(PROTO_TCP, np, EXT_IP, 443))
         .unwrap();
     assert!(fresh.flows.get(id).unwrap().fin_fwd);
-    // Een slot dat de flip niet overleefde: niets hersteld.
-    let (mut other, _) = setup();
-    assert_eq!(other.restore(&s, |_| false, T0), 0);
 }
 
 // --- hairpin_test.go ---------------------------------------------------------

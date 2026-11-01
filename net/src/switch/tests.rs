@@ -725,10 +725,11 @@ fn run_loop_attach_forward_detach() {
 }
 
 /// De flip in het klein: een uitgaande TCP-flow van slot 1 op de oude
-/// switch, de snapshot via de brievenbus (`SnapshotNat`), en op een verse
-/// switch het herstel (`HoldAdoption`, `RestoreNat`, `FinishAdoption`).
-/// Het antwoord van de peer op de oude node-poort moet daarna gewoon in
-/// slot 1 landen, op de oude poort van de app.
+/// switch, de vangst via de brievenbus (`CaptureNat`), en een verse switch
+/// die vóór zijn eerste ronde het net van de oude terugkrijgt
+/// (`Switch::restore`: de uplink, de publicaties en de conntrack). Het
+/// antwoord van de peer op de oude node-poort moet daarna gewoon in slot 1
+/// landen, op de oude poort van de app; de gepubliceerde poort ook.
 #[test]
 fn de_conntrack_overleeft_de_flip_via_de_actor() {
     let mut old = harness();
@@ -752,7 +753,7 @@ fn de_conntrack_overleeft_de_flip_via_de_actor() {
 
     let reply: &'static NatReply = leak(NatReply::new());
     let buf = vec![FlowState::default(); crate::MAX_FLOWS];
-    old.sw.handle(Command::SnapshotNat { buf, reply });
+    old.sw.handle(Command::CaptureNat { buf, reply });
     let snap = reply.try_take().expect("geen snapshot");
     assert_eq!(snap.flows.len(), 1);
     assert_eq!(snap.flows[0].node_port, node_port);
@@ -772,23 +773,27 @@ fn de_conntrack_overleeft_de_flip_via_de_actor() {
     assert!(old.sent().is_empty(), "na de snapshot nog een nieuwe flow");
     assert_eq!(old.sw.nat().flow_count(), 1);
 
-    // De nieuwe kern.
+    // De nieuwe kern: het net terug vóór de eerste ronde.
     let mut new = harness();
-    new.uplink();
-    let mut app = new.attach(1);
-    let ack: &'static Ack = leak(Ack::new());
-    let ports: &'static [u16] = Box::leak(vec![node_port].into_boxed_slice());
-    new.sw.handle(Command::HoldAdoption { ports, ack });
-    assert_eq!(ack.try_take(), Some(Ok(0)));
-    let flows: &'static [FlowState] = Box::leak(snap.flows.clone().into_boxed_slice());
+    let uplink = old.sw.nat().uplink().expect("geen uplink");
     let state = NatState {
-        flows,
+        flows: &snap.flows[..],
         masq_next: snap.masq_next,
     };
-    new.sw.handle(Command::RestoreNat { state, ack });
-    assert_eq!(ack.try_take(), Some(Ok(1)), "de flow kwam niet terug");
-    new.sw.handle(Command::FinishAdoption { ack });
-    assert_eq!(ack.try_take(), Some(Ok(0)));
+    assert_eq!(new.sw.restore(Some(uplink), &[(1, 7878)], &state), Ok(1));
+    let mut app = new.attach(1);
+    let mut call = mk_frame(
+        PROTO_TCP,
+        NIC_MAC,
+        GW_MAC0,
+        EXT_IP,
+        NODE_IP,
+        4444,
+        7878,
+        &[],
+    );
+    assert!(new.sw.nat.inbound(&mut new.sw.core, &mut call, fake_now()));
+    assert!(app.rx.frame().is_some(), "de publicatie kwam niet terug");
 
     let mut back = mk_frame(
         PROTO_TCP, NIC_MAC, GW_MAC0, EXT_IP, NODE_IP, 443, node_port, b"hallo",

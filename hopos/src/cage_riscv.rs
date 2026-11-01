@@ -483,10 +483,6 @@ pub(crate) enum Off {
     Sent,
 }
 
-/// De app-harts die [`park_for_flip`] uit het image haalde (bit per core),
-/// voor [`unpark_after_flip`]. Eén schrijver: de flip-taak.
-static FLIP_PARKED: AtomicU64 = AtomicU64::new(0);
-
 /// Haalt app-core `core` uit het kern-image voor de koude flip: de nieuwe
 /// kern gaat over de switch-code heen, en die draait op riscv64 uit het
 /// image. Een hart met een resetblok (de C906L) gaat in reset; een hart
@@ -511,9 +507,7 @@ pub(crate) fn park_for_flip(
     }
     let hart = plan.phys_core(core);
     let t = crate::BOARD.app_hart(hart);
-    let bit = 1u64 << core.get().min(63);
     if t.resettable && crate::BOARD.hold_app_hart(hart) {
-        FLIP_PARKED.fetch_or(bit, Relaxed);
         return Ok(Off::Reset);
     }
     let sched = plan.park_mbox_pa(core).map_err(|_| "no sched block")?;
@@ -526,7 +520,6 @@ pub(crate) fn park_for_flip(
     }
     dev::write64(sched.add(SCHED_OFF_PC), stub.0);
     dev::push(sched.add(SCHED_OFF_PC), 8);
-    FLIP_PARKED.fetch_or(bit, Relaxed);
     ring_bell(&t);
     Ok(Off::Sent)
 }
@@ -537,37 +530,6 @@ pub(crate) fn is_off(plan: &Plan, core: layout::Core, stub: Pa) -> bool {
         dev::pull(sched.add(SCHED_MBOX_CTX), 8);
         dev::read64(sched.add(SCHED_MBOX_CTX)) == stub.0
     })
-}
-
-/// De koude flip ging niet door: elk hart dat [`park_for_flip`] uit het
-/// image haalde, gaat terug de switcher in, zoals na een harde intrekking
-/// ([`Rv::reset_hart`]): een vers sched-blok, het postvak en de bel
-/// (de uit-stub springt op de bel naar `_start`, de parkeerlus), of het
-/// resetblok los. De lijst is leeg: de bewoners waren al gestopt.
-pub(crate) fn unpark_after_flip(plan: &Plan) {
-    let parked = FLIP_PARKED.swap(0, Relaxed);
-    for c in 1..=plan.app_cores() {
-        let Some(core) = layout::Core::new(c).filter(|c| parked & 1u64 << c.get().min(63) != 0)
-        else {
-            continue;
-        };
-        let (hart, Ok(sched)) = (plan.phys_core(core), plan.park_mbox_pa(core)) else {
-            continue;
-        };
-        let t = crate::BOARD.app_hart(hart);
-        arm_sched(sched, plan.vec_base_pa().0, &t, true);
-        match boot::start_hart(hart, switch::park_pc(), sched.0, t.msip) {
-            Ok(()) => {
-                crate::BOARD.start_app_hart(hart);
-                println!(
-                    "cage: hart {hart} back in the switcher after a cold flip that did not jump HOPOS_FLIP_CORE_BACK"
-                );
-            }
-            Err(e) => {
-                println!("cage: hart {hart} stays out of the switcher: {e} HOPOS_FLIP_CORE_BACK")
-            }
-        }
-    }
 }
 
 /// De kick na een schrijf in een RX-ring van een slot (`slot_wake` van de

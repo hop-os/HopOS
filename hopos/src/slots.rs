@@ -200,7 +200,7 @@ mod arch {
 /// De koude flip op riscv64 (flip.rs): de app-harts uit het kern-image en,
 /// als de sprong niet doorgaat, terug.
 #[cfg(target_arch = "riscv64")]
-pub(crate) use cage::{Off, is_off, park_for_flip, unpark_after_flip};
+pub(crate) use cage::{Off, is_off, park_for_flip};
 
 use crate::clock::ExecTimer;
 use crate::glue::{DevMem, KernConsole, SlotOutbox};
@@ -213,7 +213,7 @@ use board::Board;
 use board::stage::StagedRole;
 use cage::SlotCores;
 use core::cell::Cell;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::el2::{self, CoreState};
 use cpu::println;
@@ -228,7 +228,7 @@ use kern::slots::{
 use kern::system::{Fail, LogTee, SlotLogs};
 use kern::{Region, Slot};
 use sync::mpsc::Mailbox;
-use sync::{Local, Signal, select};
+use sync::{Either, Local, Signal, select};
 use vboard::slots as vslots;
 
 /// De brievenbus van de lifecycle-actor. Hij staat in `main` naast de
@@ -249,18 +249,10 @@ pub(crate) static LOGS: SlotLogs = SlotLogs::new();
 /// `place` en `drop_streams`. Eén aanroeper tegelijk: de twee sluiten
 /// elkaar uit (de rol, of een meegekomen Hop), en elk van beide is één taak
 /// die op zijn antwoord wacht vóór de volgende vraag. Een andere taak die
-/// de actor iets vraagt, krijgt een eigen plek ([`REPUBLISH_REPLY`]): een
-/// [`Reply`] kent één wachter, en een tweede `recv` verdringt de waker van
-/// de eerste, die dan voorgoed wacht.
+/// de actor iets vraagt, krijgt een eigen plek: een [`Reply`] kent één
+/// wachter, en een tweede `recv` verdringt de waker van de eerste, die dan
+/// voorgoed wacht.
 static BOOT_REPLY: Reply = Reply::new();
-
-/// De antwoordplek van de late her-publicatie ([`republish`]), los van
-/// [`BOOT_REPLY`]: hij loopt naast de supervisor van Hop (een warme flip
-/// met een NIC die pas bij een retry opkwam). Tot 24-10 deelden ze er één,
-/// en viel de her-publicatie samen met een `status` van de supervisor, dan
-/// kon die voorgoed hangen, en daarmee elke volgende HOP_RESTART. Eén
-/// aanroeper: [`REPUBLISH`] laat hem hoogstens één keer los.
-static REPUBLISH_REPLY: Reply = Reply::new();
 
 /// De partitie van de eerste plaatsing: 32 MB, staart inbegrepen. Ruim voor
 /// appspike (een half MB image, 256 KB stack, een kleine heap).
@@ -296,8 +288,8 @@ pub(crate) const HOP_PORT: u16 = 8080;
 
 /// De poorten van Hop op de uplink: de poorten van zijn start, zoals die
 /// van een jobspec (`StartSpec::ports`). De lifecycle zet ze door
-/// (`Cage::publish`, tcp en udp), draagt ze over een flip en zet ze daarna
-/// opnieuw door (`Lifecycle::republish`). Tot 04-10 zette de kern ze
+/// (`Cage::publish`, tcp en udp) en draagt ze over een flip, waar de
+/// switch van de nieuwe kern ze overneemt (`net::Carried`). Tot 04-10 zette de kern ze
 /// buiten de lifecycle door, alleen tcp, met twee eigen lussen.
 const HOP_PORTS: [u16; 2] = [HOP_PORT, HOP_PORT + 1000];
 
@@ -321,11 +313,12 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 /// een stap, dan één regel met marker en draait de node door zonder slots:
 /// het netwerk en de console hebben er niets mee te maken.
 ///
-/// FLIP: met `adopt` (de bewoners uit het handoff-blob van een kern-flip)
-/// neemt de kooi de zittende switch-code over in plaats van hem te
-/// installeren, krijgt elke bewoner zijn kooi, ringen en servicer terug
-/// zonder dat er één byte van zijn wereld verandert, en plaatst de kern
-/// Hop niet opnieuw: Hop draait door (`HOPOS_FLIP_ADOPT`).
+/// Met `adopt` (het hok van de vorige kern, de warme flip) neemt de kooi de
+/// zittende switch-code over in plaats van hem te installeren, krijgt elke
+/// bewoner zijn kooi, ringen en servicer terug zonder dat er één byte van
+/// zijn wereld verandert, en plaatst de kern Hop niet opnieuw: Hop draait
+/// door (`HOPOS_FLIP_ADOPT`). Een bewoner die niet terugkomt, is
+/// `HOPOS_FATAL`: een half hok is erger dan een koude boot.
 ///
 /// `app_env` is de env van een gestagede app (`hopos.appenv`, [`app_env`]);
 /// Hop krijgt de zijne uit `hopos.cfg`. `system` is de system-API van deze
@@ -354,41 +347,38 @@ pub(crate) fn start(
             return;
         }
     };
-    // FLIP: een geadopteerde kern schrijft geen byte in de plan-regio: er
-    // draaien cores in de switch-code (`cpu::el2::adopt` eist de som).
-    let cage = match &adopt {
-        Some(_) => cage::adopt(plan.clone()),
-        None => cage::new(plan.clone()),
-    };
-    let mut cage = match cage {
-        Ok(c) => c,
-        Err(e) => {
-            println!("slots: cage init: {e} HOPOS_CAGE_FAIL");
-            return;
-        }
-    };
-    let mut adopt = adopt;
-    if let Some(states) = adopt.as_mut() {
-        carry_hop_ports(states);
-    }
-    if let Some(states) = &adopt {
-        for st in states {
-            let r = Slot::new(st.slot).map_or(Err(kern::cage::CageError { code: 0 }), |s| {
-                // FLIP: de SMP-breedte mee, anders vindt een revoke de
-                // secundaires van een SMP-app niet.
-                cage.adopt_slot(
-                    s,
-                    Region::new(st.part_base, st.part_size),
-                    st.core,
-                    st.cores,
-                )
-            });
-            if let Err(e) = r {
-                println!(
-                    "slots: slot {} not re-attached: cage code {} HOPOS_FLIP_ADOPT_FAIL",
-                    st.slot, e.code
-                );
+    // Een geadopteerd hok krijgt geen byte in de plan-regio: er draaien
+    // cores in de switch-code (`cpu::el2::adopt` eist de som).
+    let mut cage = match &adopt {
+        Some(_) => cage::adopt(plan.clone()).unwrap_or_else(|e| {
+            crate::fatal(format_args!(
+                "slots: cage adoption: {e} HOPOS_FLIP_ADOPT_FAIL"
+            ))
+        }),
+        None => match cage::new(plan.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("slots: cage init: {e} HOPOS_CAGE_FAIL");
+                return;
             }
+        },
+    };
+    for st in adopt.iter().flatten() {
+        let r = Slot::new(st.slot).map_or(Err(kern::cage::CageError { code: 0 }), |s| {
+            // De SMP-breedte mee, anders vindt een revoke de secundaires
+            // van een SMP-app niet.
+            cage.adopt_slot(
+                s,
+                Region::new(st.part_base, st.part_size),
+                st.core,
+                st.cores,
+            )
+        });
+        if let Err(e) = r {
+            crate::fatal(format_args!(
+                "slots: slot {} not re-attached: cage code {} HOPOS_FLIP_ADOPT_FAIL",
+                st.slot, e.code
+            ));
         }
     }
     let sw = cage.isa().installed();
@@ -468,27 +458,20 @@ pub(crate) fn start(
         // kaal niets.
         crate::gui::slot_grants(),
     ));
-    let actor = async move {
-        // FLIP: eerst alle eigendomsclaims terug, dan pas verzoeken.
-        if let Some(states) = &adopt {
-            match lc.adopt(states) {
-                Ok(n) => {
-                    println!(
-                        "HOPOS_FLIP_ADOPT {n} of {} resident(s) adopted, ownership restored before the first request",
-                        states.len()
-                    );
-                    crate::flip::adopted_ok();
-                    // De poorten van Hop en de jobspecs: de NAT van deze kern
-                    // is leeg. Zonder switch (een NIC die pas met een retry
-                    // opkomt) gaat dat mis; dan later, zie [`republish`].
-                    REPUBLISH.store(!crate::net::switch_up(), Relaxed);
-                    lc.republish().await;
-                }
-                Err(e) => println!("slots: adoption refused: {e} HOPOS_FLIP_ADOPT_FAIL"),
-            }
+    // Eerst alle eigendomsclaims terug, dan pas verzoeken: vóór de actor
+    // zijn eerste bericht leest (de poorten nam de switch al over).
+    if let Some(states) = &adopt {
+        match lc.adopt(states) {
+            Ok(n) => println!(
+                "HOPOS_FLIP_ADOPT {n} of {} resident(s) adopted, ownership restored before the first request",
+                states.len()
+            ),
+            Err(e) => crate::fatal(format_args!(
+                "slots: adoption refused: {e} HOPOS_FLIP_ADOPT_FAIL"
+            )),
         }
-        lc.run(INBOX).await;
-    };
+    }
+    let actor = async move { lc.run(INBOX).await };
     if let Err(e) = exec.spawn(actor) {
         println!("slots: lifecycle not spawned: {e:?} HOPOS_SLOT_SPAWN");
         return;
@@ -502,7 +485,7 @@ pub(crate) fn start(
             println!("slots: servicer {i} not spawned: {e:?} HOPOS_SLOT_SPAWN");
         }
     }
-    // FLIP: Hop leeft nog; alleen zijn poorten en de supervisor komen terug.
+    // Een geadopteerde Hop leeft nog; alleen de supervisor komt terug.
     let hop = HopNode {
         exec,
         plan,
@@ -531,19 +514,6 @@ pub(crate) fn start(
     }
 }
 
-/// FLIP: een Hop van een kern van vóór 04-10 komt zonder poorten over (die
-/// kern zette ze buiten de lifecycle door). Hij krijgt ze hier, zodat de
-/// her-publicatie ze opent zoals elke andere; slot [`HOP_SLOT`] is Hop,
-/// zoals bij `resume_hop`.
-fn carry_hop_ports(states: &mut [kern::slots::SlotState]) {
-    for st in states
-        .iter_mut()
-        .filter(|st| st.slot == HOP_SLOT && st.ports.is_empty())
-    {
-        st.ports = hop_ports();
-    }
-}
-
 /// [`HOP_PORTS`] als lijst; leeg als de heap op is (dan opent er niets, en
 /// zegt de ontbrekende `HOPOS_SLOT_PUBLISH` het).
 fn hop_ports() -> Vec<u16> {
@@ -552,29 +522,6 @@ fn hop_ports() -> Vec<u16> {
         v.extend_from_slice(&HOP_PORTS);
     }
     v
-}
-
-/// FLIP: de her-publicatie na de adoptie liep zonder switch (de NIC kwam
-/// niet op bij de boot van deze kern): elke poort werd geweigerd en niets
-/// staat open. [`republish`] doet hem over zodra de switch er is.
-static REPUBLISH: AtomicBool = AtomicBool::new(false);
-
-/// Zet de poorten van de geadopteerde bewoners alsnog door, als de
-/// her-publicatie na de adoptie zonder switch liep (`main::nic_retry`, na
-/// de NIC). Eén keer; daarna staat de NAT van deze kern zoals na een flip
-/// met net.
-pub(crate) fn republish(exec: &'static Executor) {
-    if !REPUBLISH.swap(false, Relaxed) {
-        return;
-    }
-    let ask_once = async {
-        if let Err(e) = ask_at(&REPUBLISH_REPLY, Request::Republish).await {
-            println!("slots: ports after the late NIC: {e} HOPOS_SLOT_PUBLISH_FAIL");
-        }
-    };
-    if exec.spawn(ask_once).is_err() {
-        println!("slots: late republish not spawned HOPOS_SLOT_SPAWN");
-    }
 }
 
 /// De slots waarvan de bewoner de OS-core deelt, één bit per slot: de
@@ -1282,26 +1229,25 @@ fn take_image(img: &kern::system::HopImage) -> Result<Vec<u8>, (&'static str, Fa
     Ok(v)
 }
 
-/// Wacht tot de lease er is, hooguit [`UPLINK_WAIT`]; `None` na de termijn.
-/// Zolang de NIC opnieuw geprobeerd wordt (`NIC_RETRY`), telt de termijn
-/// niet: Hop heeft een adres nodig (Go wachtte er net zo op, 19-09).
+/// Wacht tot het net luistert (`net::NET_READY`: de lease, de uplink, de
+/// stack en de system-listener), hooguit [`UPLINK_WAIT`]; `None` na de
+/// termijn. Zo is de plaatsing van Hop de stap na het net in de bootreeks:
+/// zijn eerste call vindt de listener. Zolang de NIC opnieuw geprobeerd
+/// wordt (`NIC_RETRY`), telt de termijn niet: Hop heeft een adres nodig (Go
+/// wachtte er net zo op, 19-09).
 async fn wait_uplink(exec: &'static Executor) -> Option<core::net::Ipv4Addr> {
-    let mut deadline = exec.now().saturating_add(UPLINK_WAIT.as_nanos() as u64);
     loop {
-        if let Some(ip) = crate::net::uplink_ip() {
-            return Some(ip);
+        let ready = crate::net::NET_READY.wait();
+        if let Either::Left(()) = select(ready, exec.after(UPLINK_WAIT)).await {
+            return crate::net::uplink_ip();
         }
-        if crate::NIC_RETRY.load(Relaxed) {
-            deadline = exec.now().saturating_add(UPLINK_WAIT.as_nanos() as u64);
-        }
-        if exec.now() >= deadline {
+        if !crate::NIC_RETRY.load(Relaxed) {
             println!(
-                "slots: no uplink lease after {} s, Hop announces its slot address HOPOS_HOP_NO_UPLINK",
+                "slots: no listening net after {} s, Hop announces its slot address HOPOS_HOP_NO_UPLINK",
                 UPLINK_WAIT.as_secs()
             );
             return None;
         }
-        exec.after(Duration::from_millis(50)).await;
     }
 }
 

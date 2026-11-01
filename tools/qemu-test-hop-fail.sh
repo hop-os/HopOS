@@ -150,8 +150,10 @@ else
 	echo "   ROOD geen tweede HOPOS_BOOT: de watchdog resette niet"
 	fail=1
 fi
-if again "HOPOS_WD_ARMED" && again "the last reset came from this watchdog"; then
-	echo "   ok  de tweede boot weet waarom: $(after 2 | grep -m1 'HOPOS_WD_ARMED')"
+# De watchdog wapent als eerste in setup, dus vóór de bootregel: alleen de
+# tweede boot kan dit zeggen.
+if has "the last reset came from this watchdog.*HOPOS_WD_ARMED"; then
+	echo "   ok  de tweede boot weet waarom: $(first 'the last reset came from this watchdog')"
 else
 	echo "   ROOD de tweede boot zegt niet dat de watchdog hem resette"
 	fail=1

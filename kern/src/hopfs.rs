@@ -909,7 +909,9 @@ pub async fn truncate<D: BlockIo + Copy>(t: &Tree<D>, n: usize, size: u64) -> Re
 /// ([`Fs::commit_begin`], [`CommitJob::io`], [`Fs::commit_end`]). De kop
 /// komt als laatste, dus een gescheurde schrijf maakt alleen de nieuwe plek
 /// ongeldig. Geeft de nieuwe generatie, of `None` als er niets te doen was.
-/// Hoogstens één tegelijk: dat bewaakt de aanroeper.
+/// Hoogstens één tegelijk: dat bewaakt de aanroeper. Een fout laat de boom
+/// in het geheugen achter zonder de vastlegging die hij beloofde: de
+/// aanroeper valt dan (`fatal`, `crate::rpc`), er is geen tweede poging.
 ///
 /// De flip bevriest hopfs door dit te roepen en daarna geen verzoek meer
 /// aan te nemen: de eigenaar-taak IS het slot dat `Freeze` in Go was.
@@ -921,9 +923,9 @@ pub async fn commit<D: BlockIo + Copy>(t: &Tree<D>) -> Result<Option<u64>> {
     let Some(job) = job else {
         return Ok(None);
     };
-    let r = job.io(&mut disk).await;
+    job.io(&mut disk).await?;
     let mut fs = t.borrow_mut();
-    fs.commit_end(job, r)?;
+    fs.commit_end(job)?;
     Ok(Some(fs.generation()))
 }
 
@@ -980,11 +982,6 @@ pub mod path {
 /// Wat [`Fs::mount`] aantrof, voor de ene consoleregel.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Mounted {
-    /// Het venster is te klein om de boom te bewaren: vluchtig.
-    Volatile {
-        /// Het aantal blokken.
-        blocks: u32,
-    },
     /// `fresh`: beide plekken gewist.
     Fresh,
     /// Geen geldige boom: leeg begonnen.
@@ -996,18 +993,18 @@ pub enum Mounted {
         /// De plek (0 of 1).
         slot: u8,
     },
-    /// De nieuwste boom was inconsistent: leeg begonnen, de fout erbij.
-    Inconsistent {
-        /// De generatie.
-        generation: u64,
-        /// Wat er mis was.
-        err: Error,
-    },
 }
 
 impl<D: BlockIo> Fs<D> {
     /// Een bestandslaag die zijn boom vastlegt. Het metagebied is twee
     /// plekken van `min(16384, blocks/64)` blokken aan het begin.
+    ///
+    /// Hard (docs/sequence-hopos.md §13.6): een venster dat te klein is voor
+    /// twee plekken, een blokfout, en een geldige boom die niet ontcijfert,
+    /// zijn een fout; de binary valt erop. Alleen "geen enkele geldige plek"
+    /// is een lege boom. Tot 01-11 werd dat respectievelijk een vluchtige
+    /// fs, een "ongeldige plek" en een lege boom die de oudere plek bij de
+    /// eerste commit overschreef (F12).
     pub async fn mount(
         disk: D,
         first_lba: u64,
@@ -1019,8 +1016,9 @@ impl<D: BlockIo> Fs<D> {
         let mut f = Fs::new(disk, first_lba, blocks, disk_block, max_transfer)?;
         let slot = MAX_SLOT_BLOCKS.min(f.max / 64);
         if slot < 2 {
-            let blocks = f.max;
-            return Ok((f, Mounted::Volatile { blocks }));
+            return Err(Error::DiskFull {
+                blocks: u64::from(f.max),
+            });
         }
         (f.persist, f.slot, f.last, f.next) = (true, slot, None, 2 * slot);
         if fresh {
@@ -1032,7 +1030,7 @@ impl<D: BlockIo> Fs<D> {
         }
         let mut best: Option<(u8, u64, Vec<u8>)> = None;
         for p in 0..2u8 {
-            if let Ok((generation, tree)) = f.read_slot(p).await
+            if let Some((generation, tree)) = f.read_slot(p).await?
                 && best.as_ref().is_none_or(|b| generation > b.1)
             {
                 best = Some((p, generation, tree));
@@ -1043,10 +1041,7 @@ impl<D: BlockIo> Fs<D> {
         };
         f.generation = generation;
         f.last = Some(p);
-        if let Err(err) = f.decode(&tree) {
-            f.dirty = true;
-            return Ok((f, Mounted::Inconsistent { generation, err }));
-        }
+        f.decode(&tree)?;
         Ok((
             f,
             Mounted::Restored {
@@ -1109,24 +1104,15 @@ impl<D: BlockIo> Fs<D> {
         Ok(Some(job))
     }
 
-    /// Het einde van een vastlegging met de uitkomst `r` van
-    /// [`CommitJob::io`]: gelukt, dan is dit de generatie en komt wat de
-    /// vorige boom nog vasthield vrij; mislukt, dan blijft alles wachten op
-    /// de volgende poging.
-    pub fn commit_end(&mut self, job: CommitJob, r: Result) -> Result {
+    /// Het einde van een geslaagde [`CommitJob::io`]: dit is de generatie,
+    /// en wat de vorige boom nog vasthield, komt vrij.
+    pub fn commit_end(&mut self, job: CommitJob) -> Result {
         let CommitJob {
             target,
             generation,
             freed,
             ..
         } = job;
-        if let Err(e) = r {
-            self.dirty = true;
-            for run in freed {
-                try_push(&mut self.pending, run)?;
-            }
-            return Err(e);
-        }
         (self.generation, self.last) = (generation, Some(target));
         for run in freed {
             self.free_run(run.start, run.count)?;
@@ -1183,7 +1169,9 @@ impl<D: BlockIo> Fs<D> {
         Ok(b)
     }
 
-    async fn read_slot(&mut self, p: u8) -> Result<(u64, Vec<u8>)> {
+    /// De boom in plek `p`, of `None` als daar geen geldige staat (leeg, een
+    /// ander venster, een gescheurde schrijf). Een blokfout is een fout.
+    async fn read_slot(&mut self, p: u8) -> Result<Option<(u64, Vec<u8>)>> {
         let mut hdr = [0u8; BLOCK_SIZE];
         let start = u32::from(p) * self.slot;
         self.disk.read(self.lba(start), &mut hdr).await?;
@@ -1194,14 +1182,10 @@ impl<D: BlockIo> Fs<D> {
         };
         let generation = u64_at(16);
         let size = u64_at(40);
-        if hdr.get(..HDR_HASH_OFF) != Some(&self.header(generation, size)[..]) {
-            return Err(Error::Version { have: 0, want: 1 }); // Leeg of een ander venster.
-        }
-        if size > (u64::from(self.slot) - 1) * BS {
-            return Err(Error::TooLarge {
-                len: size as usize,
-                max: 0,
-            });
+        if hdr.get(..HDR_HASH_OFF) != Some(&self.header(generation, size)[..])
+            || size > (u64::from(self.slot) - 1) * BS
+        {
+            return Ok(None); // Leeg of een ander venster.
         }
         let padded = (size as usize).div_ceil(BLOCK_SIZE) * BLOCK_SIZE;
         let mut tree = Vec::new();
@@ -1218,9 +1202,9 @@ impl<D: BlockIo> Fs<D> {
         sum.update(hdr.get(..HDR_HASH_OFF).unwrap_or(&[]));
         sum.update(&tree);
         if hdr.get(HDR_HASH_OFF..HDR_LEN) != Some(&sum.finish()[..]) {
-            return Err(Error::Corrupt { at: HDR_HASH_OFF }); // Gescheurde schrijf.
+            return Ok(None); // Gescheurde schrijf.
         }
-        Ok((generation, tree))
+        Ok(Some((generation, tree)))
     }
 
     fn encode(&self) -> Result<Vec<u8>> {
@@ -1811,9 +1795,26 @@ mod tests {
             f.borrow_mut().dirty = true;
             on(commit(&f)).unwrap();
         }
-        let (g, m) = mount(&d, false);
-        assert!(matches!(m, Mounted::Inconsistent { generation: 1, .. }));
-        assert_eq!(g.borrow().count, 0);
+        // Een geldige boom die niet ontcijfert, is een fout, geen lege boom
+        // die de oudere plek bij de eerste commit overschrijft (F12).
+        let r = on(Fs::mount(&d, 0, d.blocks(), 512, 128 << 10, false));
+        assert!(r.is_err(), "an inconsistent tree mounted");
+    }
+
+    #[test]
+    fn a_window_too_small_for_two_places_does_not_mount() {
+        let d = RamDisk::new(512, 64 << 10);
+        let r = on(Fs::mount(&d, 0, d.blocks(), 512, 128 << 10, false));
+        assert!(matches!(r, Err(Error::DiskFull { .. })));
+    }
+
+    #[test]
+    fn a_block_error_in_the_mount_is_an_error() {
+        // Een venster van 64 MiB op een schijf van 1 MiB: de kop van de
+        // tweede plek (blok 256) ligt achter de schijf, de lees faalt.
+        let d = RamDisk::new(512, 1 << 20);
+        let r = on(Fs::mount(&d, 0, (64 << 20) / 512, 512, 128 << 10, false));
+        assert!(matches!(r, Err(Error::Io { .. })));
     }
 }
 

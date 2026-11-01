@@ -229,8 +229,9 @@ hop_virt() {
 # console op stdio; virtio-net modern (force-legacy=false: transportversie
 # 2) op de mmio-bus (virt zet hem anders op PCIe) met $QFWD, en virtio-blk
 # op de mmio-bus achter drive disk0 (die geeft de aanroeper: -drive of
-# -blockdev), net als het scherm, de monitor en de kern. De regel van
-# image/qemu-run.sh. Doet exec. $QNETDEV gaat achter de virtio-net (de
+# -blockdev), net als het scherm, de monitor en de kern; altijd de
+# i6300esb met een reset als hij afloopt (O2 van 01-11: de watchdog is
+# verplicht, ook op QEMU). De regel van image/qemu-run.sh. Doet exec. $QNETDEV gaat achter de virtio-net (de
 # trage draad van WIRE=1), $QNETOBJ is een extra -object (de vertraging).
 qemu_virt() {
 	smp="$1"
@@ -242,6 +243,7 @@ qemu_virt() {
 		-device "virtio-net-device,netdev=n0,bus=virtio-mmio-bus.0${QNETDEV:+,$QNETDEV}" \
 		-netdev "user,id=n0,$QFWD" ${QNETOBJ:-} \
 		-device virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.1 \
+		-device i6300esb -action watchdog=reset \
 		"$@"
 }
 

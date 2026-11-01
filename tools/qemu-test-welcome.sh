@@ -85,7 +85,7 @@ STOP_MARKS="slot 2: ports withdrawn from the uplink HOPOS_SLOT_UNPUBLISH|slot 2:
 if [ -z "${GO_ELF:-}" ]; then
 	STOP_MARKS="$STOP_MARKS|slot 2: applib: stop requested by the kernel, 2500 ms to finish HOPOS_APP_STOP grace_ms=2500|slot 2: applib: shutdown code=0 .*HOPOS_APP_SHUTDOWN"
 fi
-RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_SLOT_PUBLISH_FAIL|HOPOS_APP_STOP_FORCED|HOPOS_PART_QUARANTINE"
+RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_SLOT_PUBLISH_FAIL|HOPOS_APP_STOP_FORCED"
 
 JOB='{"name":"welcome","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/welcome.elf"}],"memory_limit":33554432,"ports":{"http":80}}'
 POSTED=""

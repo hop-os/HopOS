@@ -85,7 +85,7 @@ PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: 1 port\\(s\\) published tcp
 SAME_MARKS="slot 1: .*HOP_RESTART_ACCEPTED|HOPOS_HOP_RESTART reason=request image=same n=1|slot 1: .*HOP_STOPPING|slot 1: .*HOP_RESTART_LEAVING why=replied|slot 1: Hop stopped for the restart HOPOS_HOP_STOPPED reason=request left=self|HOPOS_HOP_STATE kept=[1-9]|slot 1: .*HOP_ADOPTED n=1"
 NEW_MARKS="HOPOS_HOP_RESTART reason=request image=new n=2"
 REFUSE_MARKS="HOPOS_HOP_RESTART_REFUSED .*sha256 mismatch|slot 1: .*HOP_RESTART_FAIL"
-RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOP_STRAY_STOPPED|HOP_ADOPT_SKIPPED|HOP_KERNEL_STATE_NONE|HOP_KERNEL_STATE_FAIL|HOPOS_APP_STOP_FORCED|HOPOS_PART_QUARANTINE|left=bell|left=fault|left=gone|HOP_RESTART_LEAVING why=grace|slot 2: stopped"
+RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOP_STRAY_STOPPED|HOP_ADOPT_SKIPPED|HOP_KERNEL_STATE_NONE|HOP_KERNEL_STATE_FAIL|HOPOS_APP_STOP_FORCED|left=bell|left=fault|left=gone|HOP_RESTART_LEAVING why=grace|slot 2: stopped"
 
 JOB='{"name":"welcome","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/welcome.elf"}],"memory_limit":33554432,"ports":{"http":80}}'
 

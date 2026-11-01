@@ -3,16 +3,16 @@
 # (Derek, 23-10). De kern laat hem liggen, de watchdog reset de node, en de
 # koude boot start de Hop van het bootmedium.
 #
-# De kern boot met agentd-hopos in slot 1 en de watchdog van virt aan
-# (WDT=1: `-device i6300esb -action watchdog=reset`, board/qemuvirt/src/
-# wdt.rs); Hop plaatst welcome in slot 2. Dan één POST /restart met een
+# De kern boot met agentd-hopos in slot 1 en de watchdog van virt (de
+# i6300esb, die elke ring meekrijgt: `-device i6300esb -action
+# watchdog=reset`, board/qemuvirt/src/wdt.rs); Hop plaatst welcome in slot 2. Dan één POST /restart met een
 # "nieuw image" dat een geldige ELF is maar geen Hop: appspike. Hij plaatst
 # (de som en de ELF-toets van de kern kloppen), draait zijn toetsen, en
 # vertrekt dan uit zichzelf, ongevraagd: HOPOS_HOP_EXIT (of een fault). De
-# kern herstart hem niet; Hop's hartslag en de canary stoppen, de
-# watchdog-taak houdt zijn pets in, de i6300esb loopt af, QEMU reset, en de
-# reset laadt de loader-blobs opnieuw: de staging draagt weer de Hop van
-# de start. Groen alleen als:
+# kern herstart hem niet: HOPOS_HOP_DOWN en HOPOS_FATAL (docs/
+# sequence-hopos.md §13.4), de kern parkeert, de pets stoppen, de i6300esb
+# loopt af, QEMU reset, en de reset laadt de loader-blobs opnieuw: de
+# staging draagt weer de Hop van de start. Groen alleen als:
 #
 #   de boot      zoals de welcome-kring, plus "watchdog: hardware reset
 #                armed (i6300esb at ... on PCIe ...) HOPOS_WD_ARMED" en de
@@ -21,10 +21,11 @@
 #                image=new n=1, HOPOS_HOP_STOPPED reason=request left=self,
 #                en een HOPOS_HOP_START slot=1 met de maat van het kapotte
 #                image;
-#   de val       HOPOS_HOP_EXIT of HOPOS_HOP_FAULT, dan HOPOS_HOP_DOWN, en
-#                geen tweede HOPOS_HOP_RESTART: de kern laat hem liggen;
-#   de watchdog  HOPOS_CANARY_MISS, dan een tweede HOPOS_BOOT, met "the
-#                last reset came from this watchdog" in zijn HOPOS_WD_ARMED;
+#   de val       HOPOS_HOP_EXIT of HOPOS_HOP_FAULT, dan HOPOS_HOP_DOWN en
+#                HOPOS_FATAL, en geen tweede HOPOS_HOP_RESTART: de kern laat
+#                hem liggen;
+#   de watchdog  een tweede HOPOS_BOOT, met "the last reset came from this
+#                watchdog" in zijn HOPOS_WD_ARMED;
 #   de koude boot HOPOS_HOP_START slot=1 met de maat van de gestagede Hop
 #                (dezelfde als bij de eerste boot), HOP_UP, en schoon
 #                begonnen: geen HOP_ADOPTED (het blob stierf met de boot).
@@ -63,13 +64,13 @@ BAD_SIZE="$(wc -c <"$ART/appspike.elf" | tr -d ' ')"
 serve
 
 echo "== booten op QEMU virt met Hop en de i6300esb (tot ${TIMEOUT}s; agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT, web :$WEBPORT -> gast :80)"
-hop_virt WDT=1
+hop_virt
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|watchdog: hardware reset armed \\(i6300esb at 0x[0-9a-f]+ on PCIe.*HOPOS_WD_ARMED|HOPOS_HOP_START slot=1 |slot 1: .*HOP_UP|HOPOS_CANARY_LIVE"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: .*HOPOS_WELCOME_UP port=80"
 ASK_MARKS="HOPOS_HOP_RESTART reason=request image=new n=1|slot 1: Hop stopped for the restart HOPOS_HOP_STOPPED reason=request left=self|HOPOS_HOP_START slot=1 .* image=$BAD_SIZE "
 FALL_MARKS="HOPOS_HOP_EXIT|HOPOS_HOP_FAULT"
-DOWN_MARKS="HOPOS_HOP_DOWN|HOPOS_CANARY_MISS"
+DOWN_MARKS="HOPOS_HOP_DOWN|HOPOS_FATAL slot 1: Hop fell"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_PART_QUARANTINE|left=bell|left=gone|HOPOS_WD_NONE|HOPOS_HOP_RESTART reason=crash"
 
 JOB='{"name":"welcome","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/welcome.elf"}],"memory_limit":33554432,"ports":{"http":80}}'
@@ -147,8 +148,10 @@ else
 	echo "   ROOD geen tweede HOPOS_BOOT: de watchdog resette niet"
 	fail=1
 fi
-if again "HOPOS_WD_ARMED" && again "the last reset came from this watchdog"; then
-	echo "   ok  de tweede boot weet waarom: $(after 2 | grep -m1 'HOPOS_WD_ARMED')"
+# De watchdog wapent als eerste in setup, dus vóór de bootregel: alleen de
+# tweede boot kan dit zeggen.
+if has "the last reset came from this watchdog.*HOPOS_WD_ARMED"; then
+	echo "   ok  de tweede boot weet waarom: $(first 'the last reset came from this watchdog')"
 else
 	echo "   ROOD de tweede boot zegt niet dat de watchdog hem resette"
 	fail=1
@@ -172,6 +175,6 @@ took
 if [ -n "$T_FALL" ] && [ -n "$T_UP" ]; then
 	echo "   meting: van de val tot HOP_UP na de reset $((T_UP - T_FALL)) s"
 fi
-echo "   meting: $(tr -d '\r' <"$LOG" | grep -v '^  | ' | grep -E 'HOPOS_HOP_(RESTART|STOPPED|START|EXIT|FAULT|DOWN) |HOPOS_HOP_(EXIT|FAULT|DOWN)$|HOPOS_CANARY_MISS|HOPOS_BOOT gen' | sed -E 's/^.*(HOPOS_[A-Z_]+).*$/\1/' | tr '\n' ';')"
+echo "   meting: $(tr -d '\r' <"$LOG" | grep -v '^  | ' | grep -E 'HOPOS_HOP_(RESTART|STOPPED|START|EXIT|FAULT|DOWN) |HOPOS_HOP_(EXIT|FAULT|DOWN)$|HOPOS_FATAL|HOPOS_BOOT gen' | sed -E 's/^.*(HOPOS_[A-Z_]+).*$/\1/' | tr '\n' ';')"
 verdict qemu-hop-fail
 echo "hop-faalkring groen"

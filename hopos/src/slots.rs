@@ -50,10 +50,10 @@
 //!   hoeveel er klaarligt). De andere bewoners draaien door.
 //! - **een Hop die faalt** (een fault, een exit die niemand vroeg, of een
 //!   nieuw image dat niet plaatst) is een node die faalt (Derek, 23-10):
-//!   de diagnoseregel (`HOPOS_HOP_FAULT`, `HOPOS_HOP_EXIT`, `HOPOS_HOP_FAIL`)
-//!   en dan niets. Hop blijft liggen zoals hij viel; zijn hartslag en de
-//!   canary stoppen, de node-watchdog houdt zijn pets in, de hardware
-//!   reset, en de koude boot start de Hop van het bootmedium. Falen gaat
+//!   de diagnoseregel (`HOPOS_HOP_FAULT`, `HOPOS_HOP_EXIT`), `HOPOS_HOP_DOWN`
+//!   en `fatal` (docs/sequence-hopos.md §13.4). Hop blijft liggen zoals hij
+//!   viel, de kern parkeert, de pets stoppen, de hardware reset, en de
+//!   koude boot start de Hop van het bootmedium. Falen gaat
 //!   naar het oude: is het ijzer de oorzaak, dan ontdoet een verse start in
 //!   dezelfde boot hem juist niet van zijn fout. Geen back-off, geen
 //!   terugval op een vorig image.
@@ -129,6 +129,10 @@ mod arch {
                 "HOPOS_OS_SELFTEST_FAIL"
             }
         );
+        // Een rotatie die haar zelftest niet haalt, host niet (F14, §13.3).
+        if !ok {
+            cpu::fatal!("oscore: the self-test of the rotation failed");
+        }
         Ok(os)
     }
 
@@ -755,8 +759,7 @@ impl HopNode {
         if let Some(core) = resumed {
             set_resident(slot.get(), core == 0);
         } else if crate::flip::staged_hop().is_none() {
-            println!("slots: role hop but no staged image, Hop not started HOPOS_HOP_FAIL");
-            return;
+            cpu::fatal!("slots: role hop but no staged image, Hop not started");
         }
         let node_ip = wait_uplink(self.exec).await;
         let spec = self.spec(node_ip, resumed.is_some());
@@ -779,10 +782,7 @@ impl HopNode {
             }
             None => match sup.put().await {
                 Ok(core) => core,
-                Err(e) => {
-                    println!("slot {slot}: Hop not started: {e} HOPOS_HOP_FAIL");
-                    return;
-                }
+                Err(e) => cpu::fatal!("slot {slot}: Hop not started: {e}"),
             },
         };
         sup.run(core).await;
@@ -931,8 +931,6 @@ enum Watched {
     Crashed,
     /// Hop vroeg een herstart (HOP_RESTART).
     Asked(Asked),
-    /// De status van het slot is weg (`HOPOS_HOP_FAIL`): niets meer te doen.
-    Lost,
 }
 
 /// De supervisor van Hop: één taak, die Hop plaatst, bewaakt en op zijn
@@ -953,32 +951,25 @@ struct Supervisor {
 
 impl Supervisor {
     /// De lus: bewaken, en na elke vraag de volgende Hop. Een Hop die
-    /// valt, of een nieuwe die niet plaatst, is het einde: de watchdog
-    /// neemt het over.
+    /// valt, of een nieuwe die niet plaatst, is het einde: `fatal`, en de
+    /// watchdog reset de node (docs/sequence-hopos.md §13.4).
     async fn run(mut self, mut core: usize) {
         loop {
             SAME.set(self.spec.as_ref().map(|_| self.current.source()));
             let end = self.watch(core).await;
             SAME.set(None);
             match end {
-                Watched::Lost => return,
-                Watched::Crashed => {
-                    self.stay_down();
-                    return;
-                }
+                Watched::Crashed => self.stay_down(),
                 Watched::Asked(a) => self.after_ask(a).await,
             }
-            core = match self.replace().await {
-                Some(core) => core,
-                None => return,
-            };
+            core = self.replace().await;
         }
     }
 
     /// Hop viel: hij blijft liggen zoals hij viel, voor de diagnose, en de
-    /// node-watchdog doet de rest. Een herstart die hij vlak daarvoor nog
+    /// node valt mee (`fatal`). Een herstart die hij vlak daarvoor nog
     /// vroeg, vervalt.
-    fn stay_down(&self) {
+    fn stay_down(&self) -> ! {
         let slot = self.slot;
         if ASKED.take().is_some() {
             println!(
@@ -986,8 +977,9 @@ impl Supervisor {
             );
         }
         println!(
-            "slot {slot}: Hop stays down as he fell; a failing Hop is a failing node: no heartbeat and no canary, the node watchdog resets to the Hop of the boot medium HOPOS_HOP_DOWN"
+            "slot {slot}: Hop stays down as he fell; a failing Hop is a failing node, the node watchdog resets to the Hop of the boot medium HOPOS_HOP_DOWN"
         );
+        cpu::fatal!("slot {slot}: Hop fell")
     }
 
     /// Bewaakt Hop: elke wissel van app-status, core of fault één regel, om
@@ -1003,8 +995,7 @@ impl Supervisor {
                 return Watched::Asked(a);
             }
             let Some(st) = status(slot).await else {
-                println!("slot {slot}: Hop status unavailable HOPOS_HOP_FAIL");
-                return Watched::Lost;
+                cpu::fatal!("slot {slot}: Hop status unavailable");
             };
             let dt = self.exec.now().saturating_sub(t0);
             let seen = (st.cage.app, st.cage.fault_vec, st.cage.core_on);
@@ -1093,15 +1084,12 @@ impl Supervisor {
 
     /// De volgende Hop in het slot: de oude stop (een no-op als hij al
     /// gestopt is), zijn open stromen weg, de staat die klaarligt op de
-    /// console, en plaatsen. Geeft de core, of `None` na één luide regel:
-    /// dan is er geen Hop, en neemt de watchdog het over.
-    async fn replace(&self) -> Option<usize> {
+    /// console, en plaatsen. Geeft de core; lukt een stap niet, dan is er
+    /// geen Hop en is het `fatal`.
+    async fn replace(&self) -> usize {
         let slot = self.slot;
         if !stop(slot, DEAD_STOP).await {
-            println!(
-                "slot {slot}: the old Hop did not stop, no new one; the node watchdog takes over HOPOS_HOP_FAIL"
-            );
-            return None;
+            cpu::fatal!("slot {slot}: the old Hop did not stop, no new one");
         }
         let n = self.system.drop_streams(&BOOT_REPLY).await;
         if n > 0 {
@@ -1114,13 +1102,8 @@ impl Supervisor {
             "slot {slot}: {kept} byte(s) of Hop state wait in the kern for the new Hop HOPOS_HOP_STATE kept={kept}"
         );
         match self.put().await {
-            Ok(core) => Some(core),
-            Err(e) => {
-                println!(
-                    "slot {slot}: the new Hop did not place: {e}; no Hop on this node, the node watchdog resets to the Hop of the boot medium HOPOS_HOP_FAIL"
-                );
-                None
-            }
+            Ok(core) => core,
+            Err(e) => cpu::fatal!("slot {slot}: the new Hop did not place: {e}"),
         }
     }
 

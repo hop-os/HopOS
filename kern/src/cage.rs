@@ -75,20 +75,6 @@ pub struct CageError {
     pub code: u32,
 }
 
-impl CageError {
-    /// Bit in [`code`](Self::code): het startschot bereikte de core niet
-    /// (CPU_ON weigerde vóór de core aanging), dus er liep zeker niets en de
-    /// kooi draaide zijn eigen staat al terug. De enige dispatch-fout met
-    /// een BEKENDE uitkomst.
-    pub const NEVER_RAN: u32 = 1 << 31;
-
-    /// Liep de core zeker niet ([`Self::NEVER_RAN`])?
-    #[must_use]
-    pub const fn never_ran(self) -> bool {
-        self.code & Self::NEVER_RAN != 0
-    }
-}
-
 /// Waarom een poort van een jobspec niet doorgezet werd.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum PortError {
@@ -214,8 +200,8 @@ pub trait Cage {
         cores: usize,
     ) -> Result<(), CageError>;
     /// Het startschot van de primaire context op `core`. Een `Err` is een
-    /// ONBEKENDE uitkomst: de core kan alsnog aangaan. Behalve met
-    /// [`CageError::NEVER_RAN`]: dan liep er zeker niets.
+    /// ONBEKENDE uitkomst: de core kan alsnog aangaan (de lifecycle maakt er
+    /// `fatal` van).
     fn dispatch(&mut self, slot: Slot, core: Core) -> Result<(), CageError>;
     /// Het startschot van een secundaire SMP-context op `core`.
     fn dispatch_secondary(&mut self, slot: Slot, core: Core) -> Result<(), CageError>;
@@ -293,6 +279,17 @@ pub trait Console {
     /// `Channel<LogLine, 64>` van de Go-servicer).
     fn app_line(&self, slot: Slot, line: &[u8]) {
         let _ = (slot, line);
+    }
+    /// Hard falen (docs/sequence-hopos.md §13.2): de kern kan een invariant
+    /// niet meer bevestigen (een slot dat niet stil wordt, een schijf die
+    /// faalt). De binary geeft `HOPOS_FATAL` en parkeert, de watchdog
+    /// reset; op de host is het een panic, zodat een toets hem ziet.
+    #[expect(
+        clippy::panic,
+        reason = "de host-vorm van fatal: een toets vangt hem met should_panic"
+    )]
+    fn fatal(&self, args: core::fmt::Arguments<'_>) -> ! {
+        panic!("HOPOS_FATAL {args}")
     }
 }
 

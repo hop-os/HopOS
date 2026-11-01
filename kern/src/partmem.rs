@@ -11,10 +11,10 @@
 //!
 //! ```text
 //!   alloc ──> Partition<Free> ──dispatched──> Partition<Owned> ──release(Stopped)──> pool
-//!                 │                               │      ^
-//!              abandon                        quarantine │ confirm(Stopped)
-//!                 v                               v      │
-//!                pool                     Partition<Quarantined>
+//!                 │
+//!              abandon
+//!                 v
+//!                pool
 //! ```
 //!
 //! - [`Partition<Free>`]: geclaimd en VRIJ VAN UITVOERING. Er heeft nooit een
@@ -25,9 +25,10 @@
 //!   was. [`Partition::release`] bestaat alleen hier en eist een
 //!   [`Stopped`], dat alleen de kern maakt nadat alle contexten van de
 //!   eigenaar bevestigd stil staan (E2, E9).
-//! - [`Partition<Quarantined>`]: beëindiging niet bevestigd. Hier bestaat
-//!   geen `release`; een latere stop kan met een [`Stopped`] terug naar
-//!   `Owned` ([`Partition::confirm`]).
+//!
+//! Een beëindiging die de kern niet kan bevestigen, heeft geen toestand: dat
+//! is `fatal` in de lifecycle, en de koude boot geeft alles terug
+//! (docs/sequence-hopos.md §13.5; tot 01-11 was dat een quarantaine).
 //!
 //! Een token vergeten (droppen) laat de claim in het grootboek staan: dat is
 //! de veilige kant, fail-closed. Het grootboek van de pool is de waarheid, de
@@ -79,9 +80,6 @@ pub struct Free;
 /// Typestate: er is (mogelijk) uitgevoerd.
 #[derive(Debug)]
 pub struct Owned;
-/// Typestate: beëindiging onbevestigd; het geheugen blijft gereserveerd.
-#[derive(Debug)]
-pub struct Quarantined;
 
 /// Het bewijs dat alle contexten van `slot` bevestigd stil staan.
 ///
@@ -103,13 +101,6 @@ impl Stopped {
 ///
 /// Geen `Clone`: er is per slot precies één token, en wie hem heeft mag de
 /// volgende overgang doen.
-///
-/// ```compile_fail,E0599
-/// use kern::partmem::{Partition, PartitionPool, Quarantined, Stopped};
-/// fn stuck(q: Partition<Quarantined>, pool: &mut PartitionPool, s: Stopped) {
-///     q.release(pool, s); // Bestaat niet: eerst `confirm`.
-/// }
-/// ```
 ///
 /// ```compile_fail,E0599
 /// use kern::partmem::{Free, Partition, PartitionPool, Stopped};
@@ -173,38 +164,6 @@ impl Partition<Owned> {
         pool.release_ledger(self.slot);
         Ok(())
     }
-
-    /// De beëindiging is niet te bevestigen: de eigenaar blijft volledig
-    /// gereserveerd (`HOPOS_PART_QUARANTINE`).
-    pub fn quarantine(self, pool: &mut PartitionPool) -> Partition<Quarantined> {
-        if let Some(Some(l)) = pool.owners.get_mut(self.slot.get()) {
-            l.quarantined = true;
-        }
-        self.to()
-    }
-}
-
-impl Partition<Quarantined> {
-    /// Een latere stop bevestigde de beëindiging alsnog.
-    pub fn confirm(
-        self,
-        pool: &mut PartitionPool,
-        proof: Stopped,
-    ) -> core::result::Result<Partition<Owned>, Partition<Quarantined>> {
-        if proof.slot != self.slot {
-            return Err(self);
-        }
-        if let Some(Some(l)) = pool.owners.get_mut(self.slot.get()) {
-            l.quarantined = false;
-        }
-        Ok(self.to())
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-struct Ledger {
-    region: Region,
-    quarantined: bool,
 }
 
 /// De pool: vrije stukken en het grootboek per slot.
@@ -217,7 +176,7 @@ struct Ledger {
 pub struct PartitionPool {
     free: BoundedVec<Region, MAX_FREE_REGIONS>,
     capacity: u64,
-    owners: [Option<Ledger>; SLOT_CAP + 1],
+    owners: [Option<Region>; SLOT_CAP + 1],
     max_slots: usize,
     geo: Geometry,
 }
@@ -338,10 +297,7 @@ impl PartitionPool {
         let base = self.carve(claim).ok_or(Error::NoPartition { size })?;
         let region = Region::new(base, size);
         if let Some(o) = self.owners.get_mut(slot.get()) {
-            *o = Some(Ledger {
-                region,
-                quarantined: false,
-            });
+            *o = Some(region);
         }
         Ok(Partition {
             slot,
@@ -383,9 +339,9 @@ impl PartitionPool {
         let Some(l) = self.owners.get_mut(slot.get()).and_then(Option::take) else {
             return;
         };
-        let extra = (self.geo.reserve)(l.region.size);
+        let extra = (self.geo.reserve)(l.size);
         // Een terugvoeg die niet past, lekt de claim: fail-closed.
-        let _ = self.insert_free(Region::new(l.region.base, l.region.size + extra));
+        let _ = self.insert_free(Region::new(l.base, l.size + extra));
     }
 
     /// Adopteert een bestaande partitie na een kern-flip: hij wordt uit de
@@ -412,10 +368,7 @@ impl PartitionPool {
         self.take_range(base, end)?;
         let region = Region::new(base, size);
         if let Some(o) = self.owners.get_mut(slot.get()) {
-            *o = Some(Ledger {
-                region,
-                quarantined: false,
-            });
+            *o = Some(region);
         }
         Ok(Partition {
             slot,
@@ -450,21 +403,7 @@ impl PartitionPool {
     /// Het zichtbare bereik van `slot`, als het er een heeft.
     #[must_use]
     pub fn partition_of(&self, slot: Slot) -> Option<Region> {
-        self.owners
-            .get(slot.get())
-            .copied()
-            .flatten()
-            .map(|l| l.region)
-    }
-
-    /// Staat `slot` in quarantaine? (Voor de tests.)
-    #[cfg(test)]
-    pub(crate) fn is_quarantined(&self, slot: Slot) -> bool {
-        self.owners
-            .get(slot.get())
-            .copied()
-            .flatten()
-            .is_some_and(|l| l.quarantined)
+        self.owners.get(slot.get()).copied().flatten()
     }
 
     /// De totale grootte van de pool: het plafond dat HOP krijgt.
@@ -574,11 +513,11 @@ impl PartitionPool {
     }
 
     /// De slots met een partitie (voor de flip-snapshot en de status).
-    pub fn owners(&self) -> impl Iterator<Item = (Slot, Region, bool)> + '_ {
-        self.owners.iter().enumerate().filter_map(|(i, o)| {
-            let l = (*o)?;
-            Some((Slot::new(i)?, l.region, l.quarantined))
-        })
+    pub fn owners(&self) -> impl Iterator<Item = (Slot, Region)> + '_ {
+        self.owners
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| Some((Slot::new(i)?, (*o)?)))
     }
 
     /// De vertaalopslag achter een partitie van `size` (voor de adoptie).
@@ -825,24 +764,7 @@ mod tests {
         assert!(p.adopt(s(1), !(GRAIN - 1), 4 * MIB).is_err());
     }
 
-    // E2/E9 en de quarantaine (ownership_test.go).
-    #[test]
-    fn ownership_quarantine_retains_ownership() {
-        let mut p = pool(&[Region::new(0x8000_0000, 32 * MIB)]);
-        let q = p
-            .alloc(s(1), 32 * MIB)
-            .unwrap()
-            .dispatched()
-            .quarantine(&mut p);
-        assert!(p.is_quarantined(s(1)));
-        assert!(p.alloc(s(2), 2 * MIB).is_err(), "quarantined memory reused");
-        assert!(p.alloc(s(1), 2 * MIB).is_err());
-        // Een latere, bevestigde stop geeft hem vrij.
-        let owned = q.confirm(&mut p, Stopped::confirmed(s(1))).unwrap();
-        owned.release(&mut p, Stopped::confirmed(s(1))).unwrap();
-        keep(p.alloc(s(2), 32 * MIB).unwrap());
-    }
-
+    // E2/E9 (ownership_test.go).
     #[test]
     fn stop_proof_of_another_slot_is_refused() {
         let mut p = pool(&[Region::new(0x8000_0000, 32 * MIB)]);

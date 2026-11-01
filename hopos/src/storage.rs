@@ -25,6 +25,11 @@
 //! niets meer aan ([`freeze_for_flip`]); de nieuwe kern mount dezelfde
 //! schijf en vindt precies die generatie.
 //!
+//! Hard (docs/sequence-hopos.md §13.6): een schijf die er is maar faalt, een
+//! mount die faalt (een te klein venster, een blokfout, een boom die niet
+//! ontcijfert) en een actor of committer die niet spawnt, zijn `fatal`. Geen
+//! schijf is geen fout: dan weigert elke bestandscall luid.
+//!
 //! Stateless of stateful, zoals in Go: `hopos.storage=stateless` (de default)
 //! negeert bij een koude boot het indexbestand en begint leeg
 //! (`HOPOS_FS_STATELESS`): een device begint schoon en vergeet alles.
@@ -160,8 +165,9 @@ impl core::fmt::Display for DevStats {
 }
 
 /// Zoekt de schijf van het board, één keer voor de hele boot: `probe_disk`
-/// mag maar één keer, en de schijf gaat naar [`start`]. Geen schijf of een fout is één regel en `None`:
-/// de node draait door en weigert elke bestandscall luid.
+/// mag maar één keer, en de schijf gaat naar [`start`]. Geen schijf is één
+/// regel en `None`: de node draait door en weigert elke bestandscall luid.
+/// Een schijf die faalt, is het ijzer: `fatal`.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn probe() -> Option<Disk> {
     match board::Board::probe_disk(&crate::BOARD) {
@@ -170,10 +176,7 @@ pub(crate) fn probe() -> Option<Disk> {
             println!("disk: none found on this board, file calls refused HOPOS_DISK_NONE");
             None
         }
-        Err(e) => {
-            println!("disk: {e}, file calls refused HOPOS_DISK_FAIL");
-            None
-        }
+        Err(e) => cpu::fatal!("disk: {e}"),
     }
 }
 
@@ -181,10 +184,9 @@ pub(crate) fn probe() -> Option<Disk> {
 pub(crate) type DiskQueue = Queue<Disk, ExecPace>;
 
 /// Zet de opslag op de geprobede schijf ([`probe`]): hopfs mounten, actor
-/// en committer spawnen. Geeft de wachtrij als de bestandscalls bediend
-/// worden (de lijn van de schijf komt erbij na `start_interrupts`,
-/// `Board::wire_disk`); zonder schijf draait de node door en weigert elke
-/// bestandscall luid (de regel gaf [`probe`] al).
+/// en committer spawnen. Geeft de wachtrij (de lijn van de schijf komt erbij
+/// na `start_interrupts`, `Board::wire_disk`); zonder schijf draait de node
+/// door en weigert elke bestandscall luid (de regel gaf [`probe`] al).
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'static DiskQueue> {
     let board = &crate::BOARD;
@@ -229,10 +231,7 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'sta
     ));
     let (fs, found) = match mounted {
         Ok(m) => m,
-        Err(e) => {
-            println!("hopfs: mount failed: {e}, file calls refused HOPOS_FS_FAIL");
-            return None;
-        }
+        Err(e) => cpu::fatal!("hopfs: mount failed: {e}"),
     };
     let generation = fs.generation();
     let (fresh, what) = match &found {
@@ -244,18 +243,6 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'sta
         }
         Mounted::Empty => (1, "empty disk"),
         Mounted::Fresh => (1, if stateless { "stateless" } else { "wiped" }),
-        Mounted::Volatile { blocks } => {
-            println!(
-                "hopfs: {blocks} blocks is too small to keep the tree, volatile HOPOS_FS_VOLATILE"
-            );
-            (1, "volatile")
-        }
-        Mounted::Inconsistent { generation, err } => {
-            println!(
-                "hopfs: tree of generation {generation} inconsistent: {err}, starting empty HOPOS_FS_INCONSISTENT"
-            );
-            (1, "inconsistent")
-        }
     };
     println!(
         "hopfs: mounted {} MiB ({what}) HOPOS_FS_UP fresh={fresh} generation={generation}",
@@ -267,8 +254,7 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'sta
         a.run(&FS_INBOX).await;
     };
     if exec.spawn(actor).is_err() {
-        println!("hopfs: actor not spawned, file calls refused HOPOS_FS_FAIL");
-        return None;
+        cpu::fatal!("hopfs: actor not spawned");
     }
     UP.store(true, Relaxed);
     if exec.spawn(stats(exec, disk)).is_err() {
@@ -284,8 +270,7 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'sta
         .await;
     };
     if exec.spawn(commit).is_err() {
-        // De calls werken; alleen het vastleggen niet. Luid, niet fataal.
-        println!("hopfs: committer not spawned, the tree is not kept HOPOS_FS_COMMIT_FAIL");
+        cpu::fatal!("hopfs: committer not spawned, the tree would not be kept");
     }
     Some(disk)
 }

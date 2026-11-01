@@ -286,7 +286,7 @@ while :; do
 	probes_left && ok=0
 	[ "$next_act" -le "$nacts" ] && ok=0
 	[ "$ok" = 1 ] && break
-	has "HOPOS_PANIC|HOPOS_EXCEPTION" && break
+	has "HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION" && break
 	kill -0 "$QPID" 2>/dev/null || break
 	[ "$elapsed" -ge "$((TIMEOUT * 10))" ] && break
 	sleep 0.1
@@ -331,7 +331,7 @@ if [ "$GUI" != 0 ]; then
 	echo "   screendump: $SHOT_OK"
 	case "$SHOT_OK" in ok*) ;; *) fail=1 ;; esac
 fi
-if has "HOPOS_PANIC|HOPOS_EXCEPTION"; then
+if has "HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION"; then
 	echo "   ROOD panic of exception"
 	fail=1
 fi

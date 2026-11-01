@@ -131,7 +131,8 @@ Hop's agent op 10.100.0.2:8080 als Hop op de node woont (door de switch en
 Hop's accept-laag, plus zijn heartbeat), anders naar de eigen system-poort
 op het uplink-adres. `hopos.wd=off` zet hem uit (ook een die de vorige kern
 wapende). Regels: `HOPOS_WD_ARMED`, `HOPOS_CANARY_LIVE`,
-`HOPOS_CANARY_MISS`, `HOPOS_BOOT_GUARD`, `HOPOS_BOOT_GUARD_EXPIRED`,
+`HOPOS_CANARY_MISS`, `HOPOS_BOOT_GUARD_EXPIRED` (geen levensteken binnen de
+guard van 120 s, voor elke boot),
 `HOPOS_RESET_REQUESTED`, en per wissel van de dial `HOPOS_WD_CANARY_OK` of
 `HOPOS_WD_CANARY_FAIL` (ook zonder blok, dus ook op QEMU); QEMU heeft er
 geen: `watchdog: no SBSA watchdog in the GTDT (QEMU?) - node liveness is

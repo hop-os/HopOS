@@ -178,6 +178,24 @@ pub fn park() -> ! {
     }
 }
 
+/// Hard falen (docs/sequence-hopos.md §13.2): één regel `HOPOS_FATAL
+/// <reden>` over de noodconsole, en deze core parkeert. Op de OS-core is
+/// dat ook het einde van de executor en dus van de pets: de watchdog
+/// reset de node. Geen retry en geen terugvalstand; de koude boot is de
+/// enige retry. Dezelfde weg als de panic-handler van de binary.
+pub fn fatal(why: core::fmt::Arguments<'_>) -> ! {
+    crate::console::emergency(format_args!("HOPOS_FATAL {why}"));
+    park()
+}
+
+/// [`fatal`] met de vorm van `println!`.
+#[macro_export]
+macro_rules! fatal {
+    ($($arg:tt)*) => {
+        $crate::boot::fatal(::core::format_args!($($arg)*))
+    };
+}
+
 /// Het heap-bereik uit het linkscript: `[__heap_start, __heap_end)`. Op de
 /// host leeg.
 #[must_use]

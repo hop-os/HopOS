@@ -185,7 +185,7 @@ houdt hun volumes).
 | `HOPOS_FLIP_ADOPT_FAIL` | de nieuwe kern weigert de adoptie (switch-code, partities, cores); de guard reset na de gratie |
 | `HOPOS_FLIP_NAT_FAIL` | de conntrack kwam niet terug; de bewoners draaien, verbindingen door de masquerade breken |
 | `HOPOS_FLIP_GUARD` | geen adoptie of geen net binnen 120 s: PSCI-reset |
-| niets na `HOPOS_FLIP_JUMP` | de nieuwe kern hangt vóór zijn console (op UEFI ook: geen feitenpagina, de core parkeert). Alleen een hardware-watchdog helpt; op QEMU virt alleen met `WDT=1` (de i6300esb). De volgende koude boot zegt waar het stopte |
+| niets na `HOPOS_FLIP_JUMP` | de nieuwe kern hangt vóór zijn console (op UEFI ook: geen feitenpagina, de core parkeert). Alleen een hardware-watchdog helpt; op QEMU virt de i6300esb, die elke ring heeft. De volgende koude boot zegt waar het stopte |
 | `HOPOS_FLIP_LAST`, `HOPOS_FLIP_ARCHIVED` | op de volgende koude boot: de stap waar de laatste flip stopte, uit de vluchtrecorder (`FLIP_RECORDER_PA`), en de poging daarvoor (06-09: zonder archief schreef de flip die een gevallen node optilde zijn eigen stappen over het spoor) |
 | `HOPOS_CONSOLE_CARRIED` | bij elke boot, als eerste regel: hoeveel bytes van een vorige kern nog in de console-ring staan; `nc NODE 5555` speelt ze af vóór de nieuwe boot (de zwarte doos, hieronder) |
 

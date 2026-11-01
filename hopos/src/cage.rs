@@ -94,9 +94,6 @@ mod code {
     /// CPU_ON faalde (PSCI, of de haak van het board: `cpu::smp::cpu_on`);
     /// de code erbij is 0x100 plus de fout in PSCI-vorm.
     pub(super) const PSCI: u32 = 0x100;
-    /// CPU_ON weigerde vóór de core aanging (`psci::Error::is_refusal`):
-    /// [`PSCI`] met [`CageError::NEVER_RAN`](super::CageError::NEVER_RAN).
-    pub(super) const PSCI_REFUSED: u32 = PSCI | super::CageError::NEVER_RAN;
 }
 
 /// Hoe lang [`Arm::start`] op een gedeelde app-core wacht tot de
@@ -265,16 +262,7 @@ impl Isa for Arm {
                     "cage: slot {slot} core {c} cold: CPU_ON mpidr={target:#x} entry={:#x} x0={:#x} -> {r:?}",
                     tramp.0, b.ctrl.0
                 );
-                match r {
-                    Ok(()) => Ok(()),
-                    // Geweigerd vóór de core aanging: hij liep zeker niet.
-                    // De mailbox weer koud, zodat de kern de partitie mag
-                    // teruggeven in plaats van haar in quarantaine te zetten.
-                    Err(e) if e.is_refusal() && el2::unwind_cold(plan, c, ctx).is_ok() => {
-                        Err(err(code::PSCI_REFUSED + e.code().unsigned_abs() as u32))
-                    }
-                    Err(e) => Err(err(code::PSCI + e.code().unsigned_abs() as u32)),
-                }
+                r.map_err(|e| err(code::PSCI + e.code().unsigned_abs() as u32))
             }
             Err(e) => {
                 println!("cage: slot {slot} core {c}: {e} HOPOS_CAGE_DISPATCH");

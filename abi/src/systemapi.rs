@@ -27,7 +27,7 @@
 //!                              |  Failed(tekst)
 //! SLOT_STATUS(slot)            -> SlotInfo    staat, core, heartbeat, exit (slot 0: de kern)
 //! NEXT_LOG(slot, max)          -> regel | leeg (slot 0: de kern zelf)
-//! STOP_SLOT(slot, timeout_ms)  -> Ok (de kern geeft vrij) | fout (quarantaine)
+//! STOP_SLOT(slot, timeout_ms)  -> Ok (de kern geeft vrij) | fout (een stroom)
 //! ```
 //!
 //! # Hop zelf herstarten
@@ -252,8 +252,8 @@ pub enum PrivOp {
     StreamImage = 0x41,
     /// Stop een slot: `off` het slot, `n` de coöperatieve termijn in ms.
     /// Breekt ook een half gestroomd slot af. `STATUS_OK`: de kern neemt de
-    /// vrijgave op zich; een fout: niet bevestigd, het slot blijft in
-    /// quarantaine.
+    /// vrijgave op zich. Een stop die de kern niet kan bevestigen, krijgt
+    /// geen antwoord: de kern valt (`HOPOS_FATAL`) en de watchdog reset.
     StopSlot = 0x42,
     /// De status van een slot: `off` het slot. Het antwoord: `data` is een
     /// [`SlotInfo`].
@@ -789,8 +789,8 @@ pub enum StreamState {
     /// De laatste byte is binnen; het image is geplaatst en de app gestart.
     Placed = 1,
     /// De laatste byte is binnen, maar plaatsen of starten faalde; de reden
-    /// staat erachter. De kern heeft zijn reserveringen opgeruimd (of, bij
-    /// een onbekende dispatch-uitkomst, het slot in quarantaine gezet).
+    /// staat erachter. De kern heeft zijn reserveringen opgeruimd (een
+    /// onbekende dispatch-uitkomst is geen antwoord maar `HOPOS_FATAL`).
     Failed = 2,
 }
 
@@ -845,7 +845,9 @@ pub enum SlotState {
     Streaming = 1,
     /// Gedispatcht.
     Running = 2,
-    /// Beëindiging onbevestigd; het slot wordt niet hergebruikt.
+    /// Beëindiging onbevestigd. Sinds 01-11 meldt de kern dit niet meer
+    /// (een onbevestigde beëindiging is `HOPOS_FATAL`); de variant blijft tot
+    /// Hop hem niet meer kent (`hopos-runner`).
     Quarantined = 3,
 }
 

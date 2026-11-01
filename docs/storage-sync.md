@@ -14,20 +14,22 @@ Er loopt hoogstens één vastlegging tegelijk; schrijfs van andere apps
 lopen ernaast en gaan met de volgende mee. Bij wijzigingen voert hij de
 bestaande commit uit: dataflush, metadata in de andere plek (body vóór
 kop), metadataflush. Pas daarna bevestigt hij. Zonder
-wijzigingen doet hij nog steeds een deviceflush. Een vluchtige FS weigert met
-`VolatileStorage`. Een fout bij flush of metadatawrite komt terug via de
-system-API, dus een app kan deze niet verwarren met een duurzame commit.
+wijzigingen doet hij nog steeds een deviceflush. Een fout bij flush of
+metadatawrite is het ijzer dat faalt: de kern valt (`HOPOS_FATAL`) en de
+watchdog reset de node (docs/sequence-hopos.md §13.6); de app krijgt dan geen
+antwoord, en dus nooit een bevestiging die niet duurzaam is.
 
-De client herhaalt een verloren bevestiging niet. Een fout kan betekenen dat
-de barrière tóch op schijf staat: SQLite/Replica moet dan zijn eigen journal-
+De client herhaalt een verloren bevestiging niet. Zonder antwoord kan de
+barrière tóch op schijf staan: SQLite/Replica moet dan zijn eigen journal-
 en herstelprotocol volgen. Een oude kernel weigert het nieuwe opnummer.
 Deze API vervangt geen exclusieve database-eigenaar, persistent volume of
 veilig parkeren van de SQLite-C-stack tijdens async I/O.
 
 Hosttests gebruiken een devicecache waarvan alleen `flush` de duurzame kopie
 bijwerkt. Ze toetsen koude remount na schrijven, overschrijven met dezelfde
-maat, verkleinen en journalverwijdering; iedere foutfase van commit; een
-herhaalde poging na fout; generatie-/padweigeringen en geen automatische retry.
+maat, verkleinen en journalverwijdering; iedere foutfase van commit (de
+schijf blijft bij de vorige generatie); generatie-/padweigeringen en geen
+automatische retry.
 
 De volledige proef is `python3 tools/qemu-test-sync.py`. Hij start uitsluitend
 een tijdelijke QEMU-schijf, plaatst `apps/syncprobe` via Hop met een eigen

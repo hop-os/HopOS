@@ -117,7 +117,7 @@ elapsed=0
 while :; do
 	probe_due && continue
 	! probes_left && all "$NEED" && break
-	has "HOPOS_PANIC|HOPOS_EXCEPTION" && break
+	has "HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION" && break
 	kill -0 "$QPID" 2>/dev/null || break
 	[ "$elapsed" -ge "$((TIMEOUT * 10))" ] && break
 	sleep 0.1
@@ -128,7 +128,7 @@ qemu_stop
 fail=0
 marks "$NEED"
 probes_report
-if has "HOPOS_PANIC|HOPOS_EXCEPTION"; then
+if has "HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION"; then
 	echo "   ROOD panic of exception"
 	fail=1
 fi

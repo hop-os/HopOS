@@ -59,7 +59,7 @@ while :; do
 	# De toets van buiten, op zijn moment; de keten loopt intussen door.
 	probe_due && continue
 	! probes_left && all "$NEED|$SLOT_MARKS" && break
-	has "HOPOS_PANIC|HOPOS_EXCEPTION" && break
+	has "HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION" && break
 	kill -0 "$QPID" 2>/dev/null || break
 	[ "$elapsed" -ge "$((TIMEOUT * 10))" ] && break
 	sleep 0.1
@@ -70,7 +70,7 @@ qemu_stop
 fail=0
 marks "$NEED" "$SLOT_MARKS"
 probes_report
-if has "HOPOS_PANIC|HOPOS_EXCEPTION"; then
+if has "HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION"; then
 	echo "   ROOD panic of exception"
 	fail=1
 fi

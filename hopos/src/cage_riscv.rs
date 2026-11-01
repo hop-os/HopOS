@@ -642,6 +642,10 @@ pub(crate) fn os_core(plan: &Plan) -> Result<OsCore, el2::Error> {
             "HOPOS_OS_SELFTEST_FAIL"
         }
     );
+    // Een rotatie die haar zelftest niet haalt, host niet (F14, §13.3).
+    if !ok {
+        cpu::fatal!("oscore: the self-test of the rotation failed");
+    }
     Ok(os)
 }
 

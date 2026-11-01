@@ -154,8 +154,8 @@ Op de console: `HOPOS_APP_STOP grace_ms=2500` bij het verzoek,
 `HOPOS_APP_SHUTDOWN` bij het afscheid, en `HOPOS_SLOT_STOPPED` als de kern
 de partitie vrijgeeft. Een app die de bel negeert, krijgt na de gratie
 `HOPOS_APP_STOP_FORCED` en hetzelfde afscheid; wie ook dan niet parkeert,
-wordt na de termijn ingetrokken (`HOPOS_PART_QUARANTINE` als zelfs dat niet
-pakt). Een `stacktask` breekt af door hem te droppen: `select(app.stopped(),
+wordt na de termijn ingetrokken (`HOPOS_FATAL` als zelfs dat niet pakt: de
+kern kan de isolatie dan niet bevestigen, en de watchdog reset de node). Een `stacktask` breekt af door hem te droppen: `select(app.stopped(),
 task)` geeft de C-kant `Cancelled` bij zijn volgende `wait`.
 
 `after(d)` is dus een deadline, geen peiling. Als je `after(d)` in een lus

@@ -276,16 +276,16 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
 /// Los zijn het buren: de diepste boot is daar 156 KB, warm en koud.
 #[inline(never)]
 fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleeper {
-    // FLIP: de landing, als eerste in `setup`. Daarvóór gingen in `kmain`
-    // alleen de heap, `discover` (het board) en de verhuizing naar de
-    // OS-core. Een overdracht van een vorige kern draagt de bewoners; die
-    // adopteren de slots straks.
+    // De watchdog als eerste (docs/sequence-hopos.md §13.2): de hardware
+    // staat er na `discover`, en vanaf hier eindigt elke `fatal` in een
+    // reset. Na een flip wapent dit de teller die de vertrekkende kern liet
+    // lopen opnieuw, vóór het framebuffer-geduld (de Pi 5, 30-09).
+    let wd = watchdog::arm();
+    // FLIP: de landing. Daarvóór gingen in `kmain` alleen de heap,
+    // `discover` (het board) en de verhuizing naar de OS-core. Een
+    // overdracht van een vorige kern draagt de bewoners; die adopteren de
+    // slots straks.
     let landing = flip::land(dtb);
-    // De watchdog van de vertrekkende kern loopt door: meteen herladen, vóór
-    // het framebuffer-geduld en de rest van de boot (de Pi 5, 30-09).
-    if landing.is_some() {
-        watchdog::pet_now();
-    }
 
     let exec: &'static Executor = EXEC.get();
     exec.set_clock(board.clock());
@@ -378,8 +378,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     let system = system(privilege, disk.is_some(), slot_count(board));
 
     // De IRQ-dispatch spawnt als eerste: hij is de pomp van alle lijnen.
-    // Faalt de controller, dan draait de node door op de vangrail van de
-    // slaap (interrupts zijn een verbetering, geen voorwaarde).
+    // Een controller die faalt, is het ijzer dat faalt (§13.3).
     // De schijf kwam ervóór op (de mount pollt); zijn lijn
     // komt nu.
     match board.start_interrupts() {
@@ -389,12 +388,12 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
                 q.with_dev(|d| board.wire_disk(d));
             }
         }
-        Err(e) => println!("irq: {e}, running on the sleep failsafe HOPOS_IRQ_FAIL"),
+        Err(e) => cpu::fatal!("irq: {e}"),
     }
     exec.spawn(tick(exec)).expect("spawn tick");
-    // De node-watchdog (op een flip-boot meteen met de boot-guard) en de
+    // De taak van de node-watchdog (gewapend aan het begin) en de
     // telemetrie: thermiek en klokbeleid.
-    watchdog::start(exec, hop_here);
+    watchdog::start(exec, wd, hop_here);
     telemetry::start(exec);
     gui::start_screen_status(exec); // de meetregels naast de bunny
 
@@ -466,12 +465,11 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     );
 
     // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
-    // over zijn bewoners (Hop). Lukt dat niet, dan houdt de kern zijn core
-    // voor zichzelf, luid, en draait Hop nooit.
+    // over zijn bewoners (Hop). Zonder rotatie draait Hop nooit (§13.3).
     let mut sleeper = board.sleeper();
     match slots::os_core() {
         Ok(os) => sleeper.host(os),
-        Err(e) => println!("oscore: {e}, the kern keeps its core to itself HOPOS_OS_CORE_FAIL"),
+        Err(e) => cpu::fatal!("oscore: {e}, the kern cannot host Hop on its core"),
     }
     sleeper
 }

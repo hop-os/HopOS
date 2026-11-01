@@ -209,11 +209,14 @@ open(out, "wb").write(b)
 open(out + ".park", "wb").write(struct.pack("<II", 0xd503205f, 0x17ffffff))
 STUB
 	}
+	# hopos.wd=off zoals tools/qemu-rpi4-test.sh: QEMU raspi4b modelleert het
+	# PM-blok alleen als reset-knop (een FULL_RESET reset meteen), en de
+	# watchdog wapent sinds 01-11 als eerste in setup, vóór HOPOS_BOOT.
 	boot() { # $1 = de console, daarna extra QEMU-argumenten
 		con="$1"
 		shift
 		qemu-system-aarch64 -M raspi4b -display none -monitor none -serial "file:$con" \
-			-kernel "$W/kernel8.img" -append "hopos.stage=none" "$@" 2>"$W/qemu.err" &
+			-kernel "$W/kernel8.img" -append "hopos.stage=none hopos.wd=off" "$@" 2>"$W/qemu.err" &
 		qp=$!
 		sleep "${SECS:-7}"
 		kill "$qp" 2>/dev/null || true
@@ -448,7 +451,7 @@ echoes() {
 A_MARKS="HOPOS_BOOT gen=1 stamp=A|HOPOS_HOP_START slot=1|slot 1: 2 port\\(s\\) published tcp\\+udp on the uplink: :8080 :9080 HOPOS_SLOT_PUBLISH|slot 1: .*HOP_UP"
 [ "$BOARD:$MODE" = virt:warm ] && A_MARKS="HOPOS_FLIP_STALE|$A_MARKS"
 WORK_MARKS="slot 1: .*HOP_JOB_PLACED slot=[2-9]|HOPOS_SLOT_START slot=[2-9]|slot [0-9]+: HOPOS_APPSPIKE_DONE pass=9 fail=0"
-BASE_RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_FLIP_BLOB_BAD|HOPOS_FLIP_GUARD|HOPOS_FS_FREEZE_FAIL|HOPOS_CAGE_FAIL|HOPOS_CFG_BAD|HOPOS_FLIP_CFG_NONE|HOPOS_FLIP_CFG_OWN"
+BASE_RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_FLIP_BLOB_BAD|HOPOS_FLIP_GUARD|HOPOS_FS_FREEZE_FAIL|HOPOS_CAGE_FAIL|HOPOS_CFG_BAD|HOPOS_FLIP_CFG_NONE|HOPOS_FLIP_CFG_OWN"
 case "$MODE" in
 warm)
 	FLIP_MARKS="HOPOS_FLIP_SWITCHCODE_OK|HOPOS_FLIP_STAGED|HOPOS_FS_FROZEN generation=|HOPOS_FLIP_NAT_CAPTURED flows=|HOPOS_FLIP_JUMP gen=2|HOPOS_BOOT gen=2 stamp=B|HOPOS_FLIP_BOOT gen=2|HOPOS_FLIP_ADOPT 2 of 2 resident\\(s\\)|HOPOS_HOP_RESUMED|HOPOS_FLIP_NAT restored=|HOPOS_FLIP_SETTLED"

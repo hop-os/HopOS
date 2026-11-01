@@ -82,8 +82,6 @@ impl fmt::Display for Error {
 }
 
 /// De PSCI-code van een fout (-2 INVALID_PARAMS, -3 DENIED, -4 ALREADY_ON).
-/// Alles behalve [`Error::SelfCore`] is een weigering
-/// (`cpu::psci::Error::is_refusal`): de core liep onze code zeker niet.
 #[must_use]
 pub const fn psci_code(e: Error) -> i32 {
     match e {
@@ -216,8 +214,8 @@ fn acked() -> bool {
 /// code nooit meer kan halen: eerst de entry weg (een stub die zijn adres al
 /// zag, leest dan 0 en wacht verder), dan nog één wachtronde voor een stub
 /// die de entry al las en nu bevestigt, en pas dan het adres weg. Geeft of
-/// de core het toch pakte. Zonder dit was "geen bevestiging" een onbekende
-/// uitkomst, en die kost een slot in quarantaine en een koude reset.
+/// de core het toch pakte. Zonder dit kon een core die te laat kwam, nog
+/// onze code halen vóór de reset die een mislukte start volgt (`fatal`).
 fn retract() -> bool {
     let s = Pa(crate::SCRATCH);
     dev::write64(s.add(SCRATCH_PARK_PC), 0);
@@ -291,11 +289,6 @@ mod tests {
         assert_eq!(psci_code(Error::NoCore(11)), -2);
         assert_eq!(psci_code(Error::SelfCore(6)), -4);
         assert_eq!(psci_code(Error::NoWay("x")), -3);
-        // Ook een ingetrokken brievenbus is een weigering; een core die al
-        // draait niet.
-        let psci = |e| cpu::psci::Error::from_ret(i64::from(psci_code(e)) as u64);
-        assert!(psci(Error::NoAck(7)).is_some_and(|e| e.is_refusal()));
-        assert!(psci(Error::SelfCore(6)).is_some_and(|e| !e.is_refusal()));
     }
 
     #[test]

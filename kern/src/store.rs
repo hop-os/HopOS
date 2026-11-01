@@ -41,7 +41,9 @@
 //! de plaats vrij; Hop's lopende `STORE_READ`/`STORE_WRITE` krijgt dan
 //! `NO_ENT` (en de hopfs-actor weigert een oude generatie toch al), en zijn
 //! `STORE_DONE` ook: hij gooit de opdracht weg. Valt Hop zelf weg met een
-//! opdracht in handen, dan zet de wachtende verbinding hem terug in de rij.
+//! opdracht in handen (een herstart: gevraagd en zeldzaam), dan krijgt de
+//! app een fout en beslist zij (O5 van 01-11); tot dan ging de opdracht terug
+//! in de rij, voor een volgende Hop die misschien nooit kwam.
 
 use crate::cage::{Console, Timer};
 use crate::rpc::{self, FsCall, FsInbox, PathBuf, clean_abs};
@@ -307,13 +309,7 @@ impl StoreQueue {
                 Outcome::NoService
             }
             _ if age >= nanos(DEADLINE) => Outcome::Timeout,
-            State::Taken { hop: h } if !hop(h) => {
-                // Hop viel weg met de opdracht in handen: terug in de rij,
-                // voor de volgende Hop.
-                e.state = State::Queued { since: now };
-                self.work.set();
-                return None;
-            }
+            State::Taken { hop: h } if !hop(h) => Outcome::HopGone,
             _ => return None,
         };
         e.state = State::Free;
@@ -436,6 +432,8 @@ enum Outcome {
     Done { status: u16, size: u64, len: usize },
     /// De levensduur van de app eindigde (stop, evict).
     Evicted,
+    /// De Hop die de opdracht had, is weg (O5).
+    HopGone,
     /// Niemand haalde hem op binnen [`PICKUP`].
     NoService,
     /// Over [`DEADLINE`].
@@ -537,7 +535,7 @@ pub struct Ctx<'a, 'r, T, C> {
     /// Het bewijs, alleen als de peer het slot van Hop is.
     pub hop: Option<&'a Privilege>,
     /// Het slot van Hop (als er een is): een opdracht in handen van een Hop
-    /// die wegviel, gaat terug in de rij.
+    /// die wegviel, is een fout voor de app.
     pub hop_slot: Option<Slot>,
     /// De antwoordplek van de verbinding bij de hopfs-actor.
     pub reply: &'r Reply,
@@ -613,6 +611,14 @@ async fn app_call<T: Timer, C: Console>(
         }
         Outcome::Done { status, len, .. } => head(out, h, status, 0, len),
         Outcome::Evicted => fail(out, h, &Fail::Gone),
+        Outcome::HopGone => fail(
+            out,
+            h,
+            &Fail::Refused(
+                STATUS_ERROR,
+                "the object store service (Hop) left during the call",
+            ),
+        ),
         Outcome::NoService => {
             let n = cx.queue.orphans.fetch_add(1, Relaxed).wrapping_add(1);
             if n <= LOUD {

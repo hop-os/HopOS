@@ -1277,11 +1277,11 @@ fn a_bundle_that_is_empty_too_long_or_too_large_is_refused_before_the_device() {
     assert_eq!(reads(&r), before, "niets naar het device");
 }
 
-/// Een kapot blok onder opdracht k: k krijgt een fout en nul bytes, de
-/// andere hun bytes, en de kern zegt het luid (de driver print niet).
-/// Alle opdrachten stonden tegelijk op het device.
+/// Een kapot blok onder een opdracht van een bundel is het ijzer dat faalt:
+/// `fatal` (§13.6), geen fout in de tabel van de app.
 #[test]
-fn a_failing_read_in_a_bundle_leaves_the_others_and_is_loud() {
+#[should_panic(expected = "HOPOS_FATAL hopfs: block I/O failed at LBA")]
+fn a_failing_read_in_a_bundle_is_fatal() {
     let (svc, con) = (Servicers::new(), FakeConsole::default());
     let (g, _, fs, r) = Bench {
         svc: &svc,
@@ -1310,25 +1310,8 @@ fn a_failing_read_in_a_bundle_leaves_the_others_and_is_loud() {
     let done = Reply::new();
     let inbox: FsInbox<'_> = Mailbox::new();
     send(&inbox, bundle(2, g, "f", &ops), &done);
-    r.hold(Kind::Read);
     let mut run = core::pin::pin!(f.run(&inbox));
     spin(&mut run);
-    assert_eq!(r.on_device(), 3, "de drie gezonde tegelijk op het device");
-    assert!(got(&done).is_none());
-    r.release(Kind::Read);
-    spin(&mut run);
-    let d = done.fs.try_take().unwrap();
-    assert_eq!(d.result, Ok((3 * 4096, 4 * many::RESULT_LEN + 3 * 4096)));
-    let c = FsCall {
-        out: d.out,
-        ..bundle(2, g, "f", &ops)
-    };
-    let o = outcomes(&c, 4);
-    assert_eq!(o[0], (4096, STATUS_OK, file[..4096].to_vec()));
-    assert_eq!(o[1], (4096, STATUS_OK, file[16 << 10..20 << 10].to_vec()));
-    assert_eq!((o[2].0, o[2].1), (0, STATUS_ERROR));
-    assert_eq!(o[3], (4096, STATUS_OK, file[48 << 10..52 << 10].to_vec()));
-    assert!(con.saw("hopfs: slot 2 op 21: 1 of 4 reads failed (1 so far) HOPOS_FS_IO"));
 }
 
 /// Twee bundels van één app (twee verbindingen) staan samen op het

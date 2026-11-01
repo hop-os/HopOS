@@ -529,6 +529,9 @@ impl<C: Console> Console for LogTee<'_, C> {
         self.logs.push(slot, line);
         self.inner.app_line(slot, line);
     }
+    fn fatal(&self, args: fmt::Arguments<'_>) -> ! {
+        self.inner.fatal(args)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2223,7 +2226,6 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 Occupancy::Empty => SlotState::Empty,
                 Occupancy::Streaming => SlotState::Streaming,
                 Occupancy::Running => SlotState::Running,
-                Occupancy::Quarantined => SlotState::Quarantined,
             } as u8,
             core_on: u8::from(st.cage.core_on),
             reserved: 0,

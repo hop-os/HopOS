@@ -40,16 +40,6 @@
 #                                    muis en de display-app tekent ze.
 #                                    QDISPLAY=cocoa|gtk|sdl kiest de
 #                                    weergave (standaard die van QEMU)
-#   WDT=1 image/qemu-run.sh          de hardware-watchdog: `-device
-#                                    i6300esb` op de PCIe-host met
-#                                    `-action watchdog=reset`. De kern wapent
-#                                    hem (board/qemuvirt/src/wdt.rs,
-#                                    HOPOS_WD_ARMED) en houdt zijn pets in
-#                                    als Hop of de canary stil valt; de reset
-#                                    laadt de loader-blobs opnieuw, dus de
-#                                    koude boot start weer de gestagede Hop
-#                                    (tools/qemu-test-hop-fail.sh).
-#                                    Standaard uit: dan "no watchdog"
 #   WIRE=1 image/qemu-run.sh         een trage draad met vertraging, zoals
 #                                    een link van 1 Gbit met een paar ms RTT
 #                                    (de ORION naar een Mac over wifi): de
@@ -163,16 +153,11 @@ case "${WIRE:-}" in
 	exit 2
 	;;
 esac
-# WDT=1: de i6300esb, en een reset (geen exit, geen pauze) als hij afloopt.
-QWDT=""
-case "${WDT:-}" in
-"" | 0) ;;
-1) QWDT="-device i6300esb -action watchdog=reset" ;;
-*)
-	echo "qemu-run: WDT=$WDT: only WDT=1" >&2
-	exit 2
-	;;
-esac
+# De watchdog is verplicht, ook op QEMU (O2 van 01-11): altijd de i6300esb,
+# en een reset (geen exit, geen pauze) als hij afloopt. Zo reset een
+# HOPOS_FATAL hier net als op ijzer; `hopos.wd=off` in BOOTARGS zet hem
+# uit voor een postmortem.
+QWDT="-device i6300esb -action watchdog=reset"
 # FEATURES=gui (of een andere lijst) komt achter de board-feature, zoals
 # in uefi-run.sh.
 FEATURES="$FEATURES${EXTRA_FEATURES:+,$EXTRA_FEATURES}"

@@ -23,8 +23,9 @@
 //!    Het antwoord is een [`ImageGrant`]: het recht om in die ene partitie te
 //!    schrijven. Grote data loopt niet door de kern; de grant wel.
 //! 2. [`Request::Arm`]: de grant komt terug, de kooi wordt gebouwd (E5) en
-//!    gedispatcht. Faalt het startschot, dan is de uitkomst onbekend en gaat
-//!    de eigenaar in quarantaine (lifecycle.md stap 4).
+//!    gedispatcht. Faalt het startschot, dan is de uitkomst onbekend: de
+//!    kern kan de isolatie niet meer bevestigen, en dat is `fatal`
+//!    (docs/sequence-hopos.md §13.5; tot 01-11 een quarantaine).
 //!
 //! [`Request::Abort`] geeft een grant terug waarin nooit iets draaide: de
 //! gewone rollback.
@@ -48,10 +49,10 @@
 //! de capaciteit, en de regel `HOPOS_POOL_DEVICE` zegt waar het ligt. Komt
 //! het ijzer niet op, dan gaat het terug ([`Request::ReleaseDevice`]).
 
-use crate::cage::{Cage, CageError, Console, Cores, PortError, Power, Status, Timer};
+use crate::cage::{Cage, Console, Cores, PortError, Power, Status, Timer};
 use crate::grants::{Grants, NoGrants};
 use crate::kernflip::{MAX_FLIP_JOB, MAX_FLIP_MOUNTS, MAX_FLIP_PATH, MAX_FLIP_PORTS};
-use crate::partmem::{Owned, Partition, PartitionPool, Quarantined, Stopped};
+use crate::partmem::{Owned, Partition, PartitionPool, Stopped};
 use crate::pool::{GroupName, Placement, Places};
 use crate::{Core, Error, GRAIN, Region, Result, SLOT_CAP, Slot};
 use alloc::vec::Vec;
@@ -348,8 +349,6 @@ pub enum Occupancy {
     Streaming,
     /// Gedispatcht.
     Running,
-    /// Beëindiging onbevestigd; het geheugen blijft gereserveerd.
-    Quarantined,
 }
 
 /// Wat HOP over een slot ziet.
@@ -773,7 +772,6 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
 enum Held {
     Streaming,
     Running(Partition<Owned>),
-    Quarantined(Partition<Quarantined>),
 }
 
 struct Resident {
@@ -1089,66 +1087,24 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             adopted: false,
         };
         self.register(slot, life, region);
-        let dispatch = self.cage.dispatch(slot, core);
-        if let Err(e) = dispatch
-            && e.never_ran()
-        {
-            return Err(self.never_ran(grant, core, !ports.is_empty(), e).await);
-        }
-        let booted = dispatch.is_ok() && self.boots(slot, core).await;
-        let part = grant.part.dispatched();
-        let held = if booted {
-            Held::Running(part)
-        } else {
-            // Onbekende uitkomst: de core kan alsnog aangaan. Partitie,
-            // volledige core-claim en servicer blijven staan.
-            self.log.log(format_args!(
-                "slot {slot}: owner retained, execution unconfirmed HOPOS_PART_QUARANTINE"
+        // Een startschot dat faalt of niet aankomt, heeft een onbekende
+        // uitkomst (ook een geweigerde CPU_ON: de koude boot geeft de core
+        // schoon terug, zonder een tweede boekhouding van "nooit gelopen").
+        if let Err(e) = self.cage.dispatch(slot, core) {
+            self.log.fatal(format_args!(
+                "slot {slot}: the start on core {core} failed (cage code {:#x}), execution unconfirmed",
+                e.code
             ));
-            Held::Quarantined(part.quarantine(&mut self.parts))
-        };
-        let failed = matches!(held, Held::Quarantined(_));
-        if let Some(r) = self.resident_mut(slot) {
-            r.held = held;
         }
-        if failed {
-            return Err(Error::Dispatch {
-                slot: slot.get(),
-                core: core.get(),
-            });
+        if !self.boots(slot, core).await {
+            self.log.fatal(format_args!(
+                "slot {slot}: core {core} never picked up the start, execution unconfirmed"
+            ));
+        }
+        if let Some(r) = self.resident_mut(slot) {
+            r.held = Held::Running(grant.part.dispatched());
         }
         Ok(())
-    }
-
-    /// Het startschot bereikte de core niet ([`CageError::NEVER_RAN`]): er
-    /// draaide nooit iets, dus alles terug zoals bij een mislukte bouw
-    /// (servicer, poorten, partitie, kooinummer), en de core uit de
-    /// plaatsing tot een koude boot. Een quarantaine hier hield de partitie
-    /// vast en blokkeerde elke flip; GEMETEN 01-10 op de M4: één POST, zes
-    /// slots in quarantaine, alleen de knop maakte het schoon.
-    async fn never_ran(
-        &mut self,
-        grant: ImageGrant,
-        core: Core,
-        published: bool,
-        e: CageError,
-    ) -> Error {
-        let slot = grant.slot();
-        self.evict(slot).await;
-        if published {
-            self.cage.unpublish(slot);
-        }
-        self.cage.detach(slot).await;
-        self.abort(grant);
-        self.places.retire(core);
-        self.log.log(format_args!(
-            "slot {slot}: core {core} refused the start (cage code {:#x}), never ran: partition released, core retired until a cold boot HOPOS_CORE_RETIRED",
-            e.code & !CageError::NEVER_RAN
-        ));
-        Error::NeverStarted {
-            slot: slot.get(),
-            core: core.get(),
-        }
     }
 
     /// Zet de poorten van een start door (via de kooi, die het slot-LAN
@@ -1381,9 +1337,9 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
 
     /// Stop: de coöperatieve kans (met de termijn op de vlag), dan de
     /// intrekking, dan pas de servicer en de ringen weg. Alleen een
-    /// bevestigde beëindiging geeft de partitie en de
-    /// cores terug (E2, E9); anders quarantaine, en een latere stop mag het
-    /// opnieuw proberen.
+    /// bevestigde beëindiging geeft de partitie en de cores terug (E2, E9);
+    /// wordt het slot ook na de intrekking niet stil, dan kan de kern de
+    /// isolatie niet meer bevestigen, en dat is `fatal` (§13.5).
     async fn stop(&mut self, slot: Slot, timeout: Duration) -> Result {
         let Some(r) = self.resident(slot) else {
             return Ok(()); // Een leeg kooinummer zegt niets over core i.
@@ -1405,23 +1361,25 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         // De deuren dicht zodra de app gevraagd is te stoppen: een nieuwe
         // verbinding naar een app die weggaat, bereikt niemand meer, en de
         // poort is dan vrij voor de volgende start (Go: `UnpublishSlot` in
-        // de stop). Ook bij quarantaine: wat er nog draait, is niet meer
-        // van buiten bereikbaar.
+        // de stop).
         self.cage.unpublish(slot);
         if published {
             self.log.log(format_args!(
                 "slot {slot}: ports withdrawn from the uplink HOPOS_SLOT_UNPUBLISH"
             ));
         }
-        let mut quiet = self.wait_quiet(slot, core, span, timeout).await;
-        if !quiet {
+        if !self.wait_quiet(slot, core, span, timeout).await {
             // Eén intrekking velt alle cores van het slot (gedeelde tabel en
             // VMID); de kick laat ook slapers de intrekking zien.
             self.cage.revoke(slot);
             for c in core.run(span) {
                 self.cores.kick(c);
             }
-            quiet = self.wait_quiet(slot, core, span, REVOKE_GRACE).await;
+            if !self.wait_quiet(slot, core, span, REVOKE_GRACE).await {
+                self.log.fatal(format_args!(
+                    "slot {slot}: not stopped after revocation, execution unconfirmed"
+                ));
+            }
         }
         // Nu pas de servicer weg (hij las de laatste regels van de app al
         // door) en de ringen van de switch af (bevestigd): na dit punt
@@ -1431,32 +1389,10 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         let Some(r) = self.residents.get_mut(slot.get()).and_then(Option::take) else {
             return Ok(());
         };
-        if !quiet {
-            let held = match r.held {
-                Held::Running(p) => Held::Quarantined(p.quarantine(&mut self.parts)),
-                other => other,
-            };
-            self.log.log(format_args!(
-                "slot {slot}: owner retained, execution unconfirmed HOPOS_PART_QUARANTINE"
-            ));
-            if let Some(e) = self.residents.get_mut(slot.get()) {
-                *e = Some(Resident { held, ..r });
-            }
-            return Err(Error::NotStopped {
-                slot: slot.get(),
-                core: core.get(),
-            });
-        }
-        let owned = match r.held {
-            Held::Running(p) => Some(p),
-            Held::Quarantined(q) => q.confirm(&mut self.parts, Stopped::confirmed(slot)).ok(),
-            Held::Streaming => None,
-        };
         // Pas na de bevestigde stop gaat de device-grant terug (Go:
-        // `grantRelease` in `releaseSlot`): in quarantaine kan de houder nog
-        // tekenen, dus daar blijft hij van het slot.
+        // `grantRelease` in `releaseSlot`).
         self.grants.release(slot);
-        if let Some(p) = owned {
+        if let Held::Running(p) = r.held {
             p.release(&mut self.parts, Stopped::confirmed(slot))?;
         }
         self.places.release(slot);
@@ -1479,7 +1415,6 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                 None => Occupancy::Empty,
                 Some(Held::Streaming) => Occupancy::Streaming,
                 Some(Held::Running(_)) => Occupancy::Running,
-                Some(Held::Quarantined(_)) => Occupancy::Quarantined,
             },
             core: r.map(|r| (r.core, r.span)),
             partition: self.parts.partition_of(slot),
@@ -1512,7 +1447,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             return;
         };
         if !matches!(r.held, Held::Running(_)) {
-            return; // Quarantaine: het verzoek blijft staan.
+            return; // Nog aan het stromen: er draait niets dat vraagt.
         }
         let (core, span) = (r.core, r.span);
         // De app vraagt virtuele CPU's relatief aan zijn kooinummer.
@@ -1544,32 +1479,25 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             Ok(()) => self.log.log(format_args!(
                 "slot {slot}: SMP core {c} dispatched HOPOS_SMP_DISPATCH_OK"
             )),
-            Err(e) => {
-                self.log.log(format_args!(
-                    "HOPOS_SMP_DISPATCH_FAIL slot {slot} core {c}: code {}",
-                    e.code
-                ));
-                if let Some(Some(r)) = self.residents.get_mut(slot.get())
-                    && let Held::Running(_) = r.held
-                    && let Held::Running(p) = core::mem::replace(&mut r.held, Held::Streaming)
-                {
-                    r.held = Held::Quarantined(p.quarantine(&mut self.parts));
-                }
-            }
+            // Een startschot met onbekende uitkomst, net als in `arm`.
+            Err(e) => self.log.fatal(format_args!(
+                "slot {slot}: the SMP start on core {c} failed (cage code {:#x}), execution unconfirmed",
+                e.code
+            )),
         }
         self.cage.clear_smp_request(slot);
     }
 
     /// Beschrijft elke levende bewoner voor de flip, en weigert als er iets
-    /// bij zit dat niet over te dragen is (quarantaine, een lopende stream,
-    /// een dode context). Weigeren is de veilige kant: de flip gaat niet door.
+    /// bij zit dat niet over te dragen is (een lopende stream, een dode
+    /// context). Weigeren is de veilige kant: de flip gaat niet door.
     pub fn snapshot(&self) -> Result<Vec<SlotState>> {
         let mut out = Vec::new();
-        for (slot, region, quarantined) in self.parts.owners() {
+        for (slot, region) in self.parts.owners() {
             let r = self.resident(slot);
             let live = matches!(r.map(|r| &r.held), Some(Held::Running(_)));
-            if quarantined || !live || !self.cage.live(slot) {
-                return Err(Error::Quarantined { slot: slot.get() });
+            if !live || !self.cage.live(slot) {
+                return Err(Error::NotLive { slot: slot.get() });
             }
             let Some(r) = r else { continue };
             let mut st = SlotState {
@@ -1874,8 +1802,6 @@ pub(crate) mod tests {
         pub(crate) dispatched: Vec<(usize, usize)>,
         pub(crate) secondaries: Vec<(usize, usize)>,
         pub(crate) fail_dispatch: bool,
-        /// Het startschot wordt geweigerd vóór de core aangaat (NEVER_RAN).
-        pub(crate) refuse_dispatch: bool,
         /// Het startschot van een secundaire faalt (onbekende uitkomst).
         pub(crate) fail_secondary: bool,
         pub(crate) fail_build: bool,
@@ -1919,7 +1845,6 @@ pub(crate) mod tests {
                 dispatched: Vec::new(),
                 secondaries: Vec::new(),
                 fail_dispatch: false,
-                refuse_dispatch: false,
                 fail_secondary: false,
                 fail_build: false,
                 smp_req: [0; 16],
@@ -1963,11 +1888,6 @@ pub(crate) mod tests {
             }
             if self.fail_dispatch {
                 return Err(CageError { code: 1 });
-            }
-            if self.refuse_dispatch {
-                return Err(CageError {
-                    code: CageError::NEVER_RAN | 0x103,
-                });
             }
             Ok(())
         }
@@ -2322,96 +2242,26 @@ pub(crate) mod tests {
         start(&mut a, 1, 32, 1).unwrap();
     }
 
-    // ErrDispatch: de uitkomst is onbekend, dus placement, partitie en
-    // servicer blijven staan (slot-lifecycle-grenzen.md fix 1).
+    // Een startschot met een onbekende uitkomst: de kern kan de isolatie
+    // niet bevestigen, dus `fatal` (§13.5; tot 01-11 een quarantaine).
     #[test]
-    fn err_dispatch_keeps_host_core_and_grant() {
+    #[should_panic(expected = "HOPOS_FATAL slot 1: the start on core 1 failed")]
+    fn a_failed_dispatch_is_fatal() {
         let (svc, con) = (Servicers::new(), FakeConsole::default());
         let mut a = actor(&svc, &con, Obey::Never, 32, 2);
         a.cage.fail_dispatch = true;
-        assert!(matches!(
-            start(&mut a, 1, 32, 1),
-            Err(Error::Dispatch { slot: 1, core: 1 })
-        ));
-        let st = a.status(s(1));
-        assert_eq!(st.occupancy, Occupancy::Quarantined);
-        assert_eq!(
-            st.core.map(|c| c.0.get()),
-            Some(1),
-            "possibly live core given away"
-        );
-        assert!(con.saw("HOPOS_PART_QUARANTINE"));
-        assert!(a.parts.is_quarantined(s(1)));
+        let _ = start(&mut a, 1, 32, 1);
     }
 
-    // Een geweigerde CPU_ON (NEVER_RAN): er liep niets, dus geen
-    // quarantaine. Partitie en kooinummer terug, de core uit de plaatsing,
-    // en de volgende start landt op een andere core.
+    // Een stop die ook na de intrekking niet stil wordt: `fatal`, na de
+    // intrekking (eerst de harde kill).
     #[test]
-    fn a_refused_core_releases_and_retires() {
-        let (svc, con) = (Servicers::new(), FakeConsole::default());
-        let mut a = actor(&svc, &con, Obey::Exit, 64, 2);
-        a.cage.refuse_dispatch = true;
-        let g = block_on(a.claim(StartSpec::new(s(1), 32 * MIB, ded(1)))).unwrap();
-        let ctl = svc.ctl(s(1)).unwrap();
-        let (r, ()) = join2(a.arm(g, 0x4001_0000), async {
-            ctl.stop.wait().await;
-            ctl.gone.set();
-        });
-        assert!(matches!(r, Err(Error::NeverStarted { slot: 1, core: 1 })));
-        assert_eq!(a.cage.detached, [(1, false)], "the built rings come off");
-        assert!(con.saw("HOPOS_CORE_RETIRED"));
-        assert!(!con.saw("HOPOS_PART_QUARANTINE"));
-        assert_eq!(a.status(s(1)).occupancy, Occupancy::Empty);
-        assert!(!a.parts.is_quarantined(s(1)));
-        assert_eq!(svc.current(s(1)), None);
-        a.cage.refuse_dispatch = false;
-        start(&mut a, 1, 32, 1).unwrap();
-        assert_eq!(a.status(s(1)).core.map(|c| c.0.get()), Some(2));
-        // Core 1 blijft uit; core 2 is bezet: geen plaats meer.
-        assert!(matches!(
-            start(&mut a, 2, 16, 1),
-            Err(Error::NoCores { cores: 1 })
-        ));
-    }
-
-    #[test]
-    fn ownership_quarantine_retains_ownership() {
+    #[should_panic(expected = "HOPOS_FATAL slot 1: not stopped after revocation")]
+    fn an_unconfirmed_stop_is_fatal() {
         let (svc, con) = (Servicers::new(), FakeConsole::default());
         let mut a = actor(&svc, &con, Obey::Never, 32, 2);
         start(&mut a, 1, 32, 1).unwrap();
-        assert!(matches!(
-            stop(&mut a, 1),
-            Err(Error::NotStopped { slot: 1, .. })
-        ));
-        assert_eq!(a.status(s(1)).occupancy, Occupancy::Quarantined);
-        assert!(a.cage.revoked[1], "no hard kill before quarantine");
-        // Het geheugen en de core zijn niet vrij.
-        assert!(start(&mut a, 2, 2, 1).is_err());
-    }
-
-    #[test]
-    fn ownership_quarantined_smp_second_stop() {
-        let (svc, con) = (Servicers::new(), FakeConsole::default());
-        let mut a = actor(&svc, &con, Obey::Never, 32, 4);
-        start(&mut a, 1, 32, 2).unwrap();
-        assert!(stop(&mut a, 1).is_err());
-        // De cores parkeren later alsnog: de tweede stop bevestigt en ruimt op.
-        a.cage.obey = Obey::Revoke;
-        stop(&mut a, 1).unwrap();
-        assert_eq!(a.status(s(1)).occupancy, Occupancy::Empty);
-        assert!(!a.parts.is_quarantined(s(1)));
-        start(&mut a, 2, 32, 2).unwrap();
-    }
-
-    #[test]
-    fn ownership_flip_cannot_omit_quarantine() {
-        let (svc, con) = (Servicers::new(), FakeConsole::default());
-        let mut a = actor(&svc, &con, Obey::Never, 64, 4);
-        start(&mut a, 1, 16, 1).unwrap();
-        assert_eq!(a.snapshot().unwrap().len(), 1);
-        assert!(stop(&mut a, 1).is_err());
-        assert!(matches!(a.snapshot(), Err(Error::Quarantined { slot: 1 })));
+        let _ = stop(&mut a, 1);
     }
 
     #[test]

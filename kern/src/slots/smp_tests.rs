@@ -1,6 +1,6 @@
 //! De SMP- en sharegroup-paden van de lifecycle-actor, over de nep-kooi van
 //! [`super::tests`]: het startschot van elke secundaire, de stop over de
-//! hele span (E9: pas vrij na de bevestiging van élke core), quarantaine
+//! hele span (E9: pas vrij na de bevestiging van élke core), `fatal`
 //! als één core niet bevestigt, en leden van een sharegroup die hun core
 //! delen en alleen stoppen.
 
@@ -84,60 +84,31 @@ fn stop_confirms_every_core_of_the_span() {
     start(&mut a, 2, 16, 3).unwrap();
 }
 
-// Eén secundaire bevestigt niet, ook niet na de intrekking: quarantaine.
-// De partitie en ELKE core van de span blijven van de eigenaar, een nieuw
-// SMP-verzoek wordt niet beantwoord, en pas een latere stop die alle cores
-// stil ziet, geeft vrij.
+// Eén secundaire bevestigt niet, ook niet na de intrekking: de kern kan de
+// isolatie van de hele eigenaar niet bevestigen, dus `fatal` (§13.5).
 #[test]
-fn one_unconfirmed_core_quarantines_the_whole_owner() {
+#[should_panic(expected = "HOPOS_FATAL slot 1: not stopped after revocation")]
+fn one_unconfirmed_core_is_fatal() {
     let (svc, con) = (Servicers::new(), FakeConsole::default());
     let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
     start(&mut a, 1, 16, 3).unwrap();
     a.cage.smp_req[1] = 3;
     a.smp(s(1));
     a.cage.stuck[3] = true;
-    assert!(matches!(
-        stop(&mut a, 1),
-        Err(Error::NotStopped { slot: 1, .. })
-    ));
-    assert!(a.cage.revoked[1], "no hard kill before quarantine");
-    assert_eq!(&a.cores.kicks[1..=4], &[1, 1, 1, 0]);
-    assert_eq!(a.status(s(1)).occupancy, Occupancy::Quarantined);
-    assert!(a.parts.is_quarantined(s(1)));
-    assert!(con.saw("HOPOS_PART_QUARANTINE"));
-    // Geen core van de span komt vrij, ook de stille niet.
-    for c in 1..=3 {
-        assert!(!a.places.core_free(c), "core {c} was released early");
-    }
-    assert!(start(&mut a, 2, 8, 1).is_ok(), "the fourth core is free");
-    assert!(start(&mut a, 3, 8, 1).is_err(), "a span core was reused");
-    // In quarantaine blijft een SMP-verzoek liggen: geen nieuwe core erbij.
-    a.cage.smp_req[1] = 2;
-    a.smp(s(1));
-    assert_eq!(a.cage.secondaries, [(1, 3)]);
-    assert_eq!(a.cage.smp_req[1], 2);
-    // De core bevestigt alsnog: de tweede stop ruimt alles op.
-    a.cage.stuck[3] = false;
-    stop(&mut a, 1).unwrap();
-    assert!(!a.parts.is_quarantined(s(1)));
-    for c in 1..=3 {
-        assert!(a.places.core_free(c), "core {c} stayed claimed");
-    }
+    let _ = stop(&mut a, 1);
 }
 
 // Een startschot van een secundaire met een onbekende uitkomst: de core kan
-// alsnog aangaan, dus de eigenaar gaat in quarantaine en houdt alles.
+// alsnog aangaan, dus `fatal`, zoals in `arm`.
 #[test]
-fn a_failed_secondary_dispatch_quarantines_the_owner() {
+#[should_panic(expected = "HOPOS_FATAL slot 1: the SMP start on core 2 failed")]
+fn a_failed_secondary_dispatch_is_fatal() {
     let (svc, con) = (Servicers::new(), FakeConsole::default());
     let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
     start(&mut a, 1, 16, 2).unwrap();
     a.cage.fail_secondary = true;
     a.cage.smp_req[1] = 2;
     a.smp(s(1));
-    assert!(con.saw("HOPOS_SMP_DISPATCH_FAIL slot 1 core 2"));
-    assert_eq!(a.status(s(1)).occupancy, Occupancy::Quarantined);
-    assert_eq!(a.cage.smp_req[1], 0, "the app kept spinning on its request");
 }
 
 // Sharegroups op app-cores: leden delen de core van de groep, houden hun
@@ -195,20 +166,17 @@ fn a_neighbour_that_never_yields_is_sacrificed_for_the_new_member() {
     assert_eq!(a.status(s(3)).occupancy, Occupancy::Running);
 }
 
-// Niets op te offeren (de core zegt niet wie hem houdt): de start faalt
-// zoals een dispatchfout, met de partitie in quarantaine, in plaats van
-// een start die gelukt heet en nooit draait.
+// Niets op te offeren (de core zegt niet wie hem houdt): een start met een
+// onbekende uitkomst, dus `fatal`, in plaats van een start die gelukt heet en
+// nooit draait.
 #[test]
-fn a_member_that_never_gets_a_turn_is_a_dispatch_failure() {
+#[should_panic(expected = "HOPOS_FATAL slot 3: core 1 never picked up the start")]
+fn a_member_that_never_gets_a_turn_is_fatal() {
     let (svc, con) = (Servicers::new(), FakeConsole::default());
     let mut a = actor(&svc, &con, Obey::Exit, 64, 2);
     start_member(&mut a, 2, "demo").unwrap();
     a.cage.boot_pending[3] = true;
-    let e = start_member(&mut a, 3, "demo").unwrap_err();
-    assert_eq!(e, Error::Dispatch { slot: 3, core: 1 });
-    assert!(con.saw("HOPOS_CORE_RECLAIM_FAILED"));
-    assert!(!a.cage.revoked[2]);
-    assert_eq!(a.status(s(3)).occupancy, Occupancy::Quarantined);
+    let _ = start_member(&mut a, 3, "demo");
 }
 
 // Hop is nooit het slachtoffer: zonder Hop herstart niemand iets.
@@ -219,7 +187,11 @@ fn hop_is_never_sacrificed() {
     start_member(&mut a, 2, "hop").unwrap();
     a.cage.hog = Some(2);
     a.cage.boot_pending[3] = true;
-    assert!(start_member(&mut a, 3, "hop").is_err());
+    // Zonder slachtoffer een start met onbekende uitkomst: `fatal`.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        start_member(&mut a, 3, "hop")
+    }));
+    assert!(r.is_err(), "a start that never ran was not fatal");
     assert!(!a.cage.revoked[2], "Hop was sacrificed");
     assert!(con.saw("HOPOS_CORE_RECLAIM_FAILED"));
 }
@@ -352,5 +324,4 @@ fn a_wide_job_with_devices_leaves_everything_placeable() {
         a.status(s(3)).core.map(|(c, n)| (c.get(), n)),
         Some((2, 10))
     );
-    assert!(!con.saw("HOPOS_PART_QUARANTINE"));
 }

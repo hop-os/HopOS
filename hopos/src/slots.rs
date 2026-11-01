@@ -704,7 +704,7 @@ impl HopNode {
         };
         if let Some(core) = resumed {
             set_resident(slot.get(), core == 0);
-        } else if crate::flip::staged_hop().is_none() {
+        } else if staged_hop().is_none() {
             println!("slots: role hop but no staged image, Hop not started HOPOS_HOP_FAIL");
             return;
         }
@@ -785,7 +785,7 @@ impl HopNode {
 /// diens heap en kwam niet mee; deze kern kent alleen het gestagede, als
 /// dat er nog is.
 fn resumed_image() {
-    match crate::flip::staged_hop() {
+    match staged_hop() {
         Some(img) => println!(
             "slots: a restart of Hop with the same image places the staged one on this kernel ({} bytes); an image Hop gave the previous kernel stayed behind HOPOS_HOP_IMAGE_STAGED",
             img.len()
@@ -808,7 +808,7 @@ struct HopSpec {
 
 /// Het image van een Hop.
 enum Image {
-    /// Het gestagede ([`crate::flip::staged_hop`]), bij elke plaatsing
+    /// Het gestagede ([`staged_hop`]), bij elke plaatsing
     /// opnieuw opgezocht.
     Staged,
     /// Een image dat Hop gaf (HOP_RESTART), in de kern-heap; het blijft
@@ -820,7 +820,7 @@ impl Image {
     /// De bytes, of `None` als het gestagede image weg is.
     fn bytes(&self) -> Option<&[u8]> {
         match self {
-            Image::Staged => crate::flip::staged_hop(),
+            Image::Staged => staged_hop(),
             Image::Taken(v) => Some(v),
         }
     }
@@ -1168,7 +1168,7 @@ fn ask_restart(
     }
     let image = match image {
         Some(img) => Some(take_image(img)?),
-        None if same == Source::Staged && crate::flip::staged_hop().is_none() => {
+        None if same == Source::Staged && staged_hop().is_none() => {
             return Err(("no image", Fail::Kern(kern::Error::NoEnt)));
         }
         None => None,
@@ -1228,6 +1228,15 @@ fn take_image(img: &kern::system::HopImage) -> Result<Vec<u8>, (&'static str, Fa
     })?;
     v.extend_from_slice(bytes);
     Ok(v)
+}
+
+/// Het gestagede image van Hop zolang het nog een ELF is: na een warme
+/// flip die er zelf overheen moest (`HOPOS_FLIP_STAGE_SHARED`) is het dat
+/// niet meer, en is er geen Hop om te herstarten met hetzelfde image. De
+/// supervisor vraagt het bij elke plaatsing opnieuw.
+pub(crate) fn staged_hop() -> Option<&'static [u8]> {
+    let img = vslots::staged_image()?;
+    (img.get(..4) == Some(b"\x7fELF".as_slice())).then_some(img)
 }
 
 /// Wacht tot het net luistert (`net::NET_READY`: de lease, de uplink, de

@@ -675,20 +675,10 @@ fn too_large(flat: u64, max: u64) -> Refused {
     )
 }
 
-/// Het gestagede image van Hop zolang het nog een ELF is: na een warme
-/// flip die er zelf overheen moest (`HOPOS_FLIP_STAGE_SHARED`) is het dat
-/// niet meer, en is er geen Hop om koud te starten of te herstarten. De
-/// supervisor van Hop (`slots`) vraagt het bij elke plaatsing opnieuw, want
-/// een flip die klaargelegd werd en niet sprong, kan het al overschreven
-/// hebben.
-pub(crate) fn staged_hop() -> Option<&'static [u8]> {
-    let img = vboard::slots::staged_image()?;
-    (img.get(..4) == Some(b"\x7fELF".as_slice())).then_some(img)
-}
-
-/// [`staged_hop`] als (begin, maat), voor de plaats van het nieuwe beeld.
+/// `slots::staged_hop` als (begin, maat), voor de plaats van het nieuwe
+/// beeld.
 fn staged_elf() -> Option<(u64, u64)> {
-    staged_hop().map(|img| (img.as_ptr() as u64, img.len() as u64))
+    crate::slots::staged_hop().map(|img| (img.as_ptr() as u64, img.len() as u64))
 }
 
 /// Waar het nieuwe beeld in de staging gaat: achter het gestagede image

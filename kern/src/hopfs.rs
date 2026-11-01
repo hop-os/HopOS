@@ -290,10 +290,13 @@ fn split(path: &[u8]) -> Result<Vec<&[u8]>> {
 }
 
 impl<D: BlockIo> Fs<D> {
-    /// Een vluchtige bestandslaag op het venster `[first_lba, +blocks)`.
-    /// Blok 0 is `first_lba`: hopfs kan per constructie niet buiten zijn
-    /// venster schrijven (de Mac mini: macOS op dezelfde SSD, 30-08).
-    pub fn new(
+    /// De lege boom op het venster `[first_lba, +blocks)`, het begin van
+    /// [`Fs::mount`]. Blok 0 is `first_lba`: hopfs kan per constructie niet
+    /// buiten zijn venster schrijven (de Mac mini: macOS op dezelfde SSD,
+    /// 30-08). Zonder mount legt hij niets vast en geeft hij vrij meteen
+    /// terug: dat is alleen de vorm van de toetsen (de allocator los van de
+    /// schijf); de kern zelf mount altijd.
+    fn new(
         disk: D,
         first_lba: u64,
         blocks: u64,
@@ -930,13 +933,8 @@ pub async fn commit<D: BlockIo + Copy>(t: &Tree<D>) -> Result<Option<u64>> {
 }
 
 /// De expliciete duurzame barrière: een vastlegging, of zonder verandering
-/// alleen een device-flush. Geeft de bevestigde generatie; op vluchtige
-/// opslag [`Error::VolatileStorage`], want daar bestaat geen duurzame
-/// bevestiging.
+/// alleen een device-flush. Geeft de bevestigde generatie.
 pub async fn sync<D: BlockIo + Copy>(t: &Tree<D>) -> Result<u64> {
-    if !t.borrow().is_persistent() {
-        return Err(Error::VolatileStorage);
-    }
     if commit(t).await?.is_none() {
         let mut disk = t.borrow().disk();
         disk.flush().await?;
@@ -1061,12 +1059,6 @@ impl<D: BlockIo> Fs<D> {
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.generation
-    }
-
-    /// Is de opslag duurzaam (een boom die vastgelegd wordt)?
-    #[must_use]
-    pub fn is_persistent(&self) -> bool {
-        self.persist
     }
 
     /// Het begin van een vastlegging: de boom van NU, als blob voor de

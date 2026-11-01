@@ -143,11 +143,3 @@ fn every_commit_failure_is_returned_without_advancing_generation() {
         assert_eq!(old.borrow_mut().stat(b"after"), Err(Error::NoEnt));
     }
 }
-#[test]
-fn volatile_filesystem_cannot_acknowledge_a_durable_barrier() {
-    let disk = Disk::new();
-    let fs = LocalCell::cell(Fs::new(&disk, 0, (2 << 20) / 512, 512, 1 << 20).unwrap());
-    write(&fs, b"db", b"volatile");
-    assert_eq!(on(sync(&fs)), Err(Error::VolatileStorage));
-    assert_eq!(disk.0.borrow().flushes, 0);
-}

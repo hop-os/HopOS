@@ -28,9 +28,8 @@
 #               blob (HOPOS_HOP_STATE kept=N, N > 0), een nieuwe
 #               HOPOS_HOP_START slot=1, HOP_ADOPTED n=1 en een nieuwe HOP_UP,
 #               en de klok van de nieuwe Hop: een HOP_CLOCK_SYNCED na zijn
-#               HOPOS_HOP_START (SNTP van de host, tools/lib.sh sntp, zodat de ring niet aan
-#               pool.ntp.org hangt; de eerste Hop haalt hem soms niet vóór de
-#               wissel) en nergens een
+#               HOPOS_HOP_START (SNTP van de host, tools/lib.sh sntp, zoals
+#               in elke ring) en nergens een
 #               HOPOS_SYSTEM_REFUSED (de ORION, 24-10: de plaatsen van de oude
 #               Hop telden nog tegen de nieuwe, en zijn kloktaak werd
 #               geweigerd);
@@ -64,7 +63,7 @@ TIMEOUT="${TIMEOUT:-120}"
 TARGET=aarch64-unknown-none-softfloat
 scratch qemu-hop-restart
 PAGE="$ART/page.html"
-ports SYS AGENT LEADER ART WEB NTP
+ports SYS AGENT LEADER ART WEB
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), welcome, en agentd-hopos in $HOP_DIR"
@@ -75,10 +74,9 @@ apps welcome
 strip_elf "$HOP_ELF" "$ART/hop.elf"
 HOP_SUM="$(shasum -a 256 "$ART/hop.elf" | cut -d' ' -f1)"
 serve
-sntp
 
 echo "== booten op QEMU virt met Hop (tot ${TIMEOUT}s; agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT, web :$WEBPORT -> gast :80)"
-hop_virt BOOTARGS=hopos.ntp=10.0.2.2:$NTPPORT
+hop_virt
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1 |slot 1: 2 port\\(s\\) published tcp\\+udp on the uplink: :8080 :9080 HOPOS_SLOT_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: 1 port\\(s\\) published tcp\\+udp on the uplink: :80 HOPOS_SLOT_PUBLISH|slot 2: .*HOPOS_WELCOME_UP port=80"

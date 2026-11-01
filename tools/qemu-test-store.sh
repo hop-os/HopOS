@@ -9,8 +9,8 @@
 # (HOP_STORE_PLAIN_HTTP). De kern boot met Hop in slot 1 en hopos.s3.* in de
 # bootargs (image/qemu-run.sh BOOTARGS, kern/src/nodecfg.rs geeft ze als
 # HOPOS_S3_* aan Hop). Met een bucket is dat ook de lock van Hop's cluster,
-# en een lease vraagt een gezette klok: daarom ook een SNTP-antwoorder op de
-# host (hopos.ntp=10.0.2.2:$NTPPORT, HOP_CLOCK_SYNCED). Van buiten gaat er
+# en een lease vraagt een gezette klok: die van de host, zoals in elke ring
+# (tools/lib.sh sntp, HOP_CLOCK_SYNCED). Van buiten gaat er
 # één jobspec naar de leader:
 # appspike met ROLE=STORE (appspike/src/main.rs, Go's store_demo.go):
 #
@@ -49,7 +49,7 @@ TIMEOUT="${TIMEOUT:-90}"
 TARGET=aarch64-unknown-none-softfloat
 scratch qemu-store
 S3LOG="$ART/s3.log"
-ports SYS AGENT LEADER ART S3 NTP
+ports SYS AGENT LEADER ART S3
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), appspike, en agentd-hopos in $HOP_DIR"
@@ -59,26 +59,8 @@ hop_elf
 serve
 python3 "$DIR/tools/fakes3.py" "$S3PORT" hop >"$S3LOG" 2>&1 &
 PIDS="$PIDS $!"
-# De tijd van de host als SNTP-server (modus 4, stratum 2; het transmit-veld
-# van de vraag terug als originate, dat toetst Hop).
-python3 - "$NTPPORT" >"$ART/ntp.log" 2>&1 <<'PY' &
-import socket, struct, sys, time
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.bind(("127.0.0.1", int(sys.argv[1])))
-def stamp(t):
-    t += 2208988800
-    return struct.pack("!II", int(t), int((t % 1) * (1 << 32)))
-while True:
-    req, addr = s.recvfrom(512)
-    if len(req) < 48:
-        continue
-    now = time.time()
-    resp = bytes([0x24, 2, 6, 0xEC]) + bytes(8) + b"LOCL" + stamp(now) + req[40:48] + stamp(now) + stamp(time.time())
-    s.sendto(resp, addr)
-PY
-PIDS="$PIDS $!"
 
-S3ARGS="hopos.s3.endpoint=http://10.0.2.2:$S3PORT hopos.s3.bucket=hop hopos.s3.region=us-east-1 hopos.s3.key=hopkey hopos.s3.secret=hopsecret hopos.s3.pathstyle=1 hopos.ntp=10.0.2.2:$NTPPORT"
+S3ARGS="hopos.s3.endpoint=http://10.0.2.2:$S3PORT hopos.s3.bucket=hop hopos.s3.region=us-east-1 hopos.s3.key=hopkey hopos.s3.secret=hopsecret hopos.s3.pathstyle=1"
 echo "== booten op QEMU virt met Hop en een S3-nep (tot ${TIMEOUT}s; agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT, s3 :$S3PORT)"
 hop_virt BOOTARGS="$S3ARGS"
 

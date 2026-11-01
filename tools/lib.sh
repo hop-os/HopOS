@@ -70,16 +70,19 @@ QPID=""
 PIDS=""
 
 # scratch NAAM: de console $LOG, een werkmap $ART met de plek van de schijf
-# ($DISK), en een trap die bij elke uitgang QEMU ($QPID), de helpers op de
-# achtergrond ($PIDS) en beide opruimt.
+# ($DISK), een trap die bij elke uitgang QEMU ($QPID), de helpers op de
+# achtergrond ($PIDS) en beide opruimt, en de SNTP-server van de host
+# (sntp, $NTPPORT).
 scratch() {
 	LOG="$(mktemp -t "hopos-$1.XXXXXX")"
 	ART="$(mktemp -d -t "hopos-$1-art.XXXXXX")"
 	DISK="$ART/disk.img"
 	trap cleanup EXIT INT TERM
+	sntp
 }
 cleanup() {
 	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
+	[ -z "${KEEP_ALL:-}" ] || cp "$LOG" "$KEEP_ALL/$(date +%s)-$(basename "$LOG")" 2>/dev/null
 	for p in $PIDS; do kill "$p" 2>/dev/null; done
 	rm -rf "$LOG" "$ART"
 	true
@@ -178,21 +181,40 @@ serve() {
 	PIDS="$PIDS $!"
 }
 
-# sntp: de tijd van de host als SNTP-server op 127.0.0.1:$NTPPORT/udp (voor
-# de gast hopos.ntp=10.0.2.2:$NTPPORT), zodat een ring niet aan pool.ntp.org
-# hangt; zijn log in $ART/ntp.log. Modus 4, stratum 2, het transmit-veld van
-# de vraag als originate (dat toetst Hop), zoals hop/tools/qemu-test-cluster.sh.
+# sntp: de tijd van de host als SNTP-server op 127.0.0.1:$NTPPORT/udp, voor
+# de gast hopos.ntp=10.0.2.2:$NTPPORT: Hop zet zijn klok bij de start
+# verplicht (lukt de eerste meting niet, dan exit en een reset), en een ring
+# hangt zo niet aan pool.ntp.org. Elke ring krijgt hem in scratch, op
+# $NTPPORT uit de omgeving of een vrije (port), en exporteert die; de
+# QEMU-starts (qemu_virt en qemu_rv via bootargs, image/uefi-run.sh in de
+# config) geven hem de gast mee, vóór een eigen hopos.ntp van de ring, dus
+# die wint. image/qemu-run.sh en uefi-run.sh nemen een gezette $NTPPORT als
+# een server die er al is (die van de ring), en starten anders hun eigen
+# (los, of uit tools/qemu-test-sync.py). Modus 4, stratum 2,
+# het transmit-veld van de vraag als originate (dat toetst Hop), zoals
+# hop/tools/qemu-test-cluster.sh; zijn log in $ART/ntp.log. Hij stopt met
+# $PIDS (cleanup), en anders met het proces dat hem startte: in
+# qemu-run.sh doet dat exec, dus dan is het QEMU.
 sntp() {
-	python3 - "$NTPPORT" >"$ART/ntp.log" 2>&1 <<'PY' &
-import socket, struct, sys, time
+	NTPPORT="$(port "${NTPPORT:-0}" NTPPORT)"
+	export NTPPORT
+	ntplog=/dev/null
+	[ -z "${ART:-}" ] || ntplog="$ART/ntp.log"
+	python3 - "$NTPPORT" >"$ntplog" 2>&1 <<'PY' &
+import os, socket, struct, sys, time
+parent = os.getppid()
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(("127.0.0.1", int(sys.argv[1])))
+s.settimeout(0.5)
 print("ntp up", flush=True)
 def stamp(t):
     t += 2208988800
     return struct.pack("!II", int(t), int((t % 1) * (1 << 32)))
-while True:
-    req, addr = s.recvfrom(512)
+while os.getppid() == parent:
+    try:
+        req, addr = s.recvfrom(512)
+    except socket.timeout:
+        continue
     if len(req) < 48:
         continue
     now = time.time()
@@ -201,6 +223,13 @@ while True:
     print("ntp answered", addr, flush=True)
 PY
 	PIDS="$PIDS $!"
+}
+
+# bootargs: de bootparameters voor -append (qemu_virt, qemu_rv): de
+# SNTP-server van sntp, dan $BOOTARGS; de laatste waarde wint
+# (kern::nodecfg), dus een hopos.ntp in BOOTARGS gaat voor.
+bootargs() {
+	printf '%s' "${NTPPORT:+hopos.ntp=10.0.2.2:$NTPPORT${BOOTARGS:+ }}${BOOTARGS:-}"
 }
 
 # --- QEMU
@@ -234,9 +263,14 @@ hop_virt() {
 # i6300esb met een reset als hij afloopt (O2 van 01-11: de watchdog is
 # verplicht, ook op QEMU). De regel van image/qemu-run.sh. Doet exec. $QNETDEV gaat achter de virtio-net (de
 # trage draad van WIRE=1), $QNETOBJ is een extra -object (de vertraging).
+# De bootparameters (bootargs: de SNTP-server en $BOOTARGS) in één
+# -append: QEMU legt ze in /chosen/bootargs van de DTB, en een tweede
+# -append zou de eerste vervangen.
 qemu_virt() {
 	smp="$1"
 	shift
+	args="$(bootargs)"
+	[ -z "$args" ] || set -- -append "$args" "$@"
 	# shellcheck disable=SC2086 # QNETOBJ is een lijst argumenten
 	exec qemu-system-aarch64 -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
 		-cpu cortex-a53 -smp "$smp" -m 3G -serial stdio \
@@ -263,9 +297,10 @@ qemu_rv() {
 			-device "loader,addr=0xa8100000,data=$(wc -c <"$img" | tr -d ' '),data-len=8" \
 			-device "loader,addr=0xa8100008,data=$role,data-len=8" "$@"
 	fi
-	# BOOTARGS: bootparameters in /chosen/bootargs van de DTB, zoals
-	# image/qemu-run.sh op arm64 (het board leest ze als config-laag).
-	[ -z "${BOOTARGS:-}" ] || set -- -append "$BOOTARGS" "$@"
+	# De bootparameters (bootargs) in /chosen/bootargs van de DTB, zoals
+	# qemu_virt op arm64 (het board leest ze als config-laag).
+	args="$(bootargs)"
+	[ -z "$args" ] || set -- -append "$args" "$@"
 	exec qemu-system-riscv64 -M virt -m 1G -smp 2 -bios none -nographic \
 		-kernel "$KERNEL" \
 		-global virtio-mmio.force-legacy=false \

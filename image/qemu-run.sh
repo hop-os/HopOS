@@ -65,7 +65,9 @@
 #                                    van 3 tot 786 ms (30-09)
 #   BOOTARGS="hopos.s3.bucket=hop" image/qemu-run.sh
 #                                    extra bootparameters, letterlijk achter
-#                                    de rest in -append
+#                                    de rest in -append (daar staat altijd
+#                                    hopos.ntp=10.0.2.2:$NTPPORT voor: de
+#                                    tijd van de host, tools/lib.sh sntp)
 #   CFG="a.cfg b.cfg" image/qemu-run.sh
 #                                    hopos.cfg in lagen in het venster van de
 #                                    kern (board/src/cfgwin.rs,
@@ -170,10 +172,8 @@ case "${WIRE:-}" in
 	exit 2
 	;;
 esac
-# De watchdog is verplicht, ook op QEMU (O2 van 01-11): altijd de i6300esb,
-# en een reset (geen exit, geen pauze) als hij afloopt. Zo reset een
-# HOPOS_FATAL hier net als op ijzer. Er is geen knop om hem uit te zetten.
-QWDT="-device i6300esb -action watchdog=reset"
+# De watchdog is verplicht, ook op QEMU (O2 van 01-11): de i6300esb staat in
+# de QEMU-regel zelf (tools/lib.sh qemu_virt), niet hier nog een keer.
 # FEATURES=gui (of een andere lijst) komt achter de board-feature, zoals
 # in uefi-run.sh.
 FEATURES="$FEATURES${EXTRA_FEATURES:+,$EXTRA_FEATURES}"
@@ -206,17 +206,15 @@ if [ -n "$IMAGE" ]; then
 		-device "loader,addr=0xb0100008,data=$ROLE,data-len=8" "$@"
 fi
 
-# De bootparameters: QEMU legt -append in /chosen/bootargs van de DTB, en
-# daar leest het board ze (board/qemuvirt `os_core`, hopos `bootparam`).
-# Eén -append: een tweede zou de eerste vervangen.
-ARGS=""
-[ -n "${OSCORE:-}" ] && ARGS="hopos.oscore=$OSCORE"
-# BOOTARGS: meer bootparameters, letterlijk (tools/qemu-test-store.sh geeft
-# er `hopos.s3.*` mee voor Hop).
-[ -n "${BOOTARGS:-}" ] && ARGS="${ARGS:+$ARGS }$BOOTARGS"
-if [ -n "$ARGS" ]; then
-	set -- -append "$ARGS" "$@"
-fi
+# De bootparameters: tools/lib.sh qemu_virt zet ze in één -append (QEMU
+# legt die in /chosen/bootargs van de DTB, en daar leest het board ze:
+# board/qemuvirt `os_core`, hopos `bootparam`): de SNTP-server van de host
+# (tools/lib.sh sntp: die van de ring als hij $NTPPORT meegeeft, anders een
+# eigen die met QEMU stopt), dan OSCORE, dan BOOTARGS, letterlijk
+# (tools/qemu-test-store.sh geeft er `hopos.s3.*` mee voor Hop). De laatste
+# waarde wint, dus een hopos.ntp in BOOTARGS gaat voor.
+[ -n "${NTPPORT:-}" ] || sntp
+[ -z "${OSCORE:-}" ] || BOOTARGS="hopos.oscore=$OSCORE${BOOTARGS:+ $BOOTARGS}"
 
 # De schijf: ijl aangemaakt als hij er niet is (dd met seek schrijft niets).
 # Met DISKLAT een null-co met die latency per verzoek, zonder bestand.
@@ -274,7 +272,7 @@ if [ -n "${DNSPORT:-}" ]; then
 fi
 QFWD="$FWD"
 # shellcheck disable=SC2086
-set -- $SCREEN -monitor none $QUSB $QWDT $QDISK -kernel "$KERNEL" "$@"
+set -- $SCREEN -monitor none $QUSB $QDISK -kernel "$KERNEL" "$@"
 # Met een artifact-server draait QEMU als kind, zodat de server met hem
 # stopt; anders vervangt hij dit script.
 if [ -n "$ARTPID" ]; then

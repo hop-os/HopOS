@@ -135,6 +135,15 @@ fi
 # BOARD=uefi) blijft het venster leeg en staat op de ESP een hopos.cfg met
 # alleen de rol: de terugval van de stub (de QEMU-toetsen rekenen op een
 # dichte API, dus geen sleutels).
+#
+# Op QEMU staat er de SNTP-server van de host vóór (tools/lib.sh sntp,
+# hopos.ntp=10.0.2.2:$NTPPORT): die van de ring als hij $NTPPORT meegeeft
+# (ook bij BUILD_ONLY), anders zonder BUILD_ONLY een eigen die met QEMU
+# stopt. Een eigen hopos.ntp in CFG wint (de laatste waarde); een build
+# voor ijzer, zonder ring, krijgt geen.
+[ -n "${BUILD_ONLY:-}" ] || [ -n "${NTPPORT:-}" ] || sntp
+NTPCFG=""
+[ -z "${NTPPORT:-}" ] || NTPCFG="hopos.ntp=10.0.2.2:$NTPPORT"
 if [ -z "${CFG:-}" ] && [ "$BOARD" != uefi ]; then
 	FLAVOR=headless
 	if [ "${GUI:-0}" = 1 ] || [ "${MEDIA:-0}" = 1 ]; then FLAVOR=headfull; fi
@@ -144,13 +153,17 @@ if [ -n "${CFG:-}" ]; then
 	for f in $CFG; do
 		[ -f "$f" ] || { echo "uefi-run: CFG: $f does not exist" >&2; exit 1; }
 	done
-	# shellcheck disable=SC2086 # CFG is een lijst bestanden
-	cat $CFG | grep -v '^hopos.stage=' >"$TDIR/hopos.cfg" || true
+	{
+		[ -z "$NTPCFG" ] || echo "$NTPCFG"
+		# shellcheck disable=SC2086 # CFG is een lijst bestanden
+		cat $CFG
+	} | grep -v '^hopos.stage=' >"$TDIR/hopos.cfg" || true
 	if [ -n "$APP" ]; then echo "hopos.stage=$ROLE" >>"$TDIR/hopos.cfg"; fi
 	python3 "$DIR/image/hopcfg.py" set "$EFI" "$TDIR/hopos.cfg"
 	rm -f "$ESP/hopos.cfg"
 else
 	printf '# HopOS node config (hopos.cfg op de ESP-root)\n' >"$ESP/hopos.cfg"
+	[ -z "$NTPCFG" ] || echo "$NTPCFG" >>"$ESP/hopos.cfg"
 	if [ -n "$APP" ]; then echo "hopos.stage=$ROLE" >>"$ESP/hopos.cfg"; fi
 fi
 echo "uefi-run: ESP in $ESP" >&2

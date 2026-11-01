@@ -35,8 +35,9 @@
 //!
 //! Wie `&mut self` heeft, is de enige die de ringen aanraakt. Volgorde, zoals
 //! Go's `New`, `Reset`, `SetMAC`, `Init`: [`Tg3::new`] (reset, MAC, MDIO en
-//! PHY-id, ringen, engines), dan [`Tg3::link_up`] (wachten op de PHY, en de
-//! poortmodus die bij de snelheid hoort).
+//! PHY-id, ringen, engines), dan [`Tg3::start_link`] (de autonegotiatie aan),
+//! en de link in de taak ([`netdev::Device::link`]: één blik per keer, en bij
+//! link de poortmodus die bij de snelheid hoort).
 //!
 //! # De drie lessen van 29-08
 //!
@@ -255,13 +256,6 @@ pub enum Error {
         /// Het PHY-id (reg 2 en 3).
         id: u32,
     },
-    /// Geen link binnen de grens.
-    NoLink {
-        /// De laatste BMSR.
-        bmsr: u16,
-        /// De grens in milliseconden.
-        ms: u64,
-    },
     /// De auxiliary status meldt een snelheid die we niet kennen.
     LinkState {
         /// MII_AUX_STAT.
@@ -288,10 +282,6 @@ impl fmt::Display for Error {
                 if write { "write" } else { "read" }
             ),
             Self::NoPhy { id } => write!(f, "tg3: no PHY on the MDIO bus (id {id:#x})"),
-            Self::NoLink { bmsr, ms } => write!(
-                f,
-                "tg3: no link within {ms} ms (cable plugged in? BMSR {bmsr:#06x})"
-            ),
             Self::LinkState { aux } => write!(f, "tg3: unknown link state (aux {aux:#x})"),
         }
     }
@@ -306,8 +296,6 @@ const US: u64 = 1_000;
 const MS: u64 = 1_000_000;
 /// Hoe lang een MDIO-transactie mag duren.
 const MDIO_NS: u64 = 50 * MS;
-/// Tussen twee link-kijkjes.
-const LINK_POLL_NS: u64 = 20 * MS;
 
 /// Schrijft een register en zet er een barrière achter, zoals Go's `wr`: de
 /// volgorde van de init is die van tg3, en die moet het device ook zo zien.
@@ -374,7 +362,7 @@ impl netdev::IrqAck for IrqAck {
 impl Tg3 {
     /// Reset, MAC, MDIO en PHY-id, de ringen, en de engines aan: Go's `New`,
     /// `Reset`, `SetMAC`, de PHY-controle van het board, en `Init`. De link
-    /// komt daarna ([`link_up`](Self::link_up)). `now` geeft monotone
+    /// komt daarna ([`start_link`](Self::start_link)). `now` geeft monotone
     /// nanoseconden; alle wachttijden zijn begrensd pollen op die klok.
     ///
     /// Het MAC komt van buiten omdat de chip het na een PERST niet meer weet:
@@ -1012,35 +1000,26 @@ impl Tg3 {
         Ok(u32::from(hi) << 16 | u32::from(lo))
     }
 
-    /// Wacht tot de PHY een link meldt, en zet de MAC in de poortmodus die
-    /// bij de gemeten snelheid hoort (Go's `LinkUp` plus `SetPortMode`).
-    /// Autonegotiatie wordt aangezet als hij uit stond: de kabel kan er net
-    /// in zijn gegaan.
-    pub fn link_up(&mut self, timeout_ns: u64) -> Result<Link> {
+    /// Zet de autonegotiatie aan als hij uit stond (de kabel kan er net in
+    /// zijn gegaan), zonder te wachten: de link komt in de taak
+    /// ([`netdev::Device::link`]).
+    pub fn start_link(&mut self) -> Result {
         self.mdio_setup();
         let bmcr = self.mdio_read(PHY_ADDR, mdio::reg::BMCR)?;
         if bmcr & mdio::BMCR_AN_ENABLE == 0 {
             let v = bmcr | mdio::BMCR_AN_ENABLE | mdio::BMCR_AN_RESTART;
             self.mdio_write(PHY_ADDR, mdio::reg::BMCR, v)?;
         }
-        // BMSR twee keer: het link-bit is latching-laag.
-        let mut bmsr = Ok(0);
-        let up = dev::poll_until(self.now, timeout_ns, || {
-            bmsr = self
-                .mdio_read(PHY_ADDR, mdio::reg::BMSR)
-                .and_then(|_| self.mdio_read(PHY_ADDR, mdio::reg::BMSR));
-            let up = bmsr.map_or(true, |b| b & mdio::BMSR_LINK != 0);
-            if !up {
-                dev::delay(self.now, LINK_POLL_NS);
-            }
-            up
-        });
-        let bmsr = bmsr?;
-        if !up {
-            return Err(Error::NoLink {
-                bmsr,
-                ms: timeout_ns / MS,
-            });
+        Ok(())
+    }
+
+    /// Eén blik op de PHY (BMSR twee keer: het link-bit is latching-laag);
+    /// bij link de MAC in de poortmodus die bij de gemeten snelheid hoort
+    /// (Go's `LinkUp` plus `SetPortMode`).
+    fn link_now(&mut self) -> Result<Option<Link>> {
+        let _ = self.mdio_read(PHY_ADDR, mdio::reg::BMSR)?;
+        if self.mdio_read(PHY_ADDR, mdio::reg::BMSR)? & mdio::BMSR_LINK == 0 {
+            return Ok(None);
         }
         let link = decode_aux(self.mdio_read(PHY_ADDR, MII_AUX_STAT)?)?;
         self.set_port_mode(link);
@@ -1050,7 +1029,7 @@ impl Tg3 {
         // geen unicast aan (de diagnoseregel las de default terug). Go schreef
         // het adres pas in Init, ná LinkUp, en had er geen last van.
         self.set_mac();
-        Ok(link)
+        Ok(Some(link))
     }
 
     /// De MAC in de modus die bij de snelheid hoort: GMII voor gigabit, MII
@@ -1303,6 +1282,11 @@ impl netdev::Device for Tg3 {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    /// Eén blik op de PHY; bij link de poortmodus en het adres.
+    fn link(&mut self) -> Option<u32> {
+        self.link_now().ok()?.map(|l| l.mbps)
     }
 
     fn stats(&self) -> netdev::Stats {

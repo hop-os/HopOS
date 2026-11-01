@@ -2,7 +2,7 @@
 //! SMpro. Het board-contract zelf, en alles wat niet anders is dan op elke
 //! UEFI-machine, is van [`On`].
 
-use crate::{LINK_TIMEOUT_NS, is_nic};
+use crate::is_nic;
 use board::{ClockKnob, CoreClass, Error, Thermal};
 use board_uefi::irq::{At, Wired, bell_within};
 use board_uefi::{NET_BUF, NET_DMA, On, Platform, Uefi, pcie};
@@ -219,9 +219,11 @@ impl Platform for Ampere {
         pcie::probe_nvme()
     }
 
-    /// De eerste igb: BAR0, reset en MAC, ringen, dan de link, en dan de
-    /// lijn: MSI-X via de ITS met een zelftest ([`wire_nic`]); zonder lijn
-    /// een fout.
+    /// De eerste igb: BAR0, reset en MAC, ringen, de start van de
+    /// autonegotiatie, en dan de lijn: MSI-X via de ITS met een zelftest
+    /// ([`wire_nic`]); zonder lijn een fout. De probe wacht niet op de link:
+    /// dat doet de taak (`netdev::Device::link`, STATUS.LU; de MAC volgt de
+    /// PHY zelf).
     fn probe_nic(&self, _uefi: &Uefi) -> Result<Option<Igb>, Error> {
         let segs = pcie::segments();
         let Some(hit) = pcie::first_in(&segs, 0, is_nic) else {
@@ -242,19 +244,19 @@ impl Platform for Ampere {
                 cpu::println!("net: {e} at {} bar0 {:#x}", hit.f.bdf, hit.bar);
                 Error::Nic("igb init failed")
             })?;
-        let link = nic.link_up(LINK_TIMEOUT_NS).map_err(|e| {
+        nic.start_link().map_err(|e| {
             cpu::println!("net: {e}");
-            Error::Nic("igb has no link")
+            Error::Nic("igb PHY did not start")
         })?;
         let (vendor, device, bdf, bar) = (hit.f.vendor, hit.f.device, hit.f.bdf, hit.bar);
         let (wired, us) = wire_nic(&segs, &hit, &mut nic).map_err(|why| {
             cpu::println!(
-                "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link {link}, no line: {why} HOPOS_NIC_IRQ"
+                "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link pending (autoneg), no line: {why} HOPOS_NIC_IRQ"
             );
             Error::Irq("the igb line did not come up")
         })?;
         cpu::println!(
-            "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link {link}, {wired}, first interrupt after {us} us HOPOS_NIC_IRQ"
+            "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link pending (autoneg), {wired}, first interrupt after {us} us HOPOS_NIC_IRQ"
         );
         Ok(Some(nic))
     }

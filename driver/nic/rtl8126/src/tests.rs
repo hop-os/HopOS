@@ -231,17 +231,18 @@ fn the_mac0_fallback_is_used_when_the_backup_is_empty() {
 }
 
 #[test]
-fn link_up_on_the_8126a_advertises_5g_and_reads_physr() {
+fn link_on_the_8126a_advertises_5g_and_reads_physr() {
     let m = chip(0x64a, true);
     let mut n = up(&m);
-    let l = n.link_up(5_000_000_000).unwrap();
+    n.start_link().unwrap();
     assert_eq!(
-        l,
-        Link {
+        n.poll_link().unwrap(),
+        Some(Link {
             mbps: 5000,
             full_duplex: true
-        }
+        })
     );
+    assert_eq!(n.link(), Some(5000));
     let writes = CHIP.with(|c| c.borrow().phy_writes.clone());
     assert!(
         writes.contains(&(PHY_NBASET, 0x0180)),
@@ -263,8 +264,8 @@ fn the_8125b_runs_its_ephy_table_and_phy_steps() {
     assert_eq!(ephy[0], (0x0b, 0xa908));
     assert_eq!(ephy[2], (0x4b & 0x1f, 0xa908));
     assert_eq!(ephy[4], (0x22 & 0x1f, (0x1234 & !0x0030) | 0x0020));
-    let l = n.link_up(5_000_000_000).unwrap();
-    assert_eq!(l.mbps, 5000); // de nep-PHYSR; op ijzer zegt de 8125B 2500
+    n.start_link().unwrap();
+    assert_eq!(n.link(), Some(5000)); // de nep-PHYSR; op ijzer zegt de 8125B 2500
     let writes = CHIP.with(|c| c.borrow().phy_writes.clone());
     let params: Vec<u16> = writes
         .iter()
@@ -278,21 +279,12 @@ fn the_8125b_runs_its_ephy_table_and_phy_steps() {
 }
 
 #[test]
-fn no_link_reports_bmsr_and_phystatus() {
+fn no_link_is_none_and_no_wait() {
     let m = chip(0x649, false);
     let mut n = up(&m);
-    let e = n.link_up(100_000_000).unwrap_err();
-    assert!(
-        matches!(
-            e,
-            Error::NoLink {
-                bmsr: 0,
-                ms: 100,
-                ..
-            }
-        ),
-        "{e:?}"
-    );
+    n.start_link().unwrap();
+    assert_eq!(n.poll_link(), Ok(None));
+    assert_eq!(n.link(), None);
 }
 
 #[test]

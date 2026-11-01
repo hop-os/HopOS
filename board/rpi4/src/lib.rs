@@ -173,16 +173,21 @@ impl Soc for Bcm2711 {
             phy.id1,
             phy.id2
         );
-        let link = driver_mdio::autoneg(&mut nic, phy.addr, true, ctx.now, 8_000_000_000)
-            .map_err(|_| Error::Nic("genet: no link within 8 s"))?;
-        nic.init(link)
+        // De autonegotiatie start hier, maar de probe wacht er niet op: de
+        // link-wacht is van de taak (`netdev::Device::link`, hopos
+        // `net::start`), en de GENET zet zijn MAC pas dan op de snelheid.
+        nic.start_link(phy.addr)
+            .map_err(|_| Error::Nic("genet: MDIO stuck starting autoneg"))?;
+        nic.init()
             .map_err(|_| Error::Nic("genet: DMA region too small"))?;
         // De lijn: de GIC staat al (`start_interrupts` komt eerst).
         NIC_ACK.set(nic.irq_ack());
         cpu::irq::enable(Line(GENET_INTID), Some(nic_ack), Some(&NIC_BELL))
             .map_err(|_| Error::Irq("genet line refused"))?;
         nic.set_irq(&NIC_BELL);
-        cpu::println!("net: genet up, {link}, RX on INTID {GENET_INTID}");
+        cpu::println!(
+            "net: genet up, link pending (autoneg), RX and TX done on INTID {GENET_INTID}"
+        );
         Ok(Some(nic))
     }
 }

@@ -317,8 +317,10 @@ zet hem; HopOS doet geen init). Bouw met
    hem uit te zetten (O2 van 01-11). Een node die na ~21 s
    herstart zonder `HOPOS_CANARY_MISS` ervoor: de pets komen niet aan (de
    restart-schrijf naar CRR).
-9. **Het net**: `net: dwmac version 0x1037, PHY 0 id 0043:5649, link 100 Mbps
-   full duplex`, dan `HOPOS_NIC_UP` en `HOPOS_NET_UP`. Zonder `hopos.mac` en
+9. **Het net**: `net: dwmac version 0x1037, PHY 0 id 0043:5649, link
+   pending (autoneg)`, `net: dwmac irq 31 on the PLIC (RX and TX done)
+   HOPOS_NIC_IRQ`, dan `HOPOS_NIC_UP`, `net: link up at 100 Mbps after N
+   ms HOPOS_LINK_UP` (de probe wacht niet meer, 01-11) en `HOPOS_NET_UP`. Zonder `hopos.mac` en
    `hopos.node`: `HOPOS_MAC_FIXED` (een tweede LicheeRV op hetzelfde LAN
    botst). `version reads 0`: de klokgates (REG_CLK_EN_0 bit 25/26). `no PHY
    on the MDIO bus`: het ePHY-recept kwam niet aan (volgorde niet

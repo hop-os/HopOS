@@ -15,7 +15,8 @@
 //!
 //! Volgorde, zoals mainline (probe, open, phy_start): [`Rtl8126::new`]
 //! (chip-id, `hw_init`, `hw_reset`, MAC, ringen, `hw_start`), dan
-//! [`Rtl8126::link_up`] (PHY aan, autoneg, wachten).
+//! [`Rtl8126::start_link`] (PHY aan, autoneg), en de link in de taak
+//! ([`netdev::Device::link`], één blik per keer; de MAC volgt de PHY zelf).
 //!
 //! De PHY zit achter de PHY-OCP-ruimte: clause 22 op 0xa400 + 2 · reg; de
 //! registernamen en bits komen uit de gedeelde laag (`driver-mdio`).
@@ -124,15 +125,6 @@ pub enum Error {
     },
     /// Geen geldig unicast-MAC in MAC0_BKP of MAC0.
     NoMac,
-    /// Geen link binnen de grens.
-    NoLink {
-        /// De laatste BMSR.
-        bmsr: u16,
-        /// PHYstatus van de MAC.
-        phy_status: u32,
-        /// De grens in milliseconden.
-        ms: u64,
-    },
     /// PHYSR meldt een snelheidscode die we niet kennen.
     Speed(u16),
 }
@@ -153,14 +145,6 @@ impl fmt::Display for Error {
                 write!(f, "rtl8126: {what} timed out (reg {reg:#x}={val:#x})")
             }
             Self::NoMac => f.write_str("rtl8126: no valid MAC in MAC0_BKP/MAC0"),
-            Self::NoLink {
-                bmsr,
-                phy_status,
-                ms,
-            } => write!(
-                f,
-                "rtl8126: no link within {ms} ms (cable? BMSR={bmsr:#x} PHYstatus={phy_status:#x})"
-            ),
             Self::Speed(v) => write!(f, "rtl8126: unknown PHYSR speed code {v:#x}"),
         }
     }
@@ -644,7 +628,7 @@ impl Rtl8126 {
 
     /// PHY aan (BMCR.PDOWN weg), de VER_70-PHY-config zonder firmware-blob,
     /// een soft-reset, alles adverteren en autoneg herstarten. De link zelf
-    /// komt later: [`link_up`](Self::link_up).
+    /// komt later, in de taak ([`netdev::Device::link`]).
     pub fn start_link(&mut self) -> Result {
         let bmcr = phy_c22(mdio::reg::BMCR);
         // genphy_resume: power-down eraf, 20 ms (rtlgen_resume).
@@ -705,39 +689,13 @@ impl Rtl8126 {
 
     /// Eén kijkje naar de link: BMSR is latched-low, dus twee keer lezen
     /// (`genphy_update_link`); staat hij, dan de snelheid uit PHYSR.
-    fn poll_link(&mut self) -> Result<(Option<Link>, u16)> {
+    fn poll_link(&mut self) -> Result<Option<Link>> {
         let bmsr = phy_c22(mdio::reg::BMSR);
         let _ = self.phy_ocp_read(bmsr)?;
-        let s = self.phy_ocp_read(bmsr)?;
-        if s & mdio::BMSR_LINK == 0 {
-            return Ok((None, s));
+        if self.phy_ocp_read(bmsr)? & mdio::BMSR_LINK == 0 {
+            return Ok(None);
         }
-        let physr = self.phy_ocp_read(PHY_PHYSR)?;
-        decode_physr(physr).map(|l| (Some(l), s))
-    }
-
-    /// [`start_link`](Self::start_link) en dan begrensd wachten, om de 50
-    /// ms een kijkje. NBASE-T-autonegotiatie kan seconden duren (het O6N-
-    /// board gaf 12 s).
-    pub fn link_up(&mut self, timeout_ns: u64) -> Result<Link> {
-        self.start_link()?;
-        let mut seen = Ok((None, 0));
-        let _ = dev::poll_until(self.now, timeout_ns, || {
-            seen = self.poll_link();
-            let up = matches!(seen, Err(_) | Ok((Some(_), _)));
-            if !up {
-                dev::delay(self.now, LINK_POLL_NS);
-            }
-            up
-        });
-        match seen? {
-            (Some(l), _) => Ok(l),
-            (None, bmsr) => Err(Error::NoLink {
-                bmsr,
-                phy_status: self.regs().phy_status.read(),
-                ms: timeout_ns / 1_000_000,
-            }),
-        }
+        decode_physr(self.phy_ocp_read(PHY_PHYSR)?).map(Some)
     }
 
     /// De variantnaam ("RTL8126A", "RTL8125B", ...).
@@ -913,6 +871,11 @@ impl netdev::Device for Rtl8126 {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    /// Eén blik op de PHY. De MAC volgt de PHY zelf: niets te zetten.
+    fn link(&mut self) -> Option<u32> {
+        self.poll_link().ok()?.map(|l| l.mbps)
     }
 
     fn stats(&self) -> netdev::Stats {

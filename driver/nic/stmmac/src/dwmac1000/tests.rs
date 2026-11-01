@@ -13,7 +13,8 @@ use netdev::Device as _;
 
 fn running() -> crate::tests::Rig<Hw> {
     let mut f = rig::<Hw>();
-    f.n.bring_up(100, true).unwrap();
+    f.n.bring_up().unwrap();
+    f.n.adjust_link(100, true);
     f
 }
 
@@ -76,12 +77,12 @@ fn every_descriptor_and_buffer_owns_its_cachelines() {
 }
 
 #[test]
-fn mac_conf_sets_the_rmii_bits_and_only_rmii_speeds_pass() {
+fn mac_conf_sets_the_rmii_bits_and_no_gigabit() {
     let base = CONF_PORT_MII | CONF_DIS_RX_OWN | CONF_TX_EN | CONF_RX_EN;
     assert_eq!(mac_conf(10, false), base);
     assert_eq!(mac_conf(10, true), base | CONF_DUPLEX);
     assert_eq!(mac_conf(100, true), base | CONF_FES100 | CONF_DUPLEX);
-    assert!(Hw::speed_ok(10) && Hw::speed_ok(100) && !Hw::speed_ok(1000));
+    const { assert!(!Hw::GIGABIT, "RMII: the PHY must not advertise 1000") };
 }
 
 #[test]

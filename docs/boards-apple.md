@@ -222,9 +222,11 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
     abort landt bij de stap die hem veroorzaakte), `apcie: brought up by
     HopOS, 6 power gate(s), 263 tunable(s), 2 of 3 port(s)` (29-08), `apcie:
     link up, endpoint 02:00.0 14e4:1682`, `tg3: ASIC 0x57766 ...`, `tg3:
-    LINK UP, 1000 Mb/s full duplex`, `net: tg3 INTx on AIC irq 1253 (port
+    link pending (autoneg)`, `net: tg3 INTx on AIC irq 1253 (port
     2 block 1249 + INTA 4), first interrupt after N us ... HOPOS_NIC_IRQ`,
-    `HOPOS_NIC_UP mac=1c:f6:4c:54:fa:90`. Onder m1n1 kan de eerste regel
+    `HOPOS_NIC_UP mac=1c:f6:4c:54:fa:90`, en uit de pomp-taak `net: link
+    up at 1000 Mbps after N ms HOPOS_LINK_UP`: dan pas zet de tg3 zijn
+    poortmodus en het MAC-adres (01-11, de probe wacht niet meer). Onder m1n1 kan de eerste regel
     `apcie: already up` zijn. `net: tg3 polled, AIC irq ...: the forced
     interrupt did not arrive within 50 ms, port INTSTAT ...`: de lijn kwam
     niet aan (bits 3:0 van INTSTAT zijn INTA tot INTD, Linux

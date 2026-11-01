@@ -19,7 +19,7 @@ wat de console moet tonen en wat een afwijking betekent.
 | SoC-glue: klokgates, bronkeuze en snelheidsdeler (CRU), AXI-reset, RGMII-modus (GRF), de gmac1m1-pinmux, de PHY-reset op GPIO3 PC0, de klokken en de reset van het TRNG | `board/rk3566/src/soc.rs` | idem |
 | Identity map: kern-RAM Normal, DMA Normal-NC, de rest Device | `board/rk3566/src/mmu.rs` | const-asserties tegen het plan |
 | DWMAC4: registerblok, descriptors, MTL, de ops-tabel op de gedeelde stmmac-kern (reset, MDIO-master, ringen, `netdev::Device`, IRQ-ack en rearm), de MMC-interrupts dicht (anders stormt de lijn na 2 GiB binnen, 03-10) | `driver/nic/stmmac` (feature `dwmac4`) | 12 host-tests voor de DWMAC4, 12 voor de kern op een nagebootste core, op een nep-registerblok en nep-DMA in RAM |
-| MDIO: scan, autonegotiatie, RTL8211F-delays | `driver/nic/mdio` | 10 host-tests (samen met de Pi-port) |
+| MDIO: scan, de start van de autonegotiatie en één blik op de link, RTL8211F-delays | `driver/nic/mdio` | 10 host-tests (samen met de Pi-port) |
 | Linkscript: Image op 0x0220_0000, tekst op 0x0221_0000 | `hopos/link-rk3566.ld` | het image-script leest het ELF terug |
 | Kaart-image: build, ELF naar arm64-Image, Hop (of een app), de initrd, donor, MBR plus FAT16 | `image/radxa-zero3.sh` | levert het kaart-image en leest het terug: `hopos.img`, `extlinux.conf`, `hopos.cfg` en `hop.elf` komen met hun sha256 uit de FAT (30-09 ook door macOS gemount: dezelfde hashes) |
 
@@ -193,10 +193,14 @@ b6-image) staat in `image/firmware/radxa/donor-boot.bin` (herkomst in de
     - `RTL8211F at 1 rgmii delays (tx, rx) Ok((..)) -> Ok((true, true))`:
       ná de schrijf moeten beide `true` zijn. Zonder TX-delay komt er een
       link, werkt RX en verdwijnt elk verzonden frame (06-08).
-    - `phy: no link within 8000 ms`: kabel, of de PHY-reset.
-12. **`net: dwmac4 at 0xfe010000 version 0x3051, PHY 1, link 1000 Mbps full
-    duplex, intid 64`** en een diag-regel met `rxdesc[0] 0xc1000000`
-    (OWN|IOC|BUF1V: de ring staat klaar). Dan `HOPOS_NIC_UP mac=02:48:4f:50:..`.
+12. **`net: dwmac4 at 0xfe010000 version 0x3051, PHY 1, link pending
+    (autoneg), intid 64 (RX and TX done)`** en een diag-regel met
+    `rxdesc[0] 0xc1000000` (OWN|IOC|BUF1V: de ring staat klaar). Dan
+    `HOPOS_NIC_UP mac=02:48:4f:50:..`, en uit de pomp-taak `net: link up
+    at 1000 Mbps after N ms HOPOS_LINK_UP`: pas dan zet de driver de
+    RGMII-deler (`soc::gmac_set_speed`) en de MAC op de snelheid (01-11,
+    de probe wacht niet meer). Geen `HOPOS_LINK_UP`: kabel, of de
+    PHY-reset; de guard reset de node na 120 s.
     Het adres volgt uit `hopos.node` (net::nodemac); `HOPOS_MAC_FIXED`
     betekent dat er geen node-naam was.
 13. **DHCP en de lijn.** De kern vraagt een lease (net.rs). In

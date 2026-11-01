@@ -249,11 +249,12 @@ impl Platform for Cix {
                     cpu::println!("net: {e} at {} bar2 {:#x}", hit.f.bdf, hit.bar);
                     Error::Nic("rtl8126 init failed")
                 })?;
-        // De autonegotiatie start hier, maar de boot wacht er niet op: NBASE-T
+        // De autonegotiatie start hier, maar de probe wacht er niet op: NBASE-T
         // duurt tot 12 s (het Go-board), langer dan de SBSA-watchdog van 8,6 s
-        // die al gewapend is en pas met de executor geaaid wordt. De lease is
-        // de wacht (DHCP op zijn rondes, in de taak); geen link binnen de
-        // guard van 120 s is een reset, en de koude boot probeert opnieuw.
+        // die al gewapend is en pas met de executor geaaid wordt. De link-wacht
+        // is van de taak (`netdev::Device::link`, vóór de pomp start); geen
+        // link binnen de guard van 120 s is een reset, en de koude boot
+        // probeert opnieuw.
         nic.start_link().map_err(|e| {
             cpu::println!("net: {} {e}", nic_name(&nic));
             Error::Nic("rtl8126 PHY did not start")

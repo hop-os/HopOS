@@ -509,17 +509,13 @@ impl Board for Apple {
         })?;
         println!("tg3: {}", nic.describe());
         serror_check("the tg3 init");
-        match nic.link_up(8_000_000_000) {
-            Ok(l) => println!(
-                "tg3: LINK UP, {} Mb/s {} duplex",
-                l.mbps,
-                if l.full_duplex { "full" } else { "half" }
-            ),
-            Err(e) => {
-                println!("tg3: {e}, cable plugged in? HOPOS_TG3_NOLINK");
-                return Err(Error::Nic("no link"));
-            }
-        }
+        // De autonegotiatie aan, zonder te wachten: de link-wacht is van de
+        // taak (`netdev::Device::link`), en de tg3 zet dan zijn poortmodus.
+        nic.start_link().map_err(|e| {
+            println!("tg3: {e} HOPOS_TG3_FAIL");
+            Error::Nic("tg3 PHY did not start")
+        })?;
+        println!("tg3: link pending (autoneg)");
         wire_nic(&mut nic)?;
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))

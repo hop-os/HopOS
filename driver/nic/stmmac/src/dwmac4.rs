@@ -319,14 +319,11 @@ impl Ops for Hw {
         (&r.chan.intr_ena, &r.chan.status)
     }
 
-    /// RGMII: 10, 100 of 1000; `mac_config` maakt van alles boven 100
-    /// gigabit.
-    fn speed_ok(_mbps: u32) -> bool {
-        true
-    }
+    /// RGMII: 10, 100 of 1000.
+    const GIGABIT: bool = true;
 
     /// De volgorde van Linux (`stmmac_hw_setup`).
-    fn program(r: &Regs, ring: &Rings<Self>, mac: Mac, mbps: u32, full_duplex: bool) -> Result {
+    fn program(r: &Regs, ring: &Rings<Self>, mac: Mac) -> Result {
         let c = &r.chan;
 
         // 1. De AXI-kant, met de waarden uit de DTS van dit silicium.
@@ -377,8 +374,8 @@ impl Ops for Hw {
         r.packet_filter.write(0);
         r.rxq_ctrl0.write(RXQ0_DCB_ENABLE);
 
-        // 5. De MAC-config: core-init plus snelheid en duplex.
-        r.config.update(|v| mac_config(v, mbps, full_duplex));
+        // 5. De MAC-config (core-init, snelheid en duplex) volgt bij de link
+        //    (`set_link`), zoals `stmmac_mac_link_up`.
 
         // De MMC-interrupts dicht (Linux `stmmac_mmc_setup`). GEMETEN 03-10
         // op de Radxa: toen de RX-octetteller over 0x8000_0000 ging, stond
@@ -390,15 +387,21 @@ impl Ops for Hw {
         r.mmc_tx_mask.write(MMC_INT_ALL);
         r.mmc_ipc_mask.write(MMC_INT_ALL);
 
-        // 6. Lopen: sticky bits van vóór de reset weg, dan de DMA, dan de
-        //    MAC.
+        // 6. Lopen: sticky bits van vóór de reset weg, dan de DMA; de MAC
+        //    bij de link.
         r.dma_status.update(|v| v);
         c.status.update(|v| v);
         c.tx_control.update(|v| v | CHAN_START);
         c.rx_control.update(|v| v | CHAN_START);
-        r.config.update(|v| v | CFG_TE | CFG_RE);
         dev::mb();
         Ok(())
+    }
+
+    /// Core-init plus snelheid en duplex, en zender en ontvanger aan.
+    fn set_link(r: &Regs, mbps: u32, full_duplex: bool) {
+        r.config
+            .update(|v| mac_config(v, mbps, full_duplex) | CFG_TE | CFG_RE);
+        dev::mb();
     }
 
     /// De RX-tail: de DMA vult tot hier.

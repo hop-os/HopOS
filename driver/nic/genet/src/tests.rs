@@ -85,7 +85,7 @@ fn init_follows_the_hardware_counters_and_programs_the_mac() {
     dev::write32(b.add(RX_DMA + 0x08), 0x1_0105);
     dev::write32(b.add(TX_DMA + 0x08), 0x0203);
     let mut n = f.nic();
-    n.init(LINK_1G).unwrap();
+    n.init().unwrap();
     assert_eq!(n.rx_cons, 0x0105);
     assert_eq!(n.tx_prod, 0x0203);
     assert_eq!(
@@ -110,9 +110,15 @@ fn init_follows_the_hardware_counters_and_programs_the_mac() {
     let bus = d.0 + 7 * BUF_SIZE as u64;
     assert_eq!(dev::read32(b.add(RX_BD + 7 * 12 + 4)), bus as u32);
     assert_eq!(dev::read32(b.add(RX_BD + 7 * 12 + 8)), (bus >> 32) as u32);
-    // Gigabit, full duplex, TX en RX aan; ring 16 in de DMA.
-    assert_eq!(dev::read32(b.add(0x808)), (2 << 2) | 3);
+    // Zender en ontvanger nog uit (geen link), ring 16 in de DMA.
+    assert_eq!(dev::read32(b.add(0x808)), 0);
     assert_eq!(dev::read32(b.add(RX_DMA + 0x44)), RING16_EN | 1);
+    // Een PHY die niet antwoordt (de nep-bus blijft bezig) is geen link.
+    assert_eq!(n.link(), None);
+    assert_eq!(dev::read32(b.add(0x808)), 0, "the MAC waits for the link");
+    // De link: gigabit, full duplex, TX en RX aan.
+    n.adjust_link(LINK_1G);
+    assert_eq!(dev::read32(b.add(0x808)), (2 << 2) | 3);
     assert_eq!(dev::read32(b.add(0x08c)), (1 << 4) | (1 << 6) | (1 << 16));
 }
 
@@ -122,7 +128,7 @@ fn a_small_dma_region_is_refused() {
     let (b, d) = (f.base(), f.dma());
     // SAFETY: de vectoren leven de hele test.
     let mut n = unsafe { Genet::new(b, d, DMA_NEED - 1, [0; 6], ticking) };
-    assert!(matches!(n.init(LINK_1G), Err(Error::Dma { .. })));
+    assert!(matches!(n.init(), Err(Error::Dma { .. })));
 }
 
 #[test]

@@ -433,11 +433,12 @@ fn setup(
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
     // de node-stack, de lease en de system-listener; met een overdracht de
     // lease van de vorige kern. Zonder NIC draait de kern door zonder net;
-    // dat is een board, geen fout. Een NIC die faalt (geen link binnen de
-    // termijn van het board) probeert niemand opnieuw (Derek, 01-11): de
-    // node komt niet tot een levensteken, de ene guard van de watchdog
-    // reset hem, en de koude boot is de nieuwe poging. Na een flip is het
-    // meteen `HOPOS_FATAL`: de bewoners rekenen op hun net.
+    // dat is een board, geen fout. Een NIC die faalt probeert niemand
+    // opnieuw (Derek, 01-11): de node komt niet tot een levensteken, de ene
+    // guard van de watchdog reset hem, en de koude boot is de nieuwe poging.
+    // De probe wacht niet op de link (de pomp-taak doet dat, net.rs), dus
+    // geen link is net zo'n node. Na een flip is een NIC die faalt meteen
+    // `HOPOS_FATAL`: de bewoners rekenen op hun net.
     let (hok, carried) = match landing {
         Some(l) => (Some(l.slots), Some(l.lease)),
         None => (None, None),

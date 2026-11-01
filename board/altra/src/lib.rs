@@ -46,9 +46,6 @@ use driver_pcie::Function;
 /// De naam, voor de bootlog.
 pub const NAME: &str = "altra";
 
-/// Hoe lang de igb op een link wacht (het Altra-recept sinds 13-07).
-pub const LINK_TIMEOUT_NS: u64 = 8_000_000_000;
-
 /// Deze machines zijn homogeen: alles is "big". De UEFI-laag laat de vraag
 /// bewust aan het board; een verzonnen indeling maakt jobs onplaatsbaar.
 #[must_use]

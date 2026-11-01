@@ -188,15 +188,20 @@ impl Soc for Bcm2712 {
             phy.id1,
             phy.id2
         );
-        let link = driver_mdio::autoneg(&mut nic, phy.addr, true, ctx.now, 8_000_000_000)
-            .map_err(|_| Error::Nic("rp1: no link within 8 s"))?;
-        nic.init(link)
+        // De autonegotiatie start hier, maar de probe wacht er niet op: de
+        // link-wacht is van de taak (`netdev::Device::link`, hopos
+        // `net::start`), en de GEM zet zijn MAC pas dan op de snelheid.
+        nic.start_link(phy.addr)
+            .map_err(|_| Error::Nic("rp1: MDIO stuck starting autoneg"))?;
+        nic.init()
             .map_err(|_| Error::Nic("gem: DMA region too small"))?;
         let id = wire_irq(&rc, &mut nic).map_err(|why| {
-            cpu::println!("net: gem up, {link}, but no line: {why}");
+            cpu::println!("net: gem up, link pending (autoneg), but no line: {why}");
             Error::Irq("rp1: the GEM line did not come up")
         })?;
-        cpu::println!("net: gem up, {link}, RX on INTID {id} (RP1 MSI-X via the MIP)");
+        cpu::println!(
+            "net: gem up, link pending (autoneg), RX and TX done on INTID {id} (RP1 MSI-X via the MIP)"
+        );
         Ok(Some(nic))
     }
 }

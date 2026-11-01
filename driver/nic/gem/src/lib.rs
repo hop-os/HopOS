@@ -346,6 +346,8 @@ pub struct Gem {
     irq: Option<&'static Signal>,
     /// De board-kant van de rearm (RP1: de MSI-X IACK).
     rearm: Option<fn()>,
+    /// Het adres van de PHY ([`Gem::start_link`]).
+    phy: u8,
 }
 
 impl Gem {
@@ -376,6 +378,7 @@ impl Gem {
             tx_head: 0,
             irq: None,
             rearm: None,
+            phy: 0,
         }
     }
 
@@ -396,10 +399,11 @@ impl Gem {
         (0..MDIO_POLLS).any(|_| s.read() & STATUS_MDIO_IDLE != 0)
     }
 
-    /// Zet ringen en MAC-config klaar en zet RX en TX aan, op de snelheid
-    /// die de autonegotiatie afsprak; de RP1-CLKGEN volgt de MAC-snelheid
-    /// vanzelf. Het volledige `macb_reset_hw`-recept vooraf.
-    pub fn init(&mut self, link: Link) -> Result {
+    /// Zet ringen en MAC-config klaar, met de management-poort aan; RX en
+    /// TX blijven uit tot de link er is ([`netdev::Device::link`]): hun
+    /// snelheid is die van de autonegotiatie. Het volledige
+    /// `macb_reset_hw`-recept vooraf.
+    pub fn init(&mut self) -> Result {
         if self.dma_size < DMA_NEED {
             return Err(Error::Dma {
                 have: self.dma_size,
@@ -449,7 +453,7 @@ impl Gem {
         r.spaddr1b
             .write(u32::from_le_bytes([m[0], m[1], m[2], m[3]]));
         r.spaddr1t.write(u32::from_le_bytes([m[4], m[5], 0, 0]));
-        r.nwcfg.write(cfg_for(r.dcfg1.read(), link));
+        r.nwcfg.write(cfg_for(r.dcfg1.read(), None));
         // RP1 (Linux `gem_init_axi`, kernel-breed alléén voor de RP1): de
         // outstanding AXI-reads/writes van de GEM-DMA op 8/8 en writes tellen
         // tot de B-response. De DMA steekt hier een AXI-naar-PCIe-brug over;
@@ -469,8 +473,24 @@ impl Gem {
         r.rbqph.write((rx >> 32) as u32);
         r.txqbase.write(tx as u32);
         r.tbqph.write((tx >> 32) as u32);
-        r.nwctrl.write(CTRL_MGMT_EN | CTRL_TX_EN | CTRL_RX_EN);
+        r.nwctrl.write(CTRL_MGMT_EN);
         Ok(())
+    }
+
+    /// Start de autonegotiatie op de PHY op `phy`, zonder te wachten: de
+    /// link komt in de taak ([`netdev::Device::link`]).
+    pub fn start_link(&mut self, phy: u8) -> driver_mdio::Result {
+        self.phy = phy;
+        driver_mdio::start_autoneg(self, phy, true)
+    }
+
+    /// De MAC op de link: NWCFG op snelheid en duplex, dan RX en TX aan
+    /// (`macb_mac_link_up`, de `adjust_link` van Linux); de RP1-CLKGEN volgt
+    /// de MAC-snelheid vanzelf.
+    fn adjust_link(&self, link: Link) {
+        let r = self.r();
+        r.nwcfg.write(cfg_for(r.dcfg1.read(), Some(link)));
+        r.nwctrl.write(CTRL_MGMT_EN | CTRL_TX_EN | CTRL_RX_EN);
     }
 
     /// Hangt de NIC aan zijn lijn: `bell` is het signaal van de dispatcher,
@@ -515,15 +535,18 @@ impl Gem {
     }
 }
 
-/// NWCFG voor een link, met de busbreedte uit DCFG1.DBWDEF (4 = 128,
-/// 2 = 64, anders 32 bits).
-fn cfg_for(dcfg1: u32, link: Link) -> u32 {
+/// NWCFG met de busbreedte uit DCFG1.DBWDEF (4 = 128, 2 = 64, anders 32
+/// bits), en met een link zijn snelheid en duplex.
+fn cfg_for(dcfg1: u32, link: Option<Link>) -> u32 {
     let dbw = match (dcfg1 >> 25) & 0x7 {
         d if d >= 4 => 2,
         d if d >= 2 => 1,
         _ => 0,
     };
     let mut cfg = CFG_MDC_DIV48 | CFG_RX_FCS | CFG_PAE | (dbw << CFG_DBW_SHIFT);
+    let Some(link) = link else {
+        return cfg;
+    };
     if link.full_duplex {
         cfg |= CFG_FD;
     }
@@ -642,6 +665,13 @@ impl netdev::Device for Gem {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    /// Eén blik op de PHY; bij link de MAC erop.
+    fn link(&mut self) -> Option<u32> {
+        let l = driver_mdio::link(self, self.phy, true).ok()??;
+        self.adjust_link(l);
+        Some(l.mbps)
     }
 }
 

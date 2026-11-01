@@ -154,9 +154,19 @@ pub trait Device {
     fn mac(&self) -> Mac;
 
     /// Het wek-signaal van de NIC-interrupt, als het board er een bedraadt.
-    /// `None` = pollen, met de microslaap uit de Go-kern.
+    /// `None` = geen lijn, en dan start de kern de pomp niet.
     fn irq(&self) -> Option<&'static Signal> {
         None
+    }
+
+    /// Eén blik op de link, vóór de pomp start: `None` = nog geen link,
+    /// `Some(mbps)` = de link staat, en de driver zette de MAC erop (Linux:
+    /// `adjust_link` na de link-wissel van `phy_state_machine`). De probe
+    /// van het board start alleen de autonegotiatie; de kern vraagt dit
+    /// hierna tot de link er is (hopos `net::start`, `LINK_POLL`), en daarna
+    /// niet meer. 0 = geen PHY (virtio): de standaard.
+    fn link(&mut self) -> Option<u32> {
+        Some(0)
     }
 
     /// De meetlat; nul voor een driver zonder.

@@ -196,9 +196,6 @@ pub(crate) const BMCR_RESET: u16 = 1 << 15;
 pub(crate) const BMCR_POWER_DOWN: u16 = 1 << 11;
 /// BMCR: de MII isoleren.
 pub(crate) const BMCR_ISOLATE: u16 = 1 << 10;
-/// Hoe lang tussen twee link-kijkjes: vaker versnelt niets (een autoneg
-/// duurt seconden) en kost PHY-OCP-verkeer (de Go-waarde).
-pub(crate) const LINK_POLL_NS: u64 = 50_000_000;
 
 /// Clause 22 register `r` als OCP-adres.
 pub(crate) const fn phy_c22(r: u8) -> u16 {

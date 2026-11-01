@@ -5,13 +5,15 @@
 use super::*;
 use crate::mdio_cmd;
 use crate::tests::{TEST_MAC, rig};
+use core::sync::atomic::{AtomicU32, Ordering::SeqCst};
 use netdev::Device as _;
 
-/// Een draaiende nep-driver: FIFO's van 4 KB, dan de start op gigabit.
+/// Een draaiende nep-driver: FIFO's van 4 KB, dan de start (nog zonder
+/// link).
 fn running() -> crate::tests::Rig<Hw> {
     let mut f = rig::<Hw>();
     f.n.regs().hw_feature1.write((5 << 6) | 5);
-    f.n.bring_up(1000, true).unwrap();
+    f.n.bring_up().unwrap();
     f
 }
 
@@ -126,7 +128,8 @@ fn a_returned_descriptor_gets_its_buffer_address_back() {
 
 #[test]
 fn program_lays_out_the_rings_and_the_registers_and_masks_the_mmc() {
-    let f = running();
+    static SPEED: AtomicU32 = AtomicU32::new(0);
+    let mut f = running();
     let n = &f.n;
     let r = n.regs();
     let c = &r.chan;
@@ -150,7 +153,8 @@ fn program_lays_out_the_rings_and_the_registers_and_masks_the_mmc() {
     assert_eq!(((rxc & RX_RBSZ_MASK) >> RX_RBSZ_SHIFT) as usize, BUF_SIZE);
     assert_ne!(rxc & CHAN_START, 0);
     assert_ne!(c.tx_control.read() & CHAN_START, 0);
-    // Het MAC-adres in de filter, en de MAC aan op gigabit full duplex.
+    // Het MAC-adres in de filter; de MAC nog uit tot de link, dan aan op
+    // gigabit full duplex, en de klok van de SoC eerst.
     let m = TEST_MAC.0;
     assert_eq!(
         r.addr0_lo.read(),
@@ -158,6 +162,10 @@ fn program_lays_out_the_rings_and_the_registers_and_masks_the_mmc() {
     );
     assert_eq!(r.addr0_hi.read(), (u32::from(m[5]) << 8) | u32::from(m[4]));
     assert_eq!(r.rxq_ctrl0.read(), RXQ0_DCB_ENABLE);
+    assert_eq!(r.config.read() & (CFG_TE | CFG_RE), 0, "no link, no MAC");
+    f.n.fix_speed = Some(|m| SPEED.store(m, SeqCst));
+    f.n.adjust_link(1000, true);
+    assert_eq!(SPEED.load(SeqCst), 1000);
     let cfg = r.config.read();
     assert_eq!(cfg & (CFG_TE | CFG_RE | CFG_DM), CFG_TE | CFG_RE | CFG_DM);
     assert_eq!(cfg & SPEED_MASK, 0);
@@ -175,7 +183,7 @@ fn an_unclocked_block_is_refused_on_its_fifo_sizes() {
     let mut f = rig::<Hw>();
     // HW_FEATURE1 leest nul: 128 B-FIFO's, en fifo/256 - 1 zou omlopen.
     assert_eq!(
-        f.n.bring_up(1000, true),
+        f.n.bring_up(),
         Err(Error::Fifo {
             tx: 128,
             rx: 128,

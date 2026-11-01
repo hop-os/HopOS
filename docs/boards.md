@@ -262,7 +262,8 @@ door niemand aangezet.
 - `irq: ITS IIDR 0x... ... HOPOS_ITS_UP` (de GIC-700 heeft een ITS; de regel
   zegt DeviceID-bits en plat of twee niveaus).
 - `net: RTL8125? 10ec:8125 at 31:00.0 xid 0x... link pending (autoneg), INTx on INTID 477 (SPI 445) (the DT table said INTID 477) HOPOS_NIC_IRQ`, en dan
-  `HOPOS_NIC_UP mac=...` en na DHCP `HOPOS_NET_UP`. In de tik moet `nic=`
+  `HOPOS_NIC_UP mac=...`, `net: link up at 2500 Mbps after N ms
+  HOPOS_LINK_UP` (NBASE-T: tot 12 s) en na DHCP `HOPOS_NET_UP`. In de tik moet `nic=`
   oplopen met het verkeer.
 - `dvfs: 5 _CPC domains, policy Auto, ... HOPOS_CLOCK_UP` en `dvfs: -> 2600
   MHz (fastest domain) (full, boot) HOPOS_CLOCK_EDGE`; na 30 s stil de flank
@@ -375,9 +376,9 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   afhankelijk van de SKU).
 - `irq: ITS IIDR ... doorbell 0x100100130040, for 01:00.0 (the IORT's ITS for its root complex), collection on the redistributor at ... HOPOS_ITS_MORE`
   (de igb hangt aan ITS 7 van de acht),
-- `net: igb 8086:1533 at ... link 1000 Mbps full duplex, MSI-X via the ITS, LPI 8224 (DeviceID 0x70100), first interrupt after N us HOPOS_NIC_IRQ`,
-  dan `HOPOS_NIC_UP`, `HOPOS_NET_PUMP` met `the nic's irq line` en
-  `HOPOS_NET_UP`. Komt de afgevuurde vector niet aan:
+- `net: igb 8086:1533 at ... link pending (autoneg), MSI-X via the ITS, LPI 8224 (DeviceID 0x70100), first interrupt after N us HOPOS_NIC_IRQ`,
+  dan `HOPOS_NIC_UP`, `HOPOS_NET_PUMP` met `the nic's irq line`, `net:
+  link up at 1000 Mbps after N ms HOPOS_LINK_UP` en `HOPOS_NET_UP`. Komt de afgevuurde vector niet aan:
   `no line: the forced interrupt (EICS) did not arrive within 50 ms`, en
   dan start de NIC niet (01-11, O3: geen gepolde terugval).
   Daarvoor dan één regel `net: igb MSI-X diag: ... HOPOS_NIC_IRQ_DIAG`: de

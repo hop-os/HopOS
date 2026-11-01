@@ -148,6 +148,17 @@ pub(crate) static NET_READY: Stop = Stop::new();
 /// ring) altijd passen.
 const HOST_RING_DATA: u64 = NET_RING_DATA_CAP;
 
+/// Hoe vaak de pomp-taak naar de link kijkt zolang hij er niet is, vóór de
+/// pomp start: een poll, want de PHY heeft geen bel (docs/description.md
+/// §4.11). Elke 50 ms, het ritme van de autonegotiatie in Go; Linux pollt
+/// een PHY zonder interrupt elke seconde (phylib `PHY_POLL`). Na de eerste
+/// link kijkt niemand meer.
+const LINK_POLL: Duration = Duration::from_millis(50);
+
+/// De link staat: gezet door de pomp-taak, en de host-taak wacht erop vóór
+/// zijn DHCP (eerst de link, dan de lease).
+static LINK_UP: Signal = Signal::new();
+
 /// Hoe lang één DHCP-poging mag duren. QEMU's user-net antwoordt binnen een
 /// milliseconde; een LAN-server binnen een seconde. Tien seconden is ruim
 /// genoeg voor een trage router en kort genoeg om het in de log te zien.
@@ -378,8 +389,29 @@ pub(crate) fn start<D: Device + 'static>(
         &STATS,
     )
     .ok_or(Error::NoLine)?;
-    exec.spawn(async move { pump.run().await })
-        .map_err(|_| Error::Spawn("pump"))?;
+    // De link-wacht, de eerste stap van de pomp-taak (docs/sequence-hopos.md
+    // §13.3): de probe startte alleen de autonegotiatie, en de driver zet
+    // zijn MAC op de snelheid zodra hij de link ziet (Linux: `adjust_link`
+    // na `phy_state_machine`). Tot dan blijven de uplink-frames in de
+    // egress-rij (een warme flip verliest er zo geen); begrensd door de ene
+    // guard van de watchdog: geen link is een reset, geen retry.
+    exec.spawn(async move {
+        let t0 = exec.now();
+        let mbps = loop {
+            if let Some(m) = pump.nic().link() {
+                break m;
+            }
+            exec.after(LINK_POLL).await;
+        };
+        let ms = exec.now().saturating_sub(t0) / 1_000_000;
+        match mbps {
+            0 => println!("net: link up (no PHY) HOPOS_LINK_UP"),
+            m => println!("net: link up at {m} Mbps after {ms} ms HOPOS_LINK_UP"),
+        }
+        LINK_UP.set();
+        pump.run().await;
+    })
+    .map_err(|_| Error::Spawn("pump"))?;
     println!(
         "net: pump on the nic's irq line, uplink queues 2x{} HOPOS_NET_PUMP",
         net::UPLINK_QUEUE,
@@ -494,9 +526,10 @@ struct Node {
 }
 
 impl Node {
-    /// De levensloop, in één reeks: de lease, de uplink, de stack, de
-    /// keeper en de listeners ([`NET_READY`]), en dan de lus van poort 0 tot
-    /// de stop. Met een meegegeven lease (de warme flip) geen DHCP.
+    /// De levensloop, in één reeks: de link ([`LINK_UP`]), de lease, de
+    /// uplink, de stack, de keeper en de listeners ([`NET_READY`]), en dan de
+    /// lus van poort 0 tot de stop. Met een meegegeven lease (de warme flip)
+    /// geen DHCP, en dus ook geen wacht op de link.
     async fn run(mut self, api: SystemApi, carried: Option<(Lease, u64)>) {
         let exec = self.exec;
         let mac = self.mac;
@@ -508,7 +541,10 @@ impl Node {
                 );
                 c
             }
-            None => (self.lease().await, exec.now()),
+            None => {
+                LINK_UP.wait().await;
+                (self.lease().await, exec.now())
+            }
         };
         set_uplink(&lease, mac).await;
         let ip = u32::from(lease.ip);

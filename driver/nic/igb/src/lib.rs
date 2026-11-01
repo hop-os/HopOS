@@ -322,13 +322,6 @@ pub enum Error {
     },
     /// De PHY-laag faalde.
     Phy(mdio::Error),
-    /// Geen link binnen de grens.
-    NoLink {
-        /// STATUS na de grens.
-        status: u32,
-        /// De grens in milliseconden.
-        ms: u64,
-    },
 }
 
 impl fmt::Display for Error {
@@ -349,9 +342,6 @@ impl fmt::Display for Error {
                 )
             }
             Self::Phy(e) => write!(f, "igb: {e}"),
-            Self::NoLink { status, ms } => {
-                write!(f, "igb: no link within {ms} ms (cable? STATUS={status:#x})")
-            }
         }
     }
 }
@@ -446,7 +436,8 @@ pub struct Igb {
 impl Igb {
     /// Reset het device, leest het MAC, en zet de ringen klaar in `dma`
     /// (RX en TX aan, interrupts dicht). `now` geeft monotone
-    /// nanoseconden. De link komt daarna met [`link_up`](Self::link_up).
+    /// nanoseconden. De link start daarna met [`start_link`](Self::start_link)
+    /// en komt in de taak ([`netdev::Device::link`]).
     ///
     /// # Safety
     ///
@@ -657,23 +648,6 @@ impl Igb {
         .map_err(Error::Phy)
     }
 
-    /// De link zoals de MAC hem ziet (STATUS), `None` = nog geen.
-    #[must_use]
-    pub fn link(&self) -> Option<Link> {
-        decode_status(self.regs().status.read())
-    }
-
-    /// [`start_link`](Self::start_link) en dan begrensd wachten.
-    pub fn link_up(&mut self, timeout_ns: u64) -> Result<Link> {
-        self.start_link()?;
-        let r = self.regs();
-        let _ = dev::poll_until(self.now, timeout_ns, || r.status.read() & STATUS_LU != 0);
-        self.link().ok_or(Error::NoLink {
-            status: r.status.read(),
-            ms: timeout_ns / 1_000_000,
-        })
-    }
-
     fn mdic_wait(&self, phy: u8, reg: u8) -> mdio::Result<u32> {
         let mdic = &self.regs().mdic;
         let mut v = 0;
@@ -874,6 +848,12 @@ impl netdev::Device for Igb {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    /// De link zoals de MAC hem ziet (STATUS). De MAC volgt de PHY zelf:
+    /// niets te zetten.
+    fn link(&mut self) -> Option<u32> {
+        decode_status(self.regs().status.read()).map(|l| l.mbps)
     }
 
     fn stats(&self) -> netdev::Stats {

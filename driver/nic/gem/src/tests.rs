@@ -36,6 +36,12 @@ const LINK_1G: Link = Link {
     full_duplex: true,
 };
 
+/// `init` en dan de link (zoals de taak hem na de probe ziet).
+fn up(n: &mut Gem) {
+    n.init().unwrap();
+    n.adjust_link(LINK_1G);
+}
+
 #[test]
 fn init_lays_out_rings_with_the_bus_offset() {
     let mut f = Fake::new();
@@ -44,7 +50,11 @@ fn init_lays_out_rings_with_the_bus_offset() {
     // DCFG1.DBWDEF = 4: een 128-bit AXI.
     dev::write32(b.add(0x280), 4 << 25);
     let mut n = f.nic();
-    n.init(LINK_1G).unwrap();
+    n.init().unwrap();
+    // Zonder link alleen de management-poort, en geen snelheid.
+    assert_eq!(dev::read32(b.add(0x000)), CTRL_MGMT_EN);
+    assert_eq!(dev::read32(b.add(0x004)) & CFG_GIGABIT, 0);
+    n.adjust_link(LINK_1G);
     let bus0 = d.0 + OFF_RX_BUFS + BUS_OFF;
     assert_eq!(dev::read32(d), bus0 as u32);
     assert_eq!(dev::read32(d.add(8)), (bus0 >> 32) as u32);
@@ -73,7 +83,7 @@ fn a_small_region_is_refused() {
     let (b, d) = (f.base(), f.dma());
     // SAFETY: de vectoren leven de hele test.
     let mut n = unsafe { Gem::new(b, 0, d, DMA_NEED - 1, [0; 6]) };
-    assert!(matches!(n.init(LINK_1G), Err(Error::Dma { .. })));
+    assert!(matches!(n.init(), Err(Error::Dma { .. })));
 }
 
 #[test]
@@ -82,7 +92,7 @@ fn transmit_hands_the_descriptor_over_and_a_busy_one_is_full() {
     let b = f.base();
     let d = f.dma();
     let mut n = f.nic();
-    n.init(LINK_1G).unwrap();
+    up(&mut n);
     // De nep-GEM zendt nooit: USED blijft 0, dus dezelfde descriptor is bij
     // de wrap nog van de hardware.
     n.transmit(&[0x77; 100]).unwrap();
@@ -107,7 +117,7 @@ fn a_dropped_tstart_is_given_again() {
     let mut f = Fake::new();
     let b = f.base();
     let mut n = f.nic();
-    n.init(LINK_1G).unwrap();
+    up(&mut n);
     let mut buf = [0u8; 2048];
     let tstart = |b: Pa| dev::read32(b) & CTRL_TX_START != 0;
     // Niets gegeven: geen TSTART.
@@ -150,7 +160,7 @@ fn receive_takes_complete_frames_returns_the_rest_and_rearms() {
     let b = f.base();
     let d = f.dma();
     let mut n = f.nic();
-    n.init(LINK_1G).unwrap();
+    up(&mut n);
     n.set_irq(&BELL, || {
         REARMS.fetch_add(1, SeqCst);
     });
@@ -185,7 +195,7 @@ fn frames_cross_the_wb_buffers_byte_for_byte() {
         let mut f = Fake::new();
         let d = f.dma();
         let mut n = f.nic();
-        n.init(LINK_1G).unwrap();
+        up(&mut n);
         let frame = pattern(size);
         n.transmit(&frame).unwrap();
         let mut sent = vec![0u8; BUF];
@@ -265,10 +275,15 @@ fn config_and_lengths() {
         mbps: 100,
         full_duplex: false,
     };
-    let c = cfg_for(2 << 25, half100);
+    let c = cfg_for(2 << 25, Some(half100));
     assert_eq!(c & (CFG_FD | CFG_SPEED100 | CFG_GIGABIT), CFG_SPEED100);
     assert_eq!(c >> CFG_DBW_SHIFT & 3, 1);
-    assert_eq!(cfg_for(0, LINK_1G) >> CFG_DBW_SHIFT & 3, 0);
+    assert_eq!(cfg_for(0, Some(LINK_1G)) >> CFG_DBW_SHIFT & 3, 0);
+    assert_eq!(
+        cfg_for(0, None) & (CFG_FD | CFG_SPEED100 | CFG_GIGABIT),
+        0,
+        "no link, no speed"
+    );
     assert_eq!(rx_len(RX_SOF | RX_EOF | 1514), Some(1514));
     assert_eq!(rx_len(RX_SOF | RX_EOF | 1600), None);
     assert_eq!(rx_len(RX_EOF | 64), None);

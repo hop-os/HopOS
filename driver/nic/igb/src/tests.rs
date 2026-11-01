@@ -182,19 +182,13 @@ fn rdt_waits_for_the_rx_queue_enable() {
 }
 
 #[test]
-fn link_up_restarts_autoneg_through_the_mdic() {
+fn start_link_restarts_autoneg_through_the_mdic() {
     let m = mem(Hw { link: true, ..hw() });
     with_mac(&m);
     // SAFETY: registers en DMA liggen in `m`.
     let mut n = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.unwrap();
-    let l = n.link_up(1_000_000_000).unwrap();
-    assert_eq!(
-        l,
-        Link {
-            mbps: 1000,
-            full_duplex: true
-        }
-    );
+    n.start_link().unwrap();
+    assert_eq!(n.link(), Some(1000));
     let mdic = dev::read32(reg(0x20));
     assert_eq!(mdic & 0xffff, 0x1200, "BMCR AN enable + restart");
     assert_eq!((mdic >> 21) & 0x1f, u32::from(PHY_ADDR));
@@ -204,15 +198,13 @@ fn link_up_restarts_autoneg_through_the_mdic() {
 }
 
 #[test]
-fn no_link_reports_the_status() {
+fn no_link_is_none() {
     let m = mem(hw());
     with_mac(&m);
     // SAFETY: registers en DMA liggen in `m`.
     let mut n = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.unwrap();
-    assert_eq!(
-        n.link_up(5_000_000),
-        Err(Error::NoLink { status: 0, ms: 5 })
-    );
+    n.start_link().unwrap();
+    assert_eq!(n.link(), None);
 }
 
 #[test]

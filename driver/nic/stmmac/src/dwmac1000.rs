@@ -307,12 +307,11 @@ impl Ops for Hw {
     }
 
     /// RMII: 10 of 100.
-    fn speed_ok(mbps: u32) -> bool {
-        matches!(mbps, 10 | 100)
-    }
+    const GIGABIT: bool = false;
 
-    /// De volgorde van de Go-driver (en van de vendor).
-    fn program(r: &Regs, ring: &Rings<Self>, mac: Mac, mbps: u32, full_duplex: bool) -> Result {
+    /// De volgorde van de Go-driver (en van de vendor); MAC_CONFIG volgt bij
+    /// de link (`set_link`).
+    fn program(r: &Regs, ring: &Rings<Self>, mac: Mac) -> Result {
         // Het MAC-adres vóór RX aan, anders draait de MAC even met een
         // 00:00:00:00:00:00-filter.
         set_mac_addr(&r.addr0_hi, &r.addr0_lo, mac);
@@ -334,10 +333,15 @@ impl Ops for Hw {
         r.mmc_tx_mask.write(MMC_INT_ALL);
         r.mmc_ipc_mask.write(MMC_INT_ALL);
         r.status.update(|v| v); // sticky bits van vóór de reset wissen (W1C)
-        r.conf.write(mac_conf(mbps, full_duplex));
         r.op_mode.update(|v| v | OP_TX_START | OP_RX_START);
         dev::mb();
         Ok(())
+    }
+
+    /// MAC_CONFIG voor de link: RMII, snelheid, duplex, zender en ontvanger.
+    fn set_link(r: &Regs, mbps: u32, full_duplex: bool) {
+        r.conf.write(mac_conf(mbps, full_duplex));
+        dev::mb();
     }
 
     /// De RX-poll-demand: de DMA leest de ring opnieuw.

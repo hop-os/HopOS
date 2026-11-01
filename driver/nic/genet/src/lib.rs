@@ -313,6 +313,8 @@ pub struct Genet {
     rx_cons: u32,
     tx_prod: u32,
     now: fn() -> u64,
+    /// Het adres van de PHY ([`Genet::start_link`]).
+    phy: u8,
     /// De bel van de lijn, als het board hem bedraadde.
     irq: Option<&'static Signal>,
 }
@@ -364,6 +366,7 @@ impl Genet {
             rx_cons: 0,
             tx_prod: 0,
             now,
+            phy: 0,
             irq: None,
         }
     }
@@ -507,10 +510,10 @@ impl Genet {
         dev::poll_until(self.now, MDIO_NS, || m.read() & (1 << 29) == 0)
     }
 
-    /// Zet MAC-adres en filters, ringen en DMA klaar en schakelt zender en
-    /// ontvanger in, op de snelheid die de autonegotiatie afsprak. Na
-    /// [`reset`](Self::reset).
-    pub fn init(&mut self, link: Link) -> Result {
+    /// Zet MAC-adres en filters, ringen en DMA klaar. Zender en ontvanger
+    /// blijven uit tot de link er is ([`netdev::Device::link`]): hun
+    /// snelheid is die van de autonegotiatie. Na [`reset`](Self::reset).
+    pub fn init(&mut self) -> Result {
         if self.dma_size < DMA_NEED {
             return Err(Error::Dma {
                 have: self.dma_size,
@@ -562,10 +565,23 @@ impl Genet {
         // MODE_EN.
         let e: &Ext = self.at(EXT);
         e.rgmii_oob_ctrl.write((1 << 4) | (1 << 6) | (1 << 16));
-
-        u.cmd.write(cmd_for(u.cmd.read(), link) | 1 | (1 << 1));
         dev::mb();
         Ok(())
+    }
+
+    /// Start de autonegotiatie op de PHY op `phy`, zonder te wachten: de
+    /// link komt in de taak ([`netdev::Device::link`]).
+    pub fn start_link(&mut self, phy: u8) -> driver_mdio::Result {
+        self.phy = phy;
+        driver_mdio::start_autoneg(self, phy, true)
+    }
+
+    /// De MAC op de link: UMAC_CMD op snelheid en duplex, zender en
+    /// ontvanger aan (`bcmgenet_mii_setup`, de `adjust_link` van Linux).
+    fn adjust_link(&self, link: Link) {
+        let u = self.umac();
+        u.cmd.write(cmd_for(u.cmd.read(), link) | 1 | (1 << 1));
+        dev::mb();
     }
 
     /// RX-ring 16: elke descriptor wijst vast naar zijn eigen buffer; de
@@ -708,6 +724,13 @@ impl netdev::Device for Genet {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    /// Eén blik op de PHY; bij link de MAC erop.
+    fn link(&mut self) -> Option<u32> {
+        let l = driver_mdio::link(self, self.phy, true).ok()??;
+        self.adjust_link(l);
+        Some(l.mbps)
     }
 }
 

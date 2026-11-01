@@ -341,8 +341,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // en elke store-call van de meegenomen Hop was "without privilege".
     let hop_adopted = landing
         .as_ref()
-        .and_then(|l| l.slots.as_ref())
-        .is_some_and(|v| v.iter().any(|st| st.slot == slots::HOP_SLOT));
+        .is_some_and(|l| l.slots.iter().any(|st| st.slot == slots::HOP_SLOT));
     // Of er een Hop is, één keer beslist: het token en de watchdog (die
     // bewaakt dan zijn hartslag) kijken naar hetzelfde (24-10, F6).
     let hop_here = role == Ok(StagedRole::Hop) || hop_adopted;
@@ -466,9 +465,9 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         _ => alloc::vec::Vec::new(),
     };
     // De slots: de kooi-lijm, de lifecycle-actor en de servicers (slots.rs).
-    // Met een overdracht adopteren ze de bewoners (of begint het hok leeg,
-    // koud), en Hop komt pas als het net luistert.
-    slots::start(exec, role, hok.flatten(), app_env, node_cfg, system);
+    // Met een overdracht adopteren ze de bewoners, en Hop komt pas als het
+    // net luistert.
+    slots::start(exec, role, hok, app_env, node_cfg, system);
 
     // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
     // over zijn bewoners (Hop). Lukt dat niet, dan houdt de kern zijn core

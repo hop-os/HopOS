@@ -252,9 +252,6 @@ pub struct FlipBundle {
     pub base: u64,
     /// De lengte van de bundel.
     pub len: u64,
-    /// De koude flip ([`abi::systemapi::FLIP_COLD`] in `n` van de FLIP):
-    /// bewoners stoppen en zonder adoptie springen.
-    pub cold: bool,
 }
 
 /// Een compleet nieuw image van Hop in een gereserveerde partitie
@@ -1964,15 +1961,11 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             PrivOp::Flip => {
                 let sha = &flip_sum(c.path)?;
                 let slot = target(c)?;
-                // Een vlag die deze kern niet kent, is een weigering vóór de
-                // stroom wordt opgeëist: liever "nee" dan een warme flip
-                // waar de aanroeper iets anders vroeg.
-                if c.n & !abi::systemapi::FLIP_COLD != 0 {
-                    return Err(Error::Version {
-                        have: c.n,
-                        want: abi::systemapi::FLIP_COLD,
-                    }
-                    .into());
+                // Een vlag is een weigering vóór de stroom wordt opgeëist: er
+                // is alleen de warme flip (01-11), en een Hop die koud
+                // vraagt, krijgt nee in plaats van iets anders.
+                if c.n != 0 {
+                    return Err(Error::Version { have: c.n, want: 0 }.into());
                 }
                 let complete = self.with_stream(slot, |s| {
                     s.raw == Some(Raw::FlipBundle) && s.placer.received() == s.placer.size
@@ -1987,7 +1980,6 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                     slot,
                     base: s.grant.region().base,
                     len: s.placer.size,
-                    cold: c.n & abi::systemapi::FLIP_COLD != 0,
                 };
                 let r = hooks.flip(&bundle, sha);
                 // Gelukt of niet: het slot gaat terug. Bij succes heeft de
@@ -3014,7 +3006,7 @@ mod tests {
         }
         fn flip(&self, bundle: &FlipBundle, sha256: &[u8; 32]) -> Result {
             self.1.set(Some((bundle.slot.get(), *sha256)));
-            self.2.set(bundle.cold);
+            self.2.set(true);
             Ok(())
         }
         fn hop_restart(
@@ -3777,12 +3769,11 @@ mod tests {
         // Als hex, zoals Hop hem stuurt; de rauwe vorm toetst de test
         // hierboven.
         let hex = b"09".repeat(32);
-        // De koude vlag in `n` gaat mee naar de haak.
         let flip = enc(&abi::hopabi::Req {
             op: PrivOp::Flip.op(),
             seq: 5,
             off: 3,
-            n: abi::systemapi::FLIP_COLD,
+            n: 0,
             path: &hex,
             ..Default::default()
         });
@@ -3813,7 +3804,7 @@ mod tests {
             "claimed once"
         );
         assert_eq!(hooks.1.get(), Some((3, sha)));
-        assert!(hooks.2.get(), "the cold flag did not reach the hook");
+        assert!(hooks.2.get(), "the flip did not reach the hook");
         // De bytes staan rauw vanaf offset 0 van de partitie.
         let part = info.partition;
         assert!(part >= bundle.len() as u64);

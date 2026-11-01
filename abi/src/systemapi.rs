@@ -279,8 +279,8 @@ pub enum PrivOp {
     /// `STATUS_OK`: de bundel is getoetst en klaargelegd, de sprong volgt
     /// een halve seconde later; het slot is dan al terug in de pool.
     ///
-    /// `n` draagt de vlaggen van de flip ([`FLIP_COLD`]); een Hop van vóór
-    /// de vlag stuurt 0, en dat is de warme flip van altijd.
+    /// `n` is 0: er is alleen de warme flip (01-11); een andere waarde is
+    /// een weigering.
     Flip = 0x46,
     /// De volgende store-opdracht van een app ([`store`]): `n` de langste
     /// wachttijd in ms (0 = niet wachten, de kern kapt af op
@@ -391,12 +391,9 @@ pub const FLIP_BUNDLE_JOB: &[u8] = b"hopos.flip-bundle";
 /// van [`FLIP_BUNDLE_JOB`]).
 pub const HOP_IMAGE_JOB: &[u8] = b"hopos.hop-image";
 
-/// Vlag in `n` van [`PrivOp::Flip`]: de KOUDE flip. De kern stopt elke
-/// bewoner naast Hop, zet de app-cores uit en springt zonder bewoners over
-/// te dragen; de nieuwe kern installeert zijn eigen switch-code en plaatst
-/// Hop koud uit de staging (`hopos/src/flip.rs`, `docs/flip.md`). De weg
-/// voor een bundel met een andere switch-code, die de warme flip weigert.
-/// Additief (29-09): de andere bits van `n` zijn nul en blijven dat.
+/// De vlag van de koude flip die er niet meer is (01-11): de kern weigert
+/// elke `n` behalve 0. Alleen nog omdat Hop hem importeert; weg zodra Hop
+/// zonder koude flip is (agent G).
 pub const FLIP_COLD: u64 = 1;
 
 /// Het laagste bevoegde opnummer.

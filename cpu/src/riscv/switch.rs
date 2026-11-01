@@ -72,8 +72,8 @@
 use abi::layout::{
     CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_OFF, CTX_REGIME, CTX_RESUME,
     CTX_REVOKE, CTX_RING_HEAD_PA, CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, CtxState, SCHED_CLINT_PA,
-    SCHED_COUNT, SCHED_CURRENT, SCHED_LIST, SCHED_MBOX_CTX, SCHED_MSIP_PA, SCHED_OFF_PC,
-    SCHED_OS_BELL, SCHED_ROTOR, SCHED_S2_PA, SCHED_SCRATCH, SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
+    SCHED_COUNT, SCHED_CURRENT, SCHED_LIST, SCHED_MSIP_PA, SCHED_OS_BELL, SCHED_ROTOR, SCHED_S2_PA,
+    SCHED_SCRATCH, SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
 };
 
 /// De verschuiving van slot naar kooi-blok (`CAGE_STRIDE` = 64 KB).
@@ -154,38 +154,6 @@ pub fn code_range() -> (u64, u64) {
     imp::range()
 }
 
-/// De uit-stub van de koude flip als bytes, of `None` op de host.
-///
-/// Een app-hart voert de switch-code uit het kern-image uit, en de koude
-/// flip legt een nieuwe kern over dat image. Daarom zet de kern
-/// `SCHED_OFF_PC` op een kopie van deze stub buiten het image
-/// ([`place_off_stub`]); de switcher springt er aan het begin van zijn
-/// volgende ronde heen (er draait dan geen bewoner). De stub veegt de
-/// D-cache (de C906), wist de eigen bel, bevestigt met zijn eigen adres in
-/// `SCHED_MBOX_CTX` en slaapt tot de bel. Die komt van de nieuwe kern
-/// (`boot::start_hart`), en dan gaat het hart diens `_start` in, de
-/// parkeerlus van het postvak. Positie-onafhankelijk, op het adres van
-/// `_start` na: dat is een woord in de stub, en het koude adres van elke
-/// kern van dit board.
-#[must_use]
-pub fn off_stub() -> Option<&'static [u8]> {
-    imp::off_stub()
-}
-
-/// Legt de uit-stub ([`off_stub`]) neer op `at` en maakt hem zichtbaar
-/// voor de app-harts (naar DRAM). `at` komt uit het plan van het board
-/// (`FLIP_PARK_PA`): buiten het kern-image, de trampoline en de staging.
-/// `false` op de host.
-pub fn place_off_stub(at: dev::Pa) -> bool {
-    let Some(code) = off_stub() else {
-        return false;
-    };
-    dev::copy_in(at, code);
-    dev::push(at, code.len());
-    dev::mb();
-    true
-}
-
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 mod imp {
     pub(super) fn range() -> (u64, u64) {
@@ -209,22 +177,6 @@ mod imp {
         }
         (&raw const __hopos_parkenter) as u64
     }
-    pub(super) fn off_stub() -> Option<&'static [u8]> {
-        unsafe extern "C" {
-            /// De uit-stub en zijn einde (hieronder).
-            static __hopos_rv_off: u8;
-            static __hopos_rv_off_end: u8;
-        }
-        let start = &raw const __hopos_rv_off;
-        let len = (&raw const __hopos_rv_off_end as usize).wrapping_sub(start as usize);
-        if len == 0 || len > 256 {
-            return None;
-        }
-        // SAFETY: twee labels in dezelfde `global_asm!` hieronder, in één
-        // sectie, met het einde erachter (net getoetst): code in de eigen
-        // `.text`, leesbaar, `'static` en nooit beschreven.
-        Some(unsafe { core::slice::from_raw_parts(start, len) })
-    }
 }
 
 #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
@@ -238,9 +190,6 @@ mod imp {
     }
     pub(super) fn park() -> u64 {
         0
-    }
-    pub(super) fn off_stub() -> Option<&'static [u8]> {
-        None
     }
 }
 
@@ -699,14 +648,6 @@ __hopos_mentry:
     addi t0, sp, 192
     HOPOS_RV_CIPA t0
     HOPOS_RV_SYNC
-    // De koude flip: de kern wil dit hart uit het image (`SCHED_OFF_PC`,
-    // `off_stub`). Hier, aan het begin van een ronde, draait er geen
-    // bewoner; de kern vraagt het pas als ze allemaal dood zijn.
-    ld t0, {offpc}(sp)
-    beqz t0, 59f
-    fence.i
-    jr t0
-59:
     ld s1, {count}(sp)
     ld s2, {rotor}(sp)
     li s3, 0
@@ -1018,39 +959,6 @@ __hopos_mentry:
     mret
     .global __hopos_mmode_end
 __hopos_mmode_end:
-
-    // --- de uit-stub van de koude flip (`off_stub`) ----------------------
-    // Draait niet hier maar als kopie buiten het image. In: sp = het
-    // sched-blok, MIE uit. Een hart zonder bel (de C906L) wacht hier tot
-    // het resetblok hem ophaalt; dat doet de koude flip zelf al eerder.
-    .balign 8
-    .global __hopos_rv_off
-__hopos_rv_off:
-    csrw mie, zero
-    HOPOS_RV_CIALL
-    ld t0, {msip}(sp)
-    beqz t0, 1f
-    sw zero, 0(t0)
-1:  lla t1, __hopos_rv_off
-    sd t1, {mbox}(sp)
-    fence
-    HOPOS_RV_CPA sp
-    HOPOS_RV_SYNC
-    li t0, 8
-    csrw mie, t0
-2:  wfi
-    csrr t0, mip
-    andi t0, t0, 8
-    beqz t0, 2b
-    csrw mie, zero
-    lla t0, 3f
-    ld t0, 0(t0)
-    fence.i
-    jr t0
-    .balign 8
-3:  .dword _start
-    .global __hopos_rv_off_end
-__hopos_rv_off_end:
 "#,
     scratch = const SCHED_SCRATCH,
     current = const SCHED_CURRENT,
@@ -1091,8 +999,6 @@ __hopos_rv_off_end:
     ffar = const abi::hopabi::CTRL_FAULT_FAR,
     fvec = const abi::hopabi::CTRL_FAULT_VEC,
     verify = const FAULT_CAGE_VERIFY,
-    offpc = const SCHED_OFF_PC,
-    mbox = const SCHED_MBOX_CTX,
 );
 
 #[cfg(test)]

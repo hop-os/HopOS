@@ -64,10 +64,8 @@ pub struct Handoff {
     /// `None`: de nieuwe kern haalt een lease.
     pub lease: Option<Lease>,
     /// Het hok: de bewoners, in hun kooien op de switch-code die blijft
-    /// staan. `None` is een hok dat leeg begint (de koude flip: de
-    /// vertrekkende kern stopte zijn bewoners en zette de app-cores uit);
-    /// de nieuwe kern installeert dan zijn eigen switch-code.
-    pub slots: Option<Vec<SlotState>>,
+    /// staan.
+    pub slots: Vec<SlotState>,
     /// De conntrack: zonder deze tabel breekt elke verbinding door de
     /// masquerade bij een kernwissel, terwijl de app doorleeft. Alleen
     /// flows van een bewoner in [`Handoff::slots`].
@@ -97,8 +95,6 @@ pub struct Lease {
 
 /// De vlaggen van het blob, in het eerste vrije kopwoord ([`FLAGS_OFF`]).
 const FLAGS_OFF: usize = 72;
-/// Vlag: het hok gaat niet mee ([`Handoff::slots`] is `None`).
-const FLAG_COLD: u64 = 1;
 /// Het kopwoord met de wandklok ([`Handoff::wall_off`]), na de vlaggen.
 const WALL_OFF_OFF: usize = FLAGS_OFF + 8;
 /// De vijf kopwoorden van de lease ([`Handoff::lease`]), na de wandklok:
@@ -161,7 +157,6 @@ fn pad8(b: &mut Vec<u8>) -> Result {
 /// sprong (en dus geen flip) in plaats van een half blob.
 pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
     let mut b = Vec::new();
-    let slots = h.slots.as_deref().unwrap_or_default();
     // Vier woorden van een oudere vorm (het venster van de vorige kern, het
     // eigen venster en zijn maat) en de som van de bundel: nul, nooit
     // gelezen; de plek blijft voor versie 6.
@@ -172,10 +167,10 @@ pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
         0,
         0,
         0,
-        slots.len() as u64,
+        h.slots.len() as u64,
         h.generation,
         0,
-        if h.slots.is_none() { FLAG_COLD } else { 0 },
+        0,
         h.wall_off,
     ] {
         put64(&mut b, v)?;
@@ -183,7 +178,7 @@ pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
     for v in h.lease.map_or([0; 5], |l| l.words()) {
         put64(&mut b, v)?;
     }
-    for s in slots {
+    for s in &h.slots {
         for v in [
             s.slot as u64,
             s.part_base,
@@ -316,12 +311,11 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
     // Een bit die deze kern niet kent, is een blob van een latere kern:
     // luid, niet stil als warm gelezen.
     let flags = r.u64()?;
-    if flags & !FLAG_COLD != 0 {
+    if flags != 0 {
         return Err(Error::Corrupt { at: FLAGS_OFF });
     }
     h.wall_off = r.u64()?;
     h.lease = Lease::from_words([r.u64()?, r.u64()?, r.u64()?, r.u64()?, r.u64()?]);
-    let mut slots = Vec::new();
     r.pos = HAND_HEAD;
     for _ in 0..n {
         if r.left() < SLOT_HEAD as u64 {
@@ -366,9 +360,8 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
             try_push(&mut s.mounts, Mount { local, shared })?;
             r.align();
         }
-        try_push(&mut slots, s)?;
+        try_push(&mut h.slots, s)?;
     }
-    h.slots = (flags & FLAG_COLD == 0).then_some(slots);
     // Deze versie draagt altijd beide dienstblokken, ook leeg.
     h.nat.masq_next = r.u64()? as u16;
     r.u64()?; // de gateway-MAC van een oudere kern: niet overgenomen
@@ -1080,7 +1073,7 @@ mod tests {
         first.mounts = vec![m("/data", "/data"), m("/shared/logs", "/logs")];
         let h = Handoff {
             generation: 2,
-            slots: Some(vec![first, st(7, 0x9000_0000, 48, 3)]),
+            slots: vec![first, st(7, 0x9000_0000, 48, 3)],
             wall_off: 1_790_767_915_253_886_881,
             lease: Some(Lease {
                 ip: 0x0A00_020F,
@@ -1109,7 +1102,7 @@ mod tests {
         full.ports = vec![80; MAX_FLIP_PORTS];
         full.mounts = vec![m(&path, &path); MAX_FLIP_MOUNTS];
         let h = Handoff {
-            slots: Some(vec![full.clone()]),
+            slots: vec![full.clone()],
             ..Handoff::default()
         };
         assert_eq!(decode(&encode(&h, HANDOFF_TAIL).unwrap()).unwrap(), h);
@@ -1124,7 +1117,7 @@ mod tests {
             let mut s = full.clone();
             grow(&mut s);
             let h = Handoff {
-                slots: Some(vec![s]),
+                slots: vec![s],
                 ..Handoff::default()
             };
             let b = encode(&h, HANDOFF_TAIL).unwrap();
@@ -1138,7 +1131,7 @@ mod tests {
         // "geen klok", en de rest van het blob blijft wat het was.
         let h = Handoff {
             generation: 3,
-            slots: Some(vec![st(1, 0xBC00_0000, 64, 1)]),
+            slots: vec![st(1, 0xBC00_0000, 64, 1)],
             wall_off: 1_790_767_915_253_886_881,
             ..Handoff::default()
         };
@@ -1172,35 +1165,21 @@ mod tests {
     }
 
     #[test]
-    fn a_handoff_without_the_hok_is_cold_and_keeps_the_rest() {
-        // De koude flip: geen hok, wel de lease, de klok en de generatie.
-        let cold = Handoff {
-            generation: 3,
-            wall_off: 7,
+    fn a_lease_of_zero_is_no_lease_and_flags_are_refused() {
+        let h = Handoff {
             lease: Some(Lease {
                 ip: 0x0A00_020F,
                 ..Lease::default()
             }),
             ..Handoff::default()
         };
-        let b = encode(&cold, HANDOFF_TAIL).unwrap();
-        assert_eq!(&b[FLAGS_OFF..FLAGS_OFF + 8], &FLAG_COLD.to_le_bytes());
-        assert_eq!(decode(&b).unwrap(), cold);
-        // Een leeg hok is iets anders dan geen hok.
-        let empty = Handoff {
-            slots: Some(Vec::new()),
-            ..Handoff::default()
-        };
-        let warm = encode(&empty, HANDOFF_TAIL).unwrap();
-        assert_eq!(&warm[FLAGS_OFF..FLAGS_OFF + 8], &[0; 8]);
-        assert_eq!(decode(&warm).unwrap(), empty);
-        // Een kern die de lease niet kent, schrijft er nul: geen lease.
+        let b = encode(&h, HANDOFF_TAIL).unwrap();
+        assert_eq!(decode(&b).unwrap(), h);
         let mut old = b.clone();
         old[LEASE_OFF..HAND_HEAD].fill(0);
         assert_eq!(decode(&old).unwrap().lease, None);
-        // Een onbekende vlag is een blob van een latere kern: een fout.
         let mut later = b.clone();
-        later[FLAGS_OFF] = 0x3;
+        later[FLAGS_OFF] = 0x1;
         assert!(decode(&later).is_err());
     }
 
@@ -1208,7 +1187,7 @@ mod tests {
     fn handoff_weigert_onzin() {
         let h = Handoff {
             generation: 1,
-            slots: Some(vec![st(2, 0x9000_0000, 32, 2)]),
+            slots: vec![st(2, 0x9000_0000, 32, 2)],
             ..Handoff::default()
         };
         let good = encode(&h, HANDOFF_TAIL).unwrap();
@@ -1264,7 +1243,6 @@ mod tests {
     fn handoff_full_conntrack_fits() {
         let mut h = Handoff {
             generation: 1,
-            slots: Some(Vec::new()),
             ..Handoff::default()
         };
         for i in 0..MAX_FLOWS {
@@ -1283,7 +1261,7 @@ mod tests {
             let mut x = st(s, (s as u64) << 24, 64, s);
             x.job = b"some-job-name".to_vec();
             x.ports = vec![8080, 443];
-            h.slots.get_or_insert_default().push(x);
+            h.slots.push(x);
         }
         let b = encode(&h, HANDOFF_TAIL).unwrap();
         assert_eq!(decode(&b).unwrap().nat.flows.len(), MAX_FLOWS);
@@ -1295,11 +1273,11 @@ mod tests {
         s.share_group = b"trusted".to_vec();
         s.group_cores = vec![1, 2, 3];
         let h = Handoff {
-            slots: Some(vec![s]),
+            slots: vec![s],
             ..Handoff::default()
         };
         let mut b = encode(&h, HANDOFF_TAIL).unwrap();
-        let got = &decode(&b).unwrap().slots.unwrap()[0];
+        let got = &decode(&b).unwrap().slots[0];
         assert_eq!(
             (got.share_group.as_slice(), got.group_cores.as_slice()),
             (&b"trusted"[..], &[1, 2, 3][..])
@@ -1339,7 +1317,7 @@ mod tests {
         // Een geldige overdracht.
         let h = Handoff {
             generation: 3,
-            slots: Some(vec![st(2, 0x9000_0000, 32, 2)]),
+            slots: vec![st(2, 0x9000_0000, 32, 2)],
             ..Handoff::default()
         };
         let b = encode(&h, HANDOFF_TAIL).unwrap();
@@ -1405,7 +1383,7 @@ mod tests {
     fn jump(mem: &mut impl PhysMem, generation: u64) -> Handoff {
         let h = Handoff {
             generation,
-            slots: Some(vec![st(2, 0x9000_0000, 32, 2)]),
+            slots: vec![st(2, 0x9000_0000, 32, 2)],
             ..Handoff::default()
         };
         let b = encode(&h, HANDOFF_TAIL).unwrap();

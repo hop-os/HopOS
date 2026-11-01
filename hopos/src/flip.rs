@@ -27,9 +27,8 @@
 //!    zijn FLIP, en deze kern draait gewoon door.
 //! 3. De flip-taak ([`start`]) wacht even, zodat het antwoord op de FLIP
 //!    Hop nog bereikt, en vangt dan, in deze volgorde: hopfs vastleggen en
-//!    dicht, (koud: de bewoners stoppen en de app-cores uit), de lease en de
-//!    conntrack (de masquerade gaat dicht), de USB stil, en (warm) de
-//!    bewoners. Dan het handoff-blob, het pointer/magic-paar, de recorder op
+//!    dicht, de lease en de conntrack (de masquerade gaat dicht), de USB
+//!    stil, en de bewoners. Dan het handoff-blob, het pointer/magic-paar, de recorder op
 //!    "springen", en de sprong (`cpu::el2::chain::chain`). Na de 202 is er
 //!    geen weg terug (§13.7): wat hier misgaat, is `HOPOS_FATAL` en de
 //!    koude boot.
@@ -37,11 +36,6 @@
 //!    `HOPOS_FLIP_BOOT gen=N` en een [`Landing`]; `setup` geeft elk stuk
 //!    aan zijn onderdeel. Een stuk dat niet terugkomt, is `HOPOS_FATAL`. De
 //!    guard ([`guard`]) eist binnen [`GRACE`] een luisterend net.
-//!
-//! Koud is een handoff zonder hok: de vertrekkende kern stopt de bewoners
-//! en zet de app-cores uit, de nieuwe installeert zijn eigen switch-code en
-//! start Hop uit de staging, met de lease, de klok en de opslag van de
-//! vorige.
 //!
 //! De adressen zijn die van het board (`vboard::slots::FLIP_*`): de
 //! staging, de recorder, de trampoline en het blob liggen buiten het
@@ -51,9 +45,9 @@
 //! binnen de maat die de firmware toen gaf.
 //!
 //! De flip heeft ÉÉN trigger: `PrivOp::FLIP` van Hop (`POST /flip` achter
-//! dezelfde HMAC als een jobspec). Beleid (wanneer, en waarvandaan, warm of
-//! koud) is van Hop; de kern is mechanisme (Derek, 01-09: één weg, geen
-//! opties).
+//! dezelfde HMAC als een jobspec). Alleen warm (Derek, 01-11): een bundel
+//! met een andere switch-code is een weigering vóór de 202. Beleid (wanneer,
+//! en waarvandaan) is van Hop; de kern is mechanisme.
 //!
 //! # De zwarte doos
 //!
@@ -66,12 +60,9 @@
 //!
 //! # riscv64
 //!
-//! Alleen koud: de switch-code draait daar uit het kern-image, dus er is
-//! niets wat een nieuwe kern kan adopteren (`cage_riscv::adopt` weigert), en een
-//! warme flip weigert vóór de sprong ([`WARM`]). Het app-hart gaat uit het
-//! image ([`cores_off`]: het resetblok van de C906L, of de uit-stub van de
-//! switcher op QEMU) en de sprong is de M-mode-trampoline van
-//! `cpu::el2::chain`.
+//! Geen flip ([`FLIPS`]): de switch-code draait daar uit het kern-image, dus
+//! kern B zou hem overschrijven onder de app-harts, en er is niets wat hij
+//! kan adopteren (`cage_riscv::adopt` weigert). De haak weigert vóór de 202.
 //!
 //! # De config
 //!
@@ -80,7 +71,7 @@
 //! (`HOPOS_FLIP_CFG`); een bundel met een gevuld venster houdt het zijne
 //! (`HOPOS_FLIP_CFG_OWN`).
 
-use crate::{BOARD, DevMem, Machine};
+use crate::{BOARD, DevMem};
 use abi::layout::{FLIP_HANDOFF_LEN, HANDOFF_MAGIC_OFF, HANDOFF_PTR_OFF};
 use alloc::vec::Vec;
 use board::Board;
@@ -93,14 +84,12 @@ use core::sync::atomic::{
 use core::time::Duration;
 use cpu::el2::chain::{self, Jump};
 use cpu::println;
-use cpu::psci;
 use dev::Pa;
 use executor::Executor;
 use kern::cage::PhysMem;
 use kern::kernflip::{
     self, BOX_SHOW, Boot, Bundle, FLIP_ABI, FlipPlan, HAND_MAGIC, HANDOFF_TAIL, Handoff, Stage,
 };
-use kern::nodecfg::ColdFlip;
 use kern::slots::{Reply, Request, Response, SlotState};
 use kern::system::FlipBundle;
 use sync::{Either, Local, Signal, select};
@@ -130,52 +119,12 @@ const ACTOR_WAIT: Duration = Duration::from_secs(2);
 /// Go-kern. Tijdelijk: de ene boot-guard van de watchdog (O1) neemt dit over.
 pub(crate) const GRACE: Duration = Duration::from_secs(120);
 
-/// De coöperatieve kans van een bewoner die de koude flip stopt: Hop
-/// stopte zijn eigen taken al; wat nu nog leeft, krijgt een seconde en
-/// dan de kill van de lifecycle.
-const COLD_STOP: Duration = Duration::from_secs(1);
-
-/// Hoe lang de koude flip wacht tot een app-core uit is (AFFINITY_INFO
-/// OFF). Op QEMU een paar microseconden; een core die in een seconde niet
-/// uit is, staat niet in de stub.
-const CORES_OFF_WAIT: Duration = Duration::from_secs(1);
-
-/// Keert PSCI CPU_OFF op dit board terug (`Board::CPU_OFF_RETURNS`)? Zo
-/// niet (de Pi 5), dan weigert de koude flip zodra een app-core ooit
-/// draaide; een core die nooit startte, is al uit en telt niet.
-const CPU_OFF_RETURNS: bool = Machine::CPU_OFF_RETURNS;
-
-/// Antwoordt er een PSCI op een SMC (`Board::PSCI`)? Op Apple niet: daar
-/// is geen EL3, en een SMC op EL2 is een UNDEF (de core parkeert in de
-/// vectoren); Go deed er geen enkele PSCI-call (hop/board.go, 02-09). Op
-/// riscv64 is er geen PSCI. Bewust board-kennis en geen
-/// `cpu::trng::has_monitor`: QEMU virt zonder `secure=on` heeft ook geen
-/// EL3 (ID_AA64PFR0_EL1.EL3 = 0), maar emuleert PSCI over SMC, en daar
-/// draaien de koude flip en de reset.
-const PSCI: bool = Machine::PSCI;
-
-/// Kan dit board koud flippen? Eén waarde uit [`PSCI`] en
-/// [`CPU_OFF_RETURNS`] voor twee lezers: [`prepare`] (en [`no_way_back`])
-/// weigeren ermee, en Hop krijgt hem als `HOPOS_COLD_FLIP` in zijn env
-/// (`kern::nodecfg::ColdFlip`), zodat hij vooraf beslist en geen taak
-/// stopt voor een weigering. Op riscv64 haalt de koude flip de harts uit
-/// het image, zonder PSCI.
-pub(crate) const COLD_FLIP: ColdFlip = if cfg!(target_arch = "riscv64") {
-    ColdFlip::Yes
-} else if !PSCI {
-    ColdFlip::No
-} else if !CPU_OFF_RETURNS {
-    ColdFlip::Fresh
-} else {
-    ColdFlip::Yes
-};
-
-/// Kan deze kern bewoners over de sprong heen dragen (de warme flip)? Op
-/// riscv64 niet: de switch-code draait daar uit het kern-image, en de
-/// nieuwe kern adopteert niemand (`cage_riscv::adopt`). Een warme flip zou de
-/// bewoners dan pas na de gratie verliezen (`HOPOS_FLIP_ADOPT_FAIL`, de
-/// guard); daarom weigert hij hier vóór de sprong, en is de koude de weg.
-const WARM: bool = !cfg!(target_arch = "riscv64");
+/// Kan deze kern flippen? Op riscv64 niet: de switch-code draait daar uit
+/// het kern-image, en de nieuwe kern zou hem onder de app-harts
+/// overschrijven. Wat ontbreekt: een kopie van de switcher buiten het image
+/// (zoals de plan-regio op arm64), met `mtvec` van elk app-hart daarop, en
+/// een `adopt` in `cage_riscv`.
+const FLIPS: bool = !cfg!(target_arch = "riscv64");
 
 /// Wat de firmware deze kern in x0 gaf: de nieuwe krijgt hetzelfde.
 static FIRMWARE_X0: AtomicU64 = AtomicU64::new(0);
@@ -195,8 +144,6 @@ struct Prepared {
     entry: u64,
     /// Waar het beeld in de staging ligt (`kernflip::stage_slot`).
     src: u64,
-    /// Een koude flip: bewoners stoppen, cores uit, het hok gaat niet mee.
-    cold: bool,
 }
 
 /// Waar een flip staat: de haak legt hem klaar, de flip-taak voert hem uit.
@@ -386,9 +333,8 @@ pub(crate) fn jumped() -> bool {
 
 /// Wat een landing aan `setup` geeft: per onderdeel zijn stuk.
 pub(crate) struct Landing {
-    /// Het hok: de bewoners om te adopteren, of `None` (koud): de kooi
-    /// begint leeg en Hop start uit de staging.
-    pub(crate) slots: Option<Vec<SlotState>>,
+    /// Het hok: de bewoners om te adopteren.
+    pub(crate) slots: Vec<SlotState>,
     /// Het net: de lease, de poorten van de bewoners en hun conntrack.
     pub(crate) net: crate::net::Carried,
 }
@@ -454,20 +400,14 @@ fn landed(h: Handoff) -> Landing {
     crate::clock::restore(h.wall_off);
     let g = h.generation;
     let lease = h.lease.map_or(0, |l| l.ip);
-    match &h.slots {
-        Some(v) => println!(
-            "flip: landed, generation {g}, {} resident(s), {} NAT flow(s), lease {} HOPOS_FLIP_BOOT gen={g}",
-            v.len(),
-            h.nat.flows.len(),
-            core::net::Ipv4Addr::from(lease)
-        ),
-        None => println!(
-            "flip: landed cold, generation {g}, lease {}: no residents to adopt, this kernel installs its own switch code and starts Hop from the staging HOPOS_FLIP_BOOT gen={g} HOPOS_FLIP_COLD_BOOT",
-            core::net::Ipv4Addr::from(lease)
-        ),
-    }
+    println!(
+        "flip: landed, generation {g}, {} resident(s), {} NAT flow(s), lease {} HOPOS_FLIP_BOOT gen={g}",
+        h.slots.len(),
+        h.nat.flows.len(),
+        core::net::Ipv4Addr::from(lease)
+    );
     let mut ports = Vec::new();
-    for st in h.slots.iter().flatten() {
+    for st in &h.slots {
         for &port in &st.ports {
             if ports.try_reserve(1).is_err() {
                 crate::fatal(format_args!("flip: out of memory for the carried ports"));
@@ -613,6 +553,9 @@ pub(crate) fn prepare(b: &FlipBundle, sha256: &[u8; 32]) -> kern::Result {
 }
 
 fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
+    if !FLIPS {
+        return Err(refuse("no flip on riscv64", kern::Error::NoEnt));
+    }
     // Eerst: een flip die al aangenomen is, houdt de staging. Deze toets
     // leest geen byte van de bundel, dus hij mag vóór de som.
     if !matches!(FLIP.get().get(), Phase::Idle) {
@@ -652,53 +595,7 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
             },
         ));
     }
-    let cold = b.cold;
-    if !cold && !WARM {
-        return Err(refuse(
-            "warm flip not on riscv64, ask cold",
-            kern::Error::Version {
-                have: 0,
-                want: abi::systemapi::FLIP_COLD,
-            },
-        ));
-    }
-    if cold && COLD_FLIP == ColdFlip::No {
-        // De koude flip zet de app-cores uit met PSCI CPU_OFF en wacht op
-        // AFFINITY_INFO: zonder PSCI een UNDEF ná het bevriezen van de
-        // opslag. Dus hier weigeren, vóór er iets onherroepelijks gebeurt.
-        println!(
-            "flip: cold flip refused: this board has no PSCI (no EL3, an SMC is UNDEF), so its app cores cannot be powered off; ask warm HOPOS_FLIP_COLD_NO_PSCI"
-        );
-        return Err(refuse(
-            "cold flip needs PSCI, ask warm",
-            kern::Error::Version {
-                have: abi::systemapi::FLIP_COLD,
-                want: 0,
-            },
-        ));
-    }
-    if cold && let Some(c) = no_way_back() {
-        println!(
-            "flip: cold flip refused: CPU_OFF has no way back on this board and app core {c} ran; ask warm HOPOS_FLIP_COLD_NO_WAY_BACK"
-        );
-        return Err(refuse(
-            "cold flip: CPU_OFF has no way back, ask warm",
-            kern::Error::Version {
-                have: abi::systemapi::FLIP_COLD,
-                want: 0,
-            },
-        ));
-    }
-    if cold {
-        // Koud: de nieuwe kern installeert zijn eigen switch-code en
-        // adopteert niemand, dus de som doet er niet toe. Dit is precies de
-        // weg voor een bundel die warm geweigerd wordt.
-        println!(
-            "flip: cold flip asked, the switch code sum of the bundle is not held against the residents HOPOS_FLIP_COLD_ASKED"
-        );
-    } else {
-        check_switch_code(&bundle)?;
-    }
+    check_switch_code(&bundle)?;
     let x0 = FIRMWARE_X0.load(Relaxed);
     if !facts::intact(x0) {
         return Err(refuse(
@@ -717,7 +614,7 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
     if flat > room {
         return Err(too_large(flat, room));
     }
-    let src = stage_slot(flat, cold)?;
+    let src = stage_slot(flat)?;
     let generation = generation() + 1;
     let (mut mem, p) = (DevMem, plan());
     kernflip::archive_stage(&mut mem, &p, generation);
@@ -759,16 +656,14 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
     }
     let entry = bundle.entry.wrapping_add(delta);
     println!(
-        "flip: bundle ok, sha256 verified: {} KiB image in {segs} segment(s) linked at {:#x}, {relocs} relocation(s) to {base:#x}, entry {entry:#x}, staged at {src:#x}{} HOPOS_FLIP_STAGED",
+        "flip: bundle ok, sha256 verified: {} KiB image in {segs} segment(s) linked at {:#x}, {relocs} relocation(s) to {base:#x}, entry {entry:#x}, staged at {src:#x} HOPOS_FLIP_STAGED",
         flat >> 10,
         bundle.link_load,
-        if cold { ", cold" } else { "" }
     );
     let prepared = Prepared {
         len: flat,
         entry,
         src,
-        cold,
     };
     // De indeling van de sprong nu, vóór de 202: daarna is "nee" geen
     // antwoord meer maar `HOPOS_FATAL` (§13.7).
@@ -779,32 +674,6 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
     FLIP.set(Phase::Pending(prepared));
     BELL.set();
     Ok(())
-}
-
-/// De app-core die een koude flip op dit board onmogelijk maakt: CPU_OFF
-/// keert hier niet terug ([`COLD_FLIP`] is `Fresh`), en elke core die ooit
-/// draaide (geparkeerd, of nog bezet en straks geparkeerd) moet uit.
-/// Dezelfde toets als in [`cores_off`], maar in de haak: Hop krijgt de
-/// weigering op zijn FLIP, vóór hopfs bevriest en vóór de flip-taak een
-/// bewoner stopt (de Pi 5, 03-10: een 202, dan `HOPOS_FLIP_FAIL`).
-#[cfg(not(target_arch = "riscv64"))]
-fn no_way_back() -> Option<usize> {
-    use cpu::el2::CoreState;
-    if COLD_FLIP != ColdFlip::Fresh {
-        return None;
-    }
-    let plan = crate::slots::os_plan().ok()?;
-    (1..=plan.app_cores()).find(|&c| {
-        abi::layout::Core::new(c)
-            .is_some_and(|core| !matches!(cpu::el2::core_state(&plan, core), Ok(CoreState::Cold)))
-    })
-}
-
-/// Op riscv64 haalt de koude flip elk app-hart uit het image en zet de
-/// nieuwe kern het terug ([`cores_off`]): er is geen deur zonder terugweg.
-#[cfg(target_arch = "riscv64")]
-fn no_way_back() -> Option<usize> {
-    None
 }
 
 fn too_large(flat: u64, max: u64) -> Refused {
@@ -834,32 +703,20 @@ fn staged_elf() -> Option<(u64, u64)> {
 }
 
 /// Waar het nieuwe beeld in de staging gaat: achter het gestagede image
-/// (`kernflip::stage_slot`). Een koude flip eist dat image, want de nieuwe
-/// kern start het; een warme flip die er niet naast past, legt het beeld
-/// er luid overheen (Hop draait door en heeft zijn image niet meer nodig,
-/// alleen een latere koude flip weigert dan).
-fn stage_slot(flat: u64, cold: bool) -> Result<u64, Refused> {
-    let staged = staged_elf();
-    if cold && staged.is_none() {
-        return Err(refuse(
-            "cold flip without a staged image",
-            kern::Error::NoEnt,
-        ));
-    }
-    if let Some(at) = kernflip::stage_slot(STAGE_PA, STAGE_MAX, flat, staged) {
+/// (`kernflip::stage_slot`), zodat een herstart van Hop op kern B het nog
+/// vindt. Past het er niet naast, dan luid eroverheen: Hop draait door, en
+/// alleen een herstart met hetzelfde image kan dan niet meer.
+fn stage_slot(flat: u64) -> Result<u64, Refused> {
+    if let Some(at) = kernflip::stage_slot(STAGE_PA, STAGE_MAX, flat, staged_elf()) {
         return Ok(at);
     }
-    let alone = kernflip::stage_slot(STAGE_PA, STAGE_MAX, flat, None);
-    match (alone, cold) {
-        (Some(at), false) => {
-            println!(
-                "flip: the staging holds the new kernel ({} KiB) but not next to the staged image; it goes over it, a later cold flip will be refused HOPOS_FLIP_STAGE_SHARED",
-                flat >> 10
-            );
-            Ok(at)
-        }
-        _ => Err(too_large(flat, STAGE_MAX)),
-    }
+    let at = kernflip::stage_slot(STAGE_PA, STAGE_MAX, flat, None)
+        .ok_or_else(|| too_large(flat, STAGE_MAX))?;
+    println!(
+        "flip: the staging holds the new kernel ({} KiB) but not next to the staged image; it goes over it, a restart of Hop then needs a new image HOPOS_FLIP_STAGE_SHARED",
+        flat >> 10
+    );
+    Ok(at)
 }
 
 /// De som van de switch-code van de bundel tegen die van de geïnstalleerde
@@ -932,8 +789,6 @@ enum JumpError {
     Kern(kern::Error),
     Net(&'static str),
     Chain(chain::ChainError),
-    /// De koude flip kreeg een bewoner of een app-core niet stil.
-    Cold(&'static str, usize),
 }
 
 impl core::fmt::Display for JumpError {
@@ -942,7 +797,6 @@ impl core::fmt::Display for JumpError {
             Self::Kern(e) => write!(f, "{e}"),
             Self::Net(why) => write!(f, "net: {why}"),
             Self::Chain(e) => write!(f, "{e}"),
-            Self::Cold(why, n) => write!(f, "cold flip: {why} ({n})"),
         }
     }
 }
@@ -955,51 +809,25 @@ async fn capture_and_jump(exec: &'static Executor, p: Prepared) -> JumpError {
     if let Err(e) = crate::storage::freeze_for_flip(exec, ACTOR_WAIT).await {
         return JumpError::Kern(e);
     }
-    // 2. Koud: het hok leeg. Elke bewoner met een app-core stopt, en de
-    //    app-cores gaan uit: de nieuwe kern installeert zijn eigen
-    //    switch-code en doet CPU_ON.
-    if p.cold {
-        let stopped = match stop_residents(exec).await {
-            Ok(n) => n,
-            Err(e) => return e,
-        };
-        let off = match cores_off(exec).await {
-            Ok(n) => n,
-            Err(e) => return e,
-        };
-        println!(
-            "flip: cold flip, {stopped} resident(s) stopped and {off} app core(s) powered off, the hok starts empty HOPOS_FLIP_COLD stopped={stopped} cores_off={off}"
-        );
-    }
-    // 3. Het net: de lease en de conntrack, als waarde terug van de
+    // 2. Het net: de lease en de conntrack, als waarde terug van de
     //    switch-actor (die zet de masquerade dicht).
     let (lease, mut nat) = match crate::net::capture(exec, ACTOR_WAIT).await {
         Ok(c) => c,
         Err(why) => return JumpError::Net(why),
     };
-    // 4. De USB-controllers stil: DMA-masters op de RP1 die anders door de
+    // 3. De USB-controllers stil: DMA-masters op de RP1 die anders door de
     //    link-reset van de nieuwe kern heen zouden schrijven (30-09, de Pi
-    //    5). Na de bewoners en de cores: een bewoner die stopt, mag zijn
-    //    laatste invoer nog krijgen.
+    //    5).
     crate::gui::quiesce_usb(exec).await;
-    // 5. Het laatste `.await` van deze kern: het hok (warm).
-    let slots = if p.cold {
-        None
-    } else {
-        match kern::slots::call(&crate::LIFECYCLE, &REPLY, Request::Snapshot).await {
-            Ok(Response::Snapshot(s)) => Some(s),
-            Ok(Response::Failed(e)) | Err(e) => return JumpError::Kern(e),
-            Ok(_) => return JumpError::Kern(kern::Error::Busy),
-        }
+    // 4. Het laatste `.await` van deze kern: het hok.
+    let slots = match kern::slots::call(&crate::LIFECYCLE, &REPLY, Request::Snapshot).await {
+        Ok(Response::Snapshot(s)) => s,
+        Ok(Response::Failed(e)) | Err(e) => return JumpError::Kern(e),
+        Ok(_) => return JumpError::Kern(kern::Error::Busy),
     };
     // Alleen de flows van een bewoner die meegaat: de nieuwe switch neemt
     // de rest dan niet over.
-    let resident = |slot: u8| {
-        slots
-            .iter()
-            .flatten()
-            .any(|st| st.slot == usize::from(slot))
-    };
+    let resident = |slot: u8| slots.iter().any(|st| st.slot == usize::from(slot));
     nat.flows.retain(|f| resident(f.slot));
     println!(
         "flip: conntrack captured, {} NAT flow(s), outbound mapping closed until the jump HOPOS_FLIP_NAT_CAPTURED flows={}",
@@ -1014,182 +842,6 @@ async fn capture_and_jump(exec: &'static Executor, p: Prepared) -> JumpError {
         nat,
     };
     handoff_and_jump(p, &h)
-}
-
-/// Vraagt de lifecycle-actor iets, hooguit [`ACTOR_WAIT`] plus `extra`.
-async fn ask(
-    exec: &'static Executor,
-    req: Request,
-    extra: Duration,
-) -> Result<Response, JumpError> {
-    let call = kern::slots::call(&crate::LIFECYCLE, &REPLY, req);
-    match select(call, exec.after(ACTOR_WAIT.saturating_add(extra))).await {
-        Either::Left(Ok(Response::Failed(e)) | Err(e)) => Err(JumpError::Kern(e)),
-        Either::Left(Ok(r)) => Ok(r),
-        Either::Right(()) => Err(JumpError::Kern(kern::Error::Busy)),
-    }
-}
-
-/// Stopt elke bewoner met een app-core. Wie op de OS-core woont (Hop, in
-/// de idle van de kern), stopt vanzelf met de sprong: die kreeg zijn
-/// antwoord op de FLIP al, en de nieuwe kern start hem koud. Geeft het
-/// aantal gestopte bewoners.
-async fn stop_residents(exec: &'static Executor) -> Result<usize, JumpError> {
-    let slots = match ask(exec, Request::Snapshot, Duration::ZERO).await? {
-        Response::Snapshot(s) => s,
-        _ => return Err(JumpError::Kern(kern::Error::Busy)),
-    };
-    let mut n = 0;
-    for st in slots.iter().filter(|st| st.core != 0) {
-        let Some(slot) = kern::Slot::new(st.slot) else {
-            continue;
-        };
-        let req = Request::Stop {
-            slot,
-            timeout: COLD_STOP,
-        };
-        match ask(exec, req, COLD_STOP).await {
-            Ok(_) => {
-                println!(
-                    "flip: slot {} on core {} stopped for the cold flip HOPOS_FLIP_COLD_STOP slot={}",
-                    st.slot, st.core, st.slot
-                );
-                n += 1;
-            }
-            Err(JumpError::Kern(e)) => {
-                println!(
-                    "flip: slot {} would not stop: {e} HOPOS_FLIP_COLD_STOP_FAIL",
-                    st.slot
-                );
-                return Err(JumpError::Cold("a resident would not stop, slot", st.slot));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(n)
-}
-
-/// Zet elke geparkeerde app-core uit (PSCI CPU_OFF via de uit-stub van
-/// `cpu::el2::chain`) en wacht tot AFFINITY_INFO voor elke app-core "uit"
-/// zegt. Een core die nooit startte, is al uit. Geeft het aantal
-/// uitgezette cores.
-#[cfg(not(target_arch = "riscv64"))]
-async fn cores_off(exec: &'static Executor) -> Result<usize, JumpError> {
-    use cpu::el2::CoreState;
-    if !PSCI {
-        // `prepare` weigerde al; dit is de tweede lijn vóór de eerste SMC.
-        return Err(JumpError::Cold("no PSCI on this board, app cores", 0));
-    }
-    let Ok(plan) = crate::slots::os_plan() else {
-        // Geen slots op dit board: geen app-cores om uit te zetten.
-        return Ok(0);
-    };
-    let stub = Pa(FLIP_TRAMP_PA);
-    let mut sent = 0usize;
-    for c in 1..=plan.app_cores() {
-        let Some(core) = abi::layout::Core::new(c) else {
-            continue;
-        };
-        match cpu::el2::core_state(&plan, core) {
-            Ok(CoreState::Cold) => {}
-            Ok(CoreState::Parked) if !CPU_OFF_RETURNS => {
-                // `prepare` weigerde al ([`no_way_back`]); de tweede lijn.
-                return Err(JumpError::Cold(
-                    "CPU_OFF has no way back on this board, parked app core",
-                    c,
-                ));
-            }
-            Ok(CoreState::Parked) => {
-                if sent == 0 {
-                    chain::place_off_stub(stub).map_err(JumpError::Chain)?;
-                }
-                chain::send_off(&plan, core, stub).map_err(JumpError::Chain)?;
-                sent += 1;
-            }
-            Ok(CoreState::Running(_)) | Err(_) => {
-                return Err(JumpError::Cold("app core still runs", c));
-            }
-        }
-    }
-    let deadline = exec.now().saturating_add(CORES_OFF_WAIT.as_nanos() as u64);
-    for c in 1..=plan.app_cores() {
-        let Some(core) = abi::layout::Core::new(c) else {
-            continue;
-        };
-        let target = vboard::slots::mpidr(plan.phys_core(core));
-        loop {
-            match psci::affinity_info(target) {
-                psci::Affinity::Off => break,
-                // Een firmware zonder AFFINITY_INFO: dan zegt de mailbox
-                // het (de stub schreef "koud" vlak voor zijn CPU_OFF), plus
-                // een tik voor de CPU_OFF zelf.
-                psci::Affinity::Err(psci::Error::NotSupported)
-                    if matches!(cpu::el2::core_state(&plan, core), Ok(CoreState::Cold)) =>
-                {
-                    exec.after(Duration::from_millis(10)).await;
-                    break;
-                }
-                _ => {}
-            }
-            if exec.now() >= deadline {
-                println!(
-                    "flip: app core {c} (mpidr {target:#x}) not off after {} ms, affinity {:?}, mailbox {:?} HOPOS_FLIP_COLD_CORE",
-                    CORES_OFF_WAIT.as_millis(),
-                    psci::affinity_info(target),
-                    cpu::el2::core_state(&plan, core)
-                );
-                return Err(JumpError::Cold("app core did not power off", c));
-            }
-            exec.after(Duration::from_millis(1)).await;
-        }
-    }
-    Ok(sent)
-}
-
-/// De app-harts uit het kern-image voor de koude flip (riscv64): elk hart
-/// dat in de switcher staat, gaat in reset (de C906L) of naar de uit-stub
-/// op `FLIP_PARK_PA` (QEMU), en de taak wacht tot de stub bevestigt. Een
-/// hart dat nooit startte, telt niet. Geeft het aantal harts buiten het
-/// image.
-#[cfg(target_arch = "riscv64")]
-async fn cores_off(exec: &'static Executor) -> Result<usize, JumpError> {
-    use crate::slots::{self as rv, Off};
-    let Ok(plan) = crate::slots::os_plan() else {
-        return Ok(0);
-    };
-    let stub = Pa(vboard::slots::FLIP_PARK_PA);
-    let mut n = 0usize;
-    for c in 1..=plan.app_cores() {
-        let Some(core) = abi::layout::Core::new(c) else {
-            continue;
-        };
-        match rv::park_for_flip(&plan, core, stub) {
-            Ok(Off::Cold) => continue,
-            Ok(Off::Reset) => {
-                n += 1;
-                continue;
-            }
-            Ok(Off::Sent) => {}
-            Err(why) => {
-                println!("flip: app core {c}: {why} HOPOS_FLIP_COLD_CORE");
-                return Err(JumpError::Cold(why, c));
-            }
-        }
-        let deadline = exec.now().saturating_add(CORES_OFF_WAIT.as_nanos() as u64);
-        while !rv::is_off(&plan, core, stub) {
-            if exec.now() >= deadline {
-                println!(
-                    "flip: app core {c} did not reach the off stub at {:#x} within {} ms HOPOS_FLIP_COLD_CORE",
-                    stub.0,
-                    CORES_OFF_WAIT.as_millis()
-                );
-                return Err(JumpError::Cold("app core did not leave the image", c));
-            }
-            exec.after(Duration::from_millis(1)).await;
-        }
-        n += 1;
-    }
-    Ok(n)
 }
 
 /// De sprong van een klaargelegde flip: het beeld uit de staging naar het
@@ -1246,7 +898,7 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     println!(
         "flip: {} KiB to {base:#x}, {} resident(s), {} NAT flow(s) and a {} B handoff, jumping to {:#x} HOPOS_FLIP_JUMP gen={generation}",
         p.len >> 10,
-        h.slots.as_ref().map_or(0, Vec::len),
+        h.slots.len(),
         h.nat.flows.len(),
         blob.len(),
         p.entry
@@ -1265,9 +917,7 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     // zijn net naar DRAM geveegd; hopfs is vastgelegd en dicht, de
     // masquerade dicht. De app-cores draaien in hun partities en in de
     // switch-code in de plan-regio, nooit in het kern-RAM of het kern-beeld
-    // dat de trampoline veegt en overschrijft; bij een koude flip zijn ze
-    // uit (`cores_off`: AFFINITY_INFO zei OFF), dus voert ook niemand de
-    // uit-stub nog uit die de trampoline nu overschrijft.
+    // dat de trampoline veegt en overschrijft.
     let e = unsafe { chain::chain(&j) };
     mem.write64(pair, 0);
     mem.write64(BOOT_SCRATCH_PA + HANDOFF_MAGIC_OFF, 0);

@@ -24,9 +24,8 @@
 //!
 //! en uit de kern zelf ([`Facts`]): `HOPOS_NODE_IP`, `HOPOS_PORT`,
 //! `HOPOS_CORES` (de eigen app-cores die Hop uitdeelt), `HOPOS_SYSTEM_CORE=1`
-//! (de kern deelt zijn core als groep `system`), `HOPOS_COLD_FLIP`
-//! ([`ColdFlip`]: kan dit board koud flippen), `HOPOS_MEMORY` en `DNS` (de
-//! server uit de lease, voor de resolver van applib).
+//! (de kern deelt zijn core als groep `system`), `HOPOS_MEMORY` en `DNS`
+//! (de server uit de lease, voor de resolver van applib).
 //!
 //! Twee sleutels zijn voor de kern zelf, de plaatsing van Hop:
 //! `hopos.hop.sharegroup` (zijn groep, `HOPOS_HOP_GROUP` in de env) en
@@ -161,34 +160,6 @@ impl<'a> NodeCfg<'a> {
     }
 }
 
-/// Kan dit board koud flippen (`HOPOS_COLD_FLIP`)? Het board-contract met
-/// Hop: Hop beslist vooraf, vóór hij een taak stopt, en vraagt de kern pas
-/// als die ja kan zeggen. De kern weigert zelf ook (hopos `flip::prepare`,
-/// `HOPOS_FLIP_COLD_NO_PSCI`, `HOPOS_FLIP_COLD_NO_WAY_BACK`) en leest
-/// dezelfde waarde (hopos `flip::COLD_FLIP`).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ColdFlip {
-    /// `yes`: de koude flip kan altijd.
-    Yes,
-    /// `no`: nooit; geen PSCI, dus de app-cores gaan niet uit (de M4).
-    No,
-    /// `fresh`: alleen zolang er nog nooit een app-core draaide; CPU_OFF
-    /// keert op dit board niet terug (de Pi 5).
-    Fresh,
-}
-
-impl ColdFlip {
-    /// De waarde in de env.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Yes => "yes",
-            Self::No => "no",
-            Self::Fresh => "fresh",
-        }
-    }
-}
-
 /// Wat de kern zelf over de node weet en Hop meegeeft.
 #[derive(Copy, Clone, Debug)]
 pub struct Facts<'a> {
@@ -218,8 +189,6 @@ pub struct Facts<'a> {
     /// De sharegroup van Hop zelf (`hopos.hop.sharegroup`; `system` is de
     /// OS-core): jobs met die tag delen Hop's core, dus Hop telt haar vrij.
     pub hop_group: &'a str,
-    /// Kan dit board koud flippen (`HOPOS_COLD_FLIP`).
-    pub cold_flip: ColdFlip,
     /// Het geheugen van de pool (Hop plant tegen dit min het zijne).
     pub pool_bytes: u64,
     /// De partitie van Hop zelf.
@@ -481,7 +450,6 @@ fn base(out: &mut String, cfg: &NodeCfg<'_>, f: &Facts<'_>) -> fmt::Result {
         writeln!(out, "HOPOS_SYSTEM_CORE=1")?;
     }
     writeln!(out, "HOPOS_HOP_GROUP={}", f.hop_group)?;
-    writeln!(out, "HOPOS_COLD_FLIP={}", f.cold_flip.as_str())?;
     writeln!(
         out,
         "HOPOS_MEMORY={}",
@@ -503,7 +471,6 @@ mod tests {
         hop_on_os: false,
         os_shared: false,
         hop_group: "hop",
-        cold_flip: ColdFlip::Yes,
         pool_bytes: 512 << 20,
         hop_mem: 64 << 20,
     };
@@ -689,7 +656,7 @@ mod tests {
             core::str::from_utf8(b.as_bytes()).unwrap(),
             "HOPOS_NODE=hopos-qemu\nHOPOS_CLUSTER=hopos\nHOPOS_INSECURE=1\n\
              HOPOS_NODE_IP=10.0.2.15\nDNS=10.0.2.3\nHOPOS_PORT=8080\nHOPOS_CORES=2\n\
-             HOPOS_HOP_GROUP=hop\nHOPOS_COLD_FLIP=yes\nHOPOS_MEMORY=469762048\n"
+             HOPOS_HOP_GROUP=hop\nHOPOS_MEMORY=469762048\n"
         );
     }
 
@@ -710,19 +677,6 @@ mod tests {
         f.os_shared = false;
         let b = build(&NodeCfg::parse(QEMU_CFG), &f).unwrap();
         assert_eq!(b.get("HOPOS_SYSTEM_CORE"), None);
-    }
-
-    #[test]
-    fn the_board_says_whether_it_flips_cold() {
-        for (cold_flip, want) in [
-            (ColdFlip::Yes, "yes"),
-            (ColdFlip::No, "no"),
-            (ColdFlip::Fresh, "fresh"),
-        ] {
-            let f = Facts { cold_flip, ..FACTS };
-            let b = build(&NodeCfg::parse(QEMU_CFG), &f).unwrap();
-            assert_eq!(b.get("HOPOS_COLD_FLIP"), Some(want));
-        }
     }
 
     #[test]

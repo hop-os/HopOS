@@ -11,7 +11,7 @@
 # zijn eigen werkboom.
 #
 #   sh tools/qemu-all.sh                alle ringen
-#   sh tools/qemu-all.sh hop flip-cold  alleen deze (de namen hieronder)
+#   sh tools/qemu-all.sh hop flip-uefi  alleen deze (de namen hieronder)
 #   LOGS=map sh tools/qemu-all.sh       de consoles daar (standaard een
 #                                       nieuwe tijdelijke map, die blijft)
 #   HOP_DIR=pad                         de hop-repo (standaard ../hop/hop)
@@ -43,7 +43,6 @@ store         sh tools/qemu-test-store.sh
 sync          python3 tools/qemu-test-sync.py
 flip          sh tools/qemu-test-flip.sh
 flip-mismatch MISMATCH=1 sh tools/qemu-test-flip.sh
-flip-cold     COLD=1 sh tools/qemu-test-flip.sh
 flip-oscore   OSCORE=1 sh tools/qemu-test-flip.sh
 flip-rpi4     BOARD=rpi4 sh tools/qemu-test-flip.sh
 flip-uefi     BOARD=uefi sh tools/qemu-test-flip.sh
@@ -55,7 +54,6 @@ rpi4          sh tools/qemu-rpi4-test.sh
 riscv         sh tools/qemu-riscv-test.sh
 riscv-hop     sh tools/qemu-riscv-test-hop.sh
 riscv-share   sh tools/qemu-riscv-test-share.sh
-riscv-flip    sh tools/qemu-riscv-test-flip.sh
 '
 
 # Bestaat elke gevraagde naam?

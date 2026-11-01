@@ -106,30 +106,13 @@
 #                                           doordraait (GET /tasks) en er geen
 #                                           sprong, geen bevriezing en geen
 #                                           landing op de console staat.
-#   COLD=1 tools/qemu-test-flip.sh          de KOUDE flip, met dezelfde bundel als
-#                                           MISMATCH=1. Eerst een appspike met
-#                                           HOLD=1 (een bewoner op een app-core),
-#                                           dan warm: geweigerd (5xx, "switch code
-#                                           mismatch"); dan koud
-#                                           ({"cold":true}): 202, Hop stopt zijn
-#                                           taken (HOP_FLIP_COLD_STOP), de kern
-#                                           zet de app-cores uit
-#                                           (HOPOS_FLIP_COLD cores_off>=1) en
-#                                           springt; kern B landt koud
-#                                           (HOPOS_FLIP_BOOT gen=2,
-#                                           HOPOS_FLIP_COLD_BOOT), mount dezelfde
-#                                           hopfs-generatie, start Hop koud uit
-#                                           de staging (HOP_UP ná HOPOS_FLIP_BOOT,
-#                                           twee HOP_BOOT's in de console) en
-#                                           plaatst daarna weer werk (CPU_ON op
-#                                           een core die kern A uitzette).
 #   OSCORE=1 tools/qemu-test-flip.sh        de kern op core 1 (hopos.oscore): de
 #                                           flip springt vanaf core 1, en de
 #                                           nieuwe kern moet op een andere core
 #                                           dan 0 door `_start` (cpu::boot
 #                                           FLIP_ENTRY; dezelfde ingang als de
 #                                           Pi's en de Radxa). Samen te nemen
-#                                           met COLD=1, en met BOARD=uefi (daar
+#                                           met BOARD=uefi (daar
 #                                           in hopos.cfg op de ESP, de weg van
 #                                           de O6N).
 #   BOARD=rpi4 tools/qemu-test-flip.sh      de flip-INGANG van de Pi op QEMU
@@ -270,15 +253,9 @@ STUB
 	exit 0
 fi
 MISMATCH="${MISMATCH:+1}"
-COLD="${COLD:+1}"
-if [ -n "$COLD" ] && [ -n "$MISMATCH" ]; then
-	echo "COLD=1 neemt de MISMATCH-bundel al; zet er niet ook MISMATCH=1 bij" >&2
-	exit 64
-fi
-# De modus: warm (met FLIPCONN), mismatch (alleen de weigering) of cold.
+# De modus: warm (met FLIPCONN) of mismatch (alleen de weigering).
 MODE=warm
 [ -n "$MISMATCH" ] && MODE=mismatch
-[ -n "$COLD" ] && MODE=cold
 TARGET=aarch64-unknown-none-softfloat
 scratch qemu-flip
 ports SYS AGENT LEADER ART ECHO
@@ -463,12 +440,6 @@ mismatch)
 	WORK_MARKS=""
 	RED="$BASE_RED|HOPOS_FLIP_STAGED|HOPOS_FS_FROZEN|HOPOS_FLIP_JUMP|HOPOS_FLIP_BOOT|HOPOS_FLIP_FAIL"
 	;;
-cold)
-	# De warme weigering hoort erbij (één keer); de rest is de koude weg.
-	FLIP_MARKS="HOPOS_FLIP_REFUSED switch code mismatch|slot 1: .*HOP_FLIP_FAIL|HOPOS_FLIP_COLD_ASKED|HOPOS_FLIP_STAGED|slot 1: .*HOP_FLIP_COLD_STOP|HOPOS_FS_FROZEN generation=|HOPOS_FLIP_COLD stopped=|HOPOS_FLIP_JUMP gen=2|HOPOS_BOOT gen=2 stamp=B|HOPOS_FLIP_BOOT gen=2|HOPOS_FLIP_COLD_BOOT|HOPOS_NET_CARRIED flows=0|HOPOS_FLIP_SETTLED"
-	AFTER_MARKS="HOPOS_CAGE_UP|HOPOS_HOP_START slot=1|slot 1: .*HOP_UP"
-	RED="$BASE_RED|HOPOS_FLIP_FAIL|HOPOS_FLIP_ADOPT|HOPOS_HOP_RESUMED|HOPOS_FLIP_COLD_CORE|HOPOS_FLIP_COLD_STOP_FAIL|HOPOS_FLIP_REFUSED (sha256|bundle|flip ABI|image|same|firmware|cold)"
-	;;
 esac
 if [ "$BOARD" = uefi ] && [ "$MODE" != mismatch ]; then
 	# De TRNG achter de firmware is na de koude boot weg: de nieuwe kern
@@ -490,19 +461,16 @@ fi
 
 JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432}'
 [ -n "$GROUPFLIP" ] && JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"tags":{"sharegroup":"hop"}}'
-# De bewoner vóór de flip: FLIPCONN (warm) of een appspike die blijft (koud).
+# De bewoner vóór de flip: FLIPCONN (warm).
 PRE_JOB=""
 case "$MODE" in
 warm) PRE_JOB='{"name":"flipconn","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"env":{"ROLE":"FLIPCONN","FLIPCONN":"10.0.2.2:'"$ECHOPORT"'"}}' ;;
-cold) PRE_JOB='{"name":"holder","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"env":{"HOLD":"1"}}' ;;
 esac
 FLIPREQ='{"url":"http://10.0.2.2:'"$ARTPORT"'/'"$BUNDLE"'","sha256":"'"$SHA"'"}'
-COLDREQ='{"url":"http://10.0.2.2:'"$ARTPORT"'/'"$BUNDLE"'","sha256":"'"$SHA"'","cold":true}'
 PRE=""
 [ -z "$PRE_JOB" ] && PRE="n.v.t."
 FLIPPED=""
 LASTPOST=""
-WARMTRY=""
 TASKS=""
 POSTED=""
 started
@@ -530,22 +498,10 @@ while alive; do
 		continue
 	fi
 	if [ -z "$FLIPPED" ]; then
-		# Wacht op de bewoner van vóór de flip: drie echo's van FLIPCONN,
-		# of de doorloop van de appspike die blijft.
-		case "$MODE" in
-		warm) [ "$(echoes A)" -ge 3 ] || { step; continue; } ;;
-		cold) has "slot [0-9]+: HOPOS_APPSPIKE_DONE pass=9 fail=0" || { step; continue; } ;;
-		esac
+		# Wacht op de bewoner van vóór de flip: drie echo's van FLIPCONN.
+		[ "$MODE" = warm ] && { [ "$(echoes A)" -ge 3 ] || { step; continue; }; }
 		all "$A_MARKS" || { step; continue; }
-		if [ "$MODE" = cold ] && [ -z "$WARMTRY" ]; then
-			# Eerst warm: die moet geweigerd worden.
-			WARMTRY="$(flip "$FLIPREQ")" || { WARMTRY="ROOD curl: $WARMTRY"; break; }
-			step
-			continue
-		fi
-		REQ="$FLIPREQ"
-		[ "$MODE" = cold ] && REQ="$COLDREQ"
-		if out="$(flip "$REQ")"; then
+		if out="$(flip "$FLIPREQ")"; then
 			FLIPPED="$out"
 			# De verbinding over de flip: nu openen, met de eerste
 			# helft van een GET /tasks; de rest pas na de landing.
@@ -649,10 +605,6 @@ case "$MODE:$PRE" in
 *"HTTP 2"*) echo "   ok  de bewoner van vóór de flip: $PRE" ;;
 *) echo "   ROOD de bewoner van vóór de flip: ${PRE:-nooit geplaatst}"; fail=1 ;;
 esac
-case "$MODE:$WARMTRY" in
-cold:*"HTTP 5"*) echo "   ok  eerst warm, geweigerd: $WARMTRY" ;;
-cold:*) echo "   ROOD de warme flip had geweigerd moeten worden: ${WARMTRY:-nooit gedaan}"; fail=1 ;;
-esac
 case "$MODE:$FLIPPED" in
 mismatch:*"HTTP 5"*) echo "   ok  POST /flip geweigerd: $FLIPPED" ;;
 mismatch:*) echo "   ROOD POST /flip had geweigerd moeten worden: ${FLIPPED:-nooit gedaan}"; fail=1 ;;
@@ -734,29 +686,11 @@ if [ "$MODE" != mismatch ]; then
 		fail=1
 	fi
 fi
-if [ "$MODE" = cold ]; then
-	# Koud: de app-cores gingen uit, en er was precies één weigering (de
-	# warme).
-	OFF="$(tr -d '\r' <"$LOG" | sed -n 's/.*HOPOS_FLIP_COLD stopped=\([0-9]*\) cores_off=\([0-9]*\).*/\1 \2/p' | head -1)"
-	set -- ${OFF:-x 0}
-	refused="$(count 'HOPOS_FLIP_REFUSED')"
-	if [ "${2:-0}" -ge 1 ] && [ "$refused" = 1 ]; then
-		echo "   ok  koud: $1 bewoner(s) door de kern gestopt, $2 app-core(s) uit, één warme weigering ervoor"
-	else
-		echo "   ROOD koud: gestopt/uit '${OFF:-?}', weigeringen $refused"
-		fail=1
-	fi
-fi
 boots="$(count 'slot 1: .*HOP_BOOT')"
 starts="$(count 'HOPOS_HOP_START slot=1')"
 want=1
-[ "$MODE" = cold ] && want=2
 if [ "$boots" = "$want" ] && [ "$starts" = "$want" ]; then
-	if [ "$MODE" = cold ]; then
-		echo "   ok  Hop koud herstart: 2x HOP_BOOT en 2x HOPOS_HOP_START over twee kernen"
-	else
-		echo "   ok  dezelfde Hop: 1x HOP_BOOT en 1x HOPOS_HOP_START over twee kernen"
-	fi
+	echo "   ok  dezelfde Hop: 1x HOP_BOOT en 1x HOPOS_HOP_START over twee kernen"
 else
 	echo "   ROOD Hop: HOP_BOOT ${boots}x, HOPOS_HOP_START ${starts}x (verwacht ${want}x)"
 	fail=1

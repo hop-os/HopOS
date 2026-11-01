@@ -197,11 +197,6 @@ mod arch {
     pub(super) fn start_waker(_exec: &'static executor::Executor, _plan: &abi::layout::Plan) {}
 }
 
-/// De koude flip op riscv64 (flip.rs): de app-harts uit het kern-image en,
-/// als de sprong niet doorgaat, terug.
-#[cfg(target_arch = "riscv64")]
-pub(crate) use cage::{Off, is_off, park_for_flip};
-
 use crate::clock::ExecTimer;
 use crate::glue::{DevMem, KernConsole, SlotOutbox};
 use abi::hopabi::CTRL_ENV_MAX;
@@ -758,7 +753,6 @@ impl HopNode {
             hop_on_os: hop_on_os(),
             os_shared: arch::SHARES_OS_CORE,
             hop_group: core::str::from_utf8(hop_group.as_slice()).unwrap_or("hop"),
-            cold_flip: crate::flip::COLD_FLIP,
             pool_bytes: self.pool_bytes,
             hop_mem: HOP_MEM,
         };

@@ -133,8 +133,6 @@ pub trait Soc: 'static {
         let _ = ctx;
         board::UsbHosts::new()
     }
-    /// Keert PSCI CPU_OFF terug ([`Board::CPU_OFF_RETURNS`])? Standaard ja.
-    const CPU_OFF_RETURNS: bool = true;
     /// Eén diagnose van de NIC voor de tik ([`Board::nic_diag`]).
     fn nic_diag() {}
 }
@@ -393,7 +391,6 @@ impl<S: Soc> Board for Raspi<S> {
     type Disk = NoDisk;
 
     const NAME: &'static str = S::NAME;
-    const CPU_OFF_RETURNS: bool = S::CPU_OFF_RETURNS;
     const DTB_IN_X0: bool = true;
 
     fn console(&self) -> fn(&[u8]) {

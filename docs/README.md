@@ -85,7 +85,7 @@ measurements.md. Zeven borden kosten ruim drie minuten.
 | Meten | [measurements.md](measurements.md) | per board de laatste v3-meting naast de lat van v2, het gereedschap, en de handleiding voor het bijwerken; `tools/soak.sh` voor uren |
 | Geheugen | [heap.md](heap.md), [stacktask.md](stacktask.md) | de gedeelde allocator van kern en apps (vrije lijsten, plafond, tellers) en waarom; synchrone C-code als taak met een eigen stack (`applib::stacktask`) |
 | Opslag | [storage-sync.md](storage-sync.md) | de bevestigde opslagbarrière `OP_SYNC` voor een database in een app |
-| Reviews | [description.md](description.md), [review-2026-10-01.md](review-2026-10-01.md), [review-port-2026-10-02.md](review-port-2026-10-02.md) | de omschrijving laag voor laag met wat dubbel of scheef is; de leesreview van 1 oktober (wat weg kan); de port-review Go v2.2.7 naast Rust v3 |
+| Reviews | [description.md](description.md), [sequence-hopos.md](sequence-hopos.md), [review-2026-10-01.md](review-2026-10-01.md), [review-port-2026-10-02.md](review-port-2026-10-02.md) | de omschrijving laag voor laag met wat dubbel of scheef is; de volgorde in de tijd met per stap de afweging, en wat te schaven valt (24-10); de leesreview van 1 oktober (wat weg kan); de port-review Go v2.2.7 naast Rust v3 |
 
 ## Images per board
 

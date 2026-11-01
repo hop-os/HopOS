@@ -32,7 +32,10 @@ fn filled<T: Clone>(n: usize, v: T) -> Result<Vec<T>, Error> {
 }
 
 /// Het conntrack-plafond: de anti-DoS-grens, en wat een kern-flip draagt.
-pub use abi::MAX_FLOWS;
+/// De volle conntrack van de switch (`hopswitch.MaxFlows`): het
+/// anti-DoS-plafond van de NAT (een app laat HOP's geheugen op core 0 nooit
+/// vollopen).
+pub const MAX_FLOWS: usize = 4096;
 
 /// Het eerlijke deel per slot ónder het globale plafond. Zonder dit is de
 /// conntrack één gedeelde pot: één app die 4096 verbindingen opent laat elke

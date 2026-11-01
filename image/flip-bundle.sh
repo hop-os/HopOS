@@ -169,7 +169,7 @@ shift, cold_base, pie = int(sys.argv[5], 16), int(sys.argv[6], 16), sys.argv[7] 
 flavor = sys.argv[8]  # nvhe | vhe | apple: de symboolnaam van de blobs
 MAGIC = 0x314F4C4552504F48  # "HOPRELO1"
 VERSION = 2                 # kern::kernflip::BUNDLE_VERSION
-FLIP_ABI = 3                # kern::kernflip::FLIP_ABI
+FLIP_ABI = 4                # kern::kernflip::FLIP_ABI
 M64 = (1 << 64) - 1
 
 def die(msg):

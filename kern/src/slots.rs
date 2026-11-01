@@ -1683,6 +1683,22 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         Ok(states.len())
     }
 
+    /// Zet de poorten van elke geadopteerde bewoner door: ze horen bij de
+    /// slots, en de NAT van deze kern begon leeg. Na [`Lifecycle::adopt`],
+    /// als het net luistert (de bootreeks: lease, uplink, stack, listener,
+    /// slots, Hop). Een weigering is een regel (`publish`), de bewoner
+    /// draait door.
+    pub async fn republish(&mut self) {
+        for i in 1..=SLOT_CAP {
+            let Some(slot) = Slot::new(i) else { continue };
+            let ports = match self.resident(slot).map(|r| try_vec(&r.ports)) {
+                Some(Ok(p)) => p,
+                _ => continue,
+            };
+            let _ = self.publish(slot, &ports).await;
+        }
+    }
+
     /// De kooi (voor de tests).
     #[cfg(test)]
     pub(crate) fn cage(&mut self) -> &mut C {
@@ -2751,10 +2767,11 @@ pub(crate) mod tests {
         let mut states = [st(1, 3, 2, 0x8000_0000), st(2, 1, 1, 0x8200_0000)];
         states[1].ports = vec![80];
         assert_eq!(a.adopt(&states).unwrap(), 2);
-        // De poorten gaan met het net mee (de switch neemt ze over), niet
-        // met de adoptie: die publiceert niets, maar kent ze voor de stop.
+        // De NAT van de nieuwe kern is leeg: de poorten gaan open als het
+        // net luistert, alleen slot 2 had er.
         assert!(a.cage.published.is_empty());
-        assert_eq!(a.resident(s(2)).map(|r| r.ports.clone()), Some(vec![80]));
+        block_on(a.republish());
+        assert_eq!(a.cage.published, [(2, vec![80])]);
         assert_eq!(
             a.places.placement_of(s(1)).map(|p| (p.0.get(), p.1)),
             Some((3, 2))

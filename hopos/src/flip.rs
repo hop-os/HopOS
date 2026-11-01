@@ -11,8 +11,13 @@
 //! | --- | --- | --- |
 //! | klok | `clock::offset` | `clock::restore` (hier, in [`land`]) |
 //! | opslag | `storage::freeze_for_flip` | `storage::start` houdt de boom |
-//! | net | `net::capture`: lease en conntrack | `net::start` met [`Landing::net`]: de switch begint met de uplink, de poorten en de flows, de host-taak slaat DHCP over (H1) |
-//! | hok | `Request::Snapshot` | `slots::start` met [`Landing::slots`]: adopteren, of leeg beginnen |
+//! | lease | `net::lease` | `net::start` met [`Landing::lease`]: de host-taak slaat DHCP over (H1) |
+//! | hok | `Request::Snapshot` | `slots::start` met [`Landing::slots`]: adopteren; hun poorten gaan open als het net luistert |
+//!
+//! Wat niet meegaat: de conntrack en de open verbindingen van de
+//! node-stack. Een verbinding die breekt, is een fout of een time-out voor
+//! wie hem had, en die verbindt opnieuw (Derek, 01-11: "internet is toch
+//! gemaakt om te herconnecten").
 //!
 //! De weg, in volgorde:
 //!
@@ -27,8 +32,7 @@
 //!    zijn FLIP, en deze kern draait gewoon door.
 //! 3. De flip-taak ([`start`]) wacht even, zodat het antwoord op de FLIP
 //!    Hop nog bereikt, en vangt dan, in deze volgorde: hopfs vastleggen en
-//!    dicht, de lease en de conntrack (de masquerade gaat dicht), de USB
-//!    stil, en de bewoners. Dan het handoff-blob, het pointer/magic-paar, de recorder op
+//!    dicht, de USB stil, de bewoners en de lease. Dan het handoff-blob, het pointer/magic-paar, de recorder op
 //!    "springen", en de sprong (`cpu::el2::chain::chain`). Na de 202 is er
 //!    geen weg terug (§13.7): wat hier misgaat, is `HOPOS_FATAL` en de
 //!    koude boot.
@@ -333,10 +337,10 @@ pub(crate) fn jumped() -> bool {
 
 /// Wat een landing aan `setup` geeft: per onderdeel zijn stuk.
 pub(crate) struct Landing {
-    /// Het hok: de bewoners om te adopteren.
+    /// Het hok: de bewoners om te adopteren, met hun poorten.
     pub(crate) slots: Vec<SlotState>,
-    /// Het net: de lease, de poorten van de bewoners en hun conntrack.
-    pub(crate) net: crate::net::Carried,
+    /// De lease van de uplink; `None`: DHCP.
+    pub(crate) lease: Option<kernflip::Lease>,
 }
 
 /// De landing, als eerste in `setup` (in `kmain` gaan alleen de heap,
@@ -399,29 +403,14 @@ fn landed(h: Handoff) -> Landing {
     open_box(h.generation);
     crate::clock::restore(h.wall_off);
     let g = h.generation;
-    let lease = h.lease.map_or(0, |l| l.ip);
     println!(
-        "flip: landed, generation {g}, {} resident(s), {} NAT flow(s), lease {} HOPOS_FLIP_BOOT gen={g}",
+        "flip: landed, generation {g}, {} resident(s), lease {} HOPOS_FLIP_BOOT gen={g}",
         h.slots.len(),
-        h.nat.flows.len(),
-        core::net::Ipv4Addr::from(lease)
+        core::net::Ipv4Addr::from(h.lease.map_or(0, |l| l.ip))
     );
-    let mut ports = Vec::new();
-    for st in &h.slots {
-        for &port in &st.ports {
-            if ports.try_reserve(1).is_err() {
-                crate::fatal(format_args!("flip: out of memory for the carried ports"));
-            }
-            ports.push((st.slot, port));
-        }
-    }
     Landing {
         slots: h.slots,
-        net: crate::net::Carried {
-            lease: h.lease,
-            ports,
-            nat: h.nat,
-        },
+        lease: h.lease,
     }
 }
 
@@ -787,7 +776,6 @@ async fn run(exec: &'static Executor) {
 /// Waarom de sprong niet doorging.
 enum JumpError {
     Kern(kern::Error),
-    Net(&'static str),
     Chain(chain::ChainError),
 }
 
@@ -795,7 +783,6 @@ impl core::fmt::Display for JumpError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Kern(e) => write!(f, "{e}"),
-            Self::Net(why) => write!(f, "net: {why}"),
             Self::Chain(e) => write!(f, "{e}"),
         }
     }
@@ -809,37 +796,22 @@ async fn capture_and_jump(exec: &'static Executor, p: Prepared) -> JumpError {
     if let Err(e) = crate::storage::freeze_for_flip(exec, ACTOR_WAIT).await {
         return JumpError::Kern(e);
     }
-    // 2. Het net: de lease en de conntrack, als waarde terug van de
-    //    switch-actor (die zet de masquerade dicht).
-    let (lease, mut nat) = match crate::net::capture(exec, ACTOR_WAIT).await {
-        Ok(c) => c,
-        Err(why) => return JumpError::Net(why),
-    };
-    // 3. De USB-controllers stil: DMA-masters op de RP1 die anders door de
+    // 2. De USB-controllers stil: DMA-masters op de RP1 die anders door de
     //    link-reset van de nieuwe kern heen zouden schrijven (30-09, de Pi
     //    5).
     crate::gui::quiesce_usb(exec).await;
-    // 4. Het laatste `.await` van deze kern: het hok.
+    // 3. Het laatste `.await` van deze kern: het hok.
     let slots = match kern::slots::call(&crate::LIFECYCLE, &REPLY, Request::Snapshot).await {
         Ok(Response::Snapshot(s)) => s,
         Ok(Response::Failed(e)) | Err(e) => return JumpError::Kern(e),
         Ok(_) => return JumpError::Kern(kern::Error::Busy),
     };
-    // Alleen de flows van een bewoner die meegaat: de nieuwe switch neemt
-    // de rest dan niet over.
-    let resident = |slot: u8| slots.iter().any(|st| st.slot == usize::from(slot));
-    nat.flows.retain(|f| resident(f.slot));
-    println!(
-        "flip: conntrack captured, {} NAT flow(s), outbound mapping closed until the jump HOPOS_FLIP_NAT_CAPTURED flows={}",
-        nat.flows.len(),
-        nat.flows.len()
-    );
+    // 4. De lease, zoals de keeper hem nu houdt.
     let h = Handoff {
         generation: generation() + 1,
         wall_off: crate::clock::offset(),
-        lease,
+        lease: crate::net::lease(),
         slots,
-        nat,
     };
     handoff_and_jump(p, &h)
 }
@@ -896,10 +868,9 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     dev::push(Pa(pair), 16);
     kernflip::stage(&mut mem, &fp, Stage::Handoff, generation);
     println!(
-        "flip: {} KiB to {base:#x}, {} resident(s), {} NAT flow(s) and a {} B handoff, jumping to {:#x} HOPOS_FLIP_JUMP gen={generation}",
+        "flip: {} KiB to {base:#x}, {} resident(s) and a {} B handoff, jumping to {:#x} HOPOS_FLIP_JUMP gen={generation}",
         p.len >> 10,
         h.slots.len(),
-        h.nat.flows.len(),
         blob.len(),
         p.entry
     );
@@ -914,8 +885,7 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     // gerelokeerd naar het koude adres; niemand schrijft er nog in (de
     // firmware of QEMU legde er alleen bij de boot iets neer, en dat ligt
     // ernaast, `kernflip::stage_slot`). Het blob, het paar en de recorder
-    // zijn net naar DRAM geveegd; hopfs is vastgelegd en dicht, de
-    // masquerade dicht. De app-cores draaien in hun partities en in de
+    // zijn net naar DRAM geveegd; hopfs is vastgelegd en dicht. De app-cores draaien in hun partities en in de
     // switch-code in de plan-regio, nooit in het kern-RAM of het kern-beeld
     // dat de trampoline veegt en overschrijft.
     let e = unsafe { chain::chain(&j) };

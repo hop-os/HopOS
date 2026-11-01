@@ -39,8 +39,10 @@
 //!   de antwoorden. De echo zet er een fase voor (`A` vóór de landing van
 //!   de nieuwe kern, `B` erna; het toets-script zet hem om), dus de app
 //!   weet zonder klok van de kern welke antwoorden over de flip heen kwamen.
-//!   Groen bij drie `B`-antwoorden op DEZELFDE verbinding; elke fout van de
-//!   stack (een reset, een EOF) is rood, er wordt nooit opnieuw verbonden.
+//!   De verbinding mag over de flip breken (01-11: de conntrack gaat niet
+//!   mee): de app krijgt dan een fout van zijn stack, geen hang
+//!   (`HOPOS_APPSPIKE_FLIPCONN_BROKE`), en verbindt opnieuw. Groen bij drie
+//!   `B`-antwoorden binnen de termijn.
 //!   Alleen deze toets draait dan: de rest bewijzen de andere rollen.
 //!
 //! - `STORE`: de object-store (Go: `store_demo.go`), met een S3 achter Hop
@@ -405,20 +407,14 @@ async fn flipconn_role(app: &'static App, s: &mut Score) {
         s.check("FLIPCONN", false, format_args!("up: {e}"));
         return;
     }
-    let mut conn = match TcpStream::connect_timeout(ip, port, NET_DIAL).await {
-        Ok(c) => c,
-        Err(e) => {
-            s.check("FLIPCONN", false, format_args!("connect {target}: {e}"));
-            return;
-        }
-    };
-    let local = conn.local().map(|e| e.port).unwrap_or(0);
-    log!("HOPOS_APPSPIKE_FLIPCONN_UP to={target} local_port={local}");
     let t0 = clock::now_ns();
     let limit = FLIPCONN_LIMIT.as_nanos() as u64;
     let mut n = Echoes::default();
     let mut buf = [0u8; 256];
     let mut len = 0usize;
+    let mut conn: Option<TcpStream> = None;
+    let mut breaks = 0u32;
+    let mut local = 0;
     let failed = loop {
         if n.after >= FLIPCONN_AFTER {
             break None;
@@ -426,14 +422,37 @@ async fn flipconn_role(app: &'static App, s: &mut Score) {
         if clock::now_ns().saturating_sub(t0) > limit {
             break Some("no answers after the landing in time");
         }
+        let c = match conn.as_mut() {
+            Some(c) => c,
+            None => match TcpStream::connect_timeout(ip, port, NET_DIAL).await {
+                Ok(c) => {
+                    local = c.local().map(|e| e.port).unwrap_or(0);
+                    len = 0;
+                    log!("HOPOS_APPSPIKE_FLIPCONN_UP to={target} local_port={local}");
+                    conn.insert(c)
+                }
+                Err(e) => {
+                    log!("HOPOS_APPSPIKE_FLIPCONN_BROKE reconnect: {e}");
+                    break Some("reconnect failed");
+                }
+            },
+        };
         n.sent += 1;
         let line = alloc::format!("ping {}\n", n.sent);
-        if let Err(e) = conn.write_all(line.as_bytes()).await {
-            log!("HOPOS_APPSPIKE_FLIPCONN_ERR write: {e}");
-            break Some("write failed");
-        }
-        if let Err(why) = read_round(&mut conn, &mut buf, &mut len, &mut n).await {
-            break Some(why);
+        let r = match c.write_all(line.as_bytes()).await {
+            Ok(()) => read_round(c, &mut buf, &mut len, &mut n).await,
+            Err(e) => {
+                log!("HOPOS_APPSPIKE_FLIPCONN_BROKE write: {e}");
+                Err("write failed")
+            }
+        };
+        if let Err(why) = r {
+            // Gebroken: een fout van de stack, geen hang. Opnieuw.
+            breaks += 1;
+            log!("HOPOS_APPSPIKE_FLIPCONN_BROKE {why}, break {breaks}, reconnecting");
+            if let Some(c) = conn.take() {
+                let _ = c.close();
+            }
         }
         if n.sent.is_multiple_of(5) {
             log!(
@@ -451,7 +470,7 @@ async fn flipconn_role(app: &'static App, s: &mut Score) {
             "FLIPCONN",
             n.before > 0 && n.odd == 0,
             format_args!(
-                "before={} after={total} sent={} odd={} local_port={local}",
+                "before={} after={total} sent={} odd={} breaks={breaks} local_port={local}",
                 n.before, n.sent, n.odd
             ),
         ),
@@ -459,18 +478,19 @@ async fn flipconn_role(app: &'static App, s: &mut Score) {
             "FLIPCONN",
             false,
             format_args!(
-                "{why}: before={} after={total} sent={} odd={} local_port={local}",
+                "{why}: before={} after={total} sent={} odd={} breaks={breaks} local_port={local}",
                 n.before, n.sent, n.odd
             ),
         ),
     }
-    let _ = conn.close();
+    if let Some(c) = conn {
+        let _ = c.close();
+    }
 }
 
 /// Leest één seconde lang wat de echo terugstuurt en telt het. Een
 /// time-out is "nog niets" (tijdens de sprong antwoordt niemand); een EOF
-/// of een fout van de stack (een reset) is het einde van de verbinding,
-/// en dus rood: over de flip mag hij niet breken.
+/// of een fout van de stack (een reset) is het einde van de verbinding.
 async fn read_round(
     conn: &mut TcpStream,
     buf: &mut [u8; 256],
@@ -485,17 +505,14 @@ async fn read_round(
             n.odd += 1;
         }
         match conn.read(buf.get_mut(*len..).unwrap_or(&mut [])).await {
-            Ok(0) => {
-                log!("HOPOS_APPSPIKE_FLIPCONN_ERR eof from the peer");
-                break Err("the peer closed the connection");
-            }
+            Ok(0) => break Err("the peer closed the connection"),
             Ok(k) => {
                 *len += k;
                 n.take(buf, len);
             }
             Err(appnet::NetError::Timeout) => break Ok(()),
             Err(e) => {
-                log!("HOPOS_APPSPIKE_FLIPCONN_ERR read: {e}");
+                log!("HOPOS_APPSPIKE_FLIPCONN_BROKE read: {e}");
                 break Err("the connection broke");
             }
         }

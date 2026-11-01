@@ -454,7 +454,7 @@ pub(crate) fn start(
         crate::gui::slot_grants(),
     ));
     // Eerst alle eigendomsclaims terug, dan pas verzoeken: vóór de actor
-    // zijn eerste bericht leest (de poorten nam de switch al over).
+    // zijn eerste bericht leest. De poorten pas als het net luistert.
     if let Some(states) = &adopt {
         match lc.adopt(states) {
             Ok(n) => println!(
@@ -466,7 +466,14 @@ pub(crate) fn start(
             )),
         }
     }
-    let actor = async move { lc.run(INBOX).await };
+    let adopted = adopt.is_some();
+    let actor = async move {
+        if adopted {
+            crate::net::NET_READY.wait().await;
+            lc.republish().await;
+        }
+        lc.run(INBOX).await
+    };
     if let Err(e) = exec.spawn(actor) {
         println!("slots: lifecycle not spawned: {e:?} HOPOS_SLOT_SPAWN");
         return;

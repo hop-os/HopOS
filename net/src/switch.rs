@@ -16,14 +16,13 @@
 //! de enige producer per RX-ring en de enige consument per TX-ring, zonder
 //! slot. De deur van de executor leest alleen [`Published`], met kale loads.
 
-use crate::nat::{FlowState, Nat, NatIo, NatState, Neighbors, Proto, Uplink};
+use crate::nat::{Nat, NatIo, Neighbors, Proto, Uplink};
 use crate::plan::{
     HOST_MAC, MAX_LAN_FRAME, PORTS, SLOT_CAP, UPLINK_MAX_FRAME, host_ip4, port_ip4, port_mac,
 };
 use crate::ring::{InPlace, KIND_FRAME, KIND_UPLINK, Reader, Writer};
 use crate::wire::{ET_ARP, ET_IPV4, ET_IPV6, ETH_LEN, be16, be32, byte, mac_at, put_mac, put16};
 use crate::{Error, Frame, LogFn, Result, Stats, UPLINK_QUEUE};
-use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 use core::sync::atomic::{
@@ -79,12 +78,6 @@ pub type Commands<'a, R, W> = Mailbox<Command<'a, R, W>, COMMANDS>;
 /// mag.
 pub type Ack = Oneshot<Result<u32>>;
 
-/// De antwoordplek van [`Command::CaptureNat`]: de conntrack zoals de
-/// kern-flip hem meeneemt, in de buffer die de aanroeper meegaf
-/// (verplaatst, niet gedeeld, ingekort). Eén aanroeper tegelijk (de
-/// flip-taak).
-pub type NatReply = Oneshot<NatState<Vec<FlowState>>>;
-
 /// Een bericht aan de switch-actor.
 pub enum Command<'a, R, W> {
     /// Koppelt slot `slot` aan de switch met zijn twee ringen (door de
@@ -132,18 +125,6 @@ pub enum Command<'a, R, W> {
         uplink: Uplink,
         /// Bevestiging.
         ack: &'a Ack,
-    },
-    /// Vangt de conntrack voor de kern-flip in `buf` (de aanroeper geeft
-    /// een buffer van `MAX_FLOWS` plaatsen mee; de actor alloceert niets)
-    /// en zet de masquerade dicht: een nieuwe uitgaande verbinding tussen
-    /// deze vangst en de sprong zou geen flow in het blob hebben, en zijn
-    /// SYN-retransmit krijgt er op de nieuwe kern gewoon een
-    /// ([`Nat::capture`]).
-    CaptureNat {
-        /// De buffer, als waarde: hij komt gevuld terug in `reply`.
-        buf: Vec<FlowState>,
-        /// De antwoordplek.
-        reply: &'a NatReply,
     },
     /// De tik van de flow-expiry-taak: veeg de verlopen flows.
     Sweep,
@@ -470,7 +451,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 pump_bell: w.pump_bell,
                 egress_dirty: false,
             },
-            nat: Nat::new()?,
+            nat: Nat::new(crate::nat::masq_start((cfg.now)()))?,
             commands: w.commands,
             door: w.door,
             published: w.published,
@@ -491,32 +472,6 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             });
         }
         self.core.set_live(0, true);
-    }
-
-    /// Het net van de vorige kern (de warme flip), vóór `run`: het externe
-    /// adres (als de vorige kern het meegaf; anders volgt `SetUplink` na
-    /// DHCP), de gepubliceerde poorten (`(slot, poort)`, tcp en udp, de
-    /// node-poort is de slot-poort) en de conntrack. Geeft het aantal
-    /// herstelde flows. Vóór de eerste ronde, dus geen antwoord van een
-    /// oude peer valt bij de node-stack (die zou een levende verbinding met
-    /// een RST doden); de slots van die flows sluiten aan met hun
-    /// [`Command::Attach`] in de brievenbus, en die gaat vóór de frames.
-    pub fn restore(
-        &mut self,
-        uplink: Option<Uplink>,
-        ports: &[(usize, u16)],
-        nat: &NatState<&[FlowState]>,
-    ) -> Result<usize> {
-        if let Some(u) = uplink {
-            self.nat.set_uplink(u);
-        }
-        let max = self.core.cfg.max_slots;
-        for &(slot, port) in ports {
-            for proto in [Proto::Tcp, Proto::Udp] {
-                self.nat.publish(proto, port, slot, port, max)?;
-            }
-        }
-        Ok(self.nat.restore(nat, (self.core.cfg.now)()))
     }
 
     /// Koppelt slot `i` (de actor-kant van [`Command::Attach`]; vóór `run`
@@ -592,15 +547,6 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             Command::SetUplink { uplink, ack } => {
                 self.nat.set_uplink(uplink);
                 ack.put(Ok(0));
-            }
-            Command::CaptureNat { mut buf, reply } => {
-                let st = self.nat.capture(now, &mut buf);
-                let (n, masq_next) = (st.flows.len(), st.masq_next);
-                buf.truncate(n);
-                reply.put(NatState {
-                    flows: buf,
-                    masq_next,
-                });
             }
             Command::Sweep => self.nat.sweep(now),
         }
@@ -797,8 +743,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
     /// De lus: commando's, een switch-ronde, de uplink-doorbell, dan
     /// `yield_now` zodat de doelnetstack consumeert vóór een nieuwe volle
     /// burst. Niets te doen: wachten op de bel, een commando of de
-    /// failsafe. Keert niet terug; de kern-flip leest de NAT via de
-    /// brievenbus (`CaptureNat`).
+    /// failsafe. Keert niet terug.
     pub async fn run<const T: usize, const M: usize>(
         &mut self,
         exec: &'static Executor<T, M>,

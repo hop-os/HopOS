@@ -15,9 +15,11 @@
 #               host (10.0.2.2, door de masquerade van de kern en de slirp
 #               van QEMU), elke seconde een regel. De echo zet er een fase
 #               voor (A, en B zodra de console HOPOS_FLIP_BOOT toont); groen
-#               bij "HOPOS_APPSPIKE_FLIPCONN ok before=N after=M" met M > N,
-#               en precies één verbinding aan de kant van de echo: dezelfde
-#               verbinding liep door, niemand verbond opnieuw;
+#               bij "HOPOS_APPSPIKE_FLIPCONN ok before=N after=M" met M > N:
+#               de verbinding mag over de flip breken (de conntrack gaat
+#               niet mee, 01-11), maar de app zit niet vast: hij krijgt een
+#               fout van zijn stack (HOPOS_APPSPIKE_FLIPCONN_BROKE) en
+#               verbindt opnieuw;
 #   de flip     POST /flip geeft 202; HOPOS_FLIP_STAGED (som getoetst,
 #               beeld gerelokeerd) en HOPOS_FLIP_JUMP gen=2;
 #   kern B      HOPOS_BOOT gen=2 stamp=B, HOPOS_FLIP_BOOT gen=2,
@@ -25,7 +27,7 @@
 #               HOPOS_HOP_RESUMED en HOPOS_FLIP_SETTLED (de guard: een
 #               luisterend net binnen de gratie);
 #   de lease    (warm en koud) kern B neemt de lease van kern A over
-#               (HOPOS_NET_CARRIED met het adres) en doet geen DHCP: geen
+#               (HOPOS_DHCP_CARRIED met het adres) en doet geen DHCP: geen
 #               HOPOS_DHCP_BOUND na HOPOS_FLIP_BOOT (H1, 01-11);
 #   dezelfde Hop  precies één "HOP_BOOT" en één HOPOS_HOP_START in de hele
 #               console (Hop is niet herstart, zijn kooi is geadopteerd), en
@@ -53,14 +55,9 @@
 #               HOPOS_FS_UP fresh=0 generation=N: dezelfde generatie, dus de
 #               staat van Hop overleeft via de schijf én (Hop draait door)
 #               via de adoptie;
-#   conntrack   HOPOS_FLIP_NAT_CAPTURED flows=K vóór de sprong (K >= 2: de
-#               download van de bundel en FLIPCONN gingen door de
-#               masquerade), en na de landing "HOPOS_NET_CARRIED flows=K
-#               of=K": elke flow terug, vóór de eerste ronde van de switch;
 #   een verbinding  een TCP-verbinding van de host naar de agent-poort van
 #               Hop, geopend vóór de sprong en pas ná de landing afgemaakt
-#               (GET /tasks in twee helften): de gepubliceerde poort en de
-#               luisterende Hop overleven de flip met de verbinding erop.
+#               (GET /tasks in twee helften). Mag breken; alleen gemeld.
 #   de zwarte doos  (virt, warm) daarna een system_reset over QMP, zoals een
 #               watchdog-reset: het RAM blijft, de ROM's (kern A, de staging)
 #               komen terug. Kern A boot koud (HOPOS_BOOT gen=1 stamp=A) en
@@ -431,9 +428,9 @@ WORK_MARKS="slot 1: .*HOP_JOB_PLACED slot=[2-9]|HOPOS_SLOT_START slot=[2-9]|slot
 BASE_RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_FATAL|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_FLIP_BLOB_BAD|HOPOS_FLIP_GUARD|HOPOS_FS_FREEZE_FAIL|HOPOS_CAGE_FAIL|HOPOS_CFG_BAD|HOPOS_FLIP_CFG_NONE|HOPOS_FLIP_CFG_OWN"
 case "$MODE" in
 warm)
-	FLIP_MARKS="HOPOS_FLIP_SWITCHCODE_OK|HOPOS_FLIP_STAGED|HOPOS_FS_FROZEN generation=|HOPOS_FLIP_NAT_CAPTURED flows=|HOPOS_FLIP_JUMP gen=2|HOPOS_BOOT gen=2 stamp=B|HOPOS_FLIP_BOOT gen=2|HOPOS_FLIP_ADOPT 2 of 2 resident\\(s\\)|HOPOS_HOP_RESUMED|HOPOS_NET_CARRIED flows=|HOPOS_FLIP_SETTLED"
+	FLIP_MARKS="HOPOS_FLIP_SWITCHCODE_OK|HOPOS_FLIP_STAGED|HOPOS_FS_FROZEN generation=|HOPOS_FLIP_JUMP gen=2|HOPOS_BOOT gen=2 stamp=B|HOPOS_FLIP_BOOT gen=2|HOPOS_FLIP_ADOPT 2 of 2 resident\\(s\\)|HOPOS_HOP_RESUMED|HOPOS_DHCP_CARRIED|HOPOS_FLIP_SETTLED"
 	WORK_MARKS="$WORK_MARKS|slot [0-9]+: HOPOS_APPSPIKE_FLIPCONN ok before="
-	RED="$BASE_RED|HOPOS_FLIP_REFUSED|HOPOS_FLIP_FAIL|HOPOS_FLIP_ADOPT_FAIL|HOP_FLIP_FAIL|HOPOS_APPSPIKE_FLIPCONN FAIL|HOPOS_APPSPIKE_FLIPCONN_ERR"
+	RED="$BASE_RED|HOPOS_FLIP_REFUSED|HOPOS_FLIP_FAIL|HOPOS_FLIP_ADOPT_FAIL|HOP_FLIP_FAIL|HOPOS_APPSPIKE_FLIPCONN FAIL"
 	;;
 mismatch)
 	FLIP_MARKS="HOPOS_FLIP_REFUSED switch code mismatch|slot 1: .*HOP_FLIP_FAIL"
@@ -625,14 +622,15 @@ if [ "$MODE" = warm ]; then
 	HALF="$(cat "$ART/half.out" 2>/dev/null || true)"
 	case "$HALF" in
 	*" 200"*) echo "   ok  een verbinding over de flip: geopend op kern A, beantwoord door kern B: $HALF" ;;
-	*) echo "   ROOD een verbinding over de flip: ${HALF:-geen antwoord}"; fail=1 ;;
+	*) echo "   --  een verbinding over de flip brak (mag, 01-11): ${HALF:-geen antwoord}" ;;
 	esac
-	# FLIPCONN: de app zegt before=N after=M, de echo zag één verbinding.
-	FC="$(tr -d '\r' <"$LOG" | sed -n 's/.*HOPOS_APPSPIKE_FLIPCONN ok before=\([0-9]*\) after=\([0-9]*\).*/\1 \2/p' | head -1)"
+	# FLIPCONN: de app zegt before=N after=M; een breuk is een fout van
+	# de stack, waarna hij opnieuw verbond.
+	FC="$(tr -d '\r' <"$LOG" | sed -n 's/.*HOPOS_APPSPIKE_FLIPCONN ok before=\([0-9]*\) after=\([0-9]*\).*breaks=\([0-9]*\).*/\1 \2 \3/p' | head -1)"
 	CONNS="$(cat "$ART/echo.conns" 2>/dev/null || echo 0)"
 	set -- $FC
-	if [ -n "$FC" ] && [ "$2" -gt "$1" ] && [ "$CONNS" = 1 ]; then
-		echo "   ok  FLIPCONN: één uitgaande verbinding over de flip, $1 antwoord(en) via kern A, $(($2 - $1)) via kern B (echo: A=$(echoes A) B=$(echoes B), $CONNS verbinding)"
+	if [ -n "$FC" ] && [ "$2" -gt "$1" ]; then
+		echo "   ok  FLIPCONN: $1 antwoord(en) via kern A, $(($2 - $1)) via kern B, $3 breuk(en) en $CONNS verbinding(en) bij de echo (A=$(echoes A) B=$(echoes B))"
 	else
 		echo "   ROOD FLIPCONN: before/after '${FC:-?}', verbindingen bij de echo ${CONNS}, A=$(echoes A) B=$(echoes B)"
 		cat "$ART/echo.lines" 2>/dev/null | tail -5 | sed 's/^/        /'
@@ -661,28 +659,16 @@ else
 	echo "   ROOD hopfs: kern A bevroor generatie '${FROZEN:-?}', kern B mountte '${MOUNTED:-geen fresh=0}'"
 	fail=1
 fi
-if [ "$MODE" = warm ]; then
-	# De conntrack: gevangen is hersteld; de download van de bundel en
-	# FLIPCONN gingen door de masquerade.
-	CAUGHT="$(tr -d '\r' <"$LOG" | sed -n 's/.*HOPOS_FLIP_NAT_CAPTURED flows=\([0-9]*\).*/\1/p' | head -1)"
-	BACK="$(tr -d '\r' <"$LOG" | sed -n 's/.*HOPOS_NET_CARRIED flows=\([0-9]*\) of=\([0-9]*\).*/\1 \2/p' | head -1)"
-	if [ -n "$CAUGHT" ] && [ "$CAUGHT" -ge 2 ] && [ "$BACK" = "$CAUGHT $CAUGHT" ]; then
-		echo "   ok  conntrack: $CAUGHT flow(s) gevangen door kern A, alle $CAUGHT hersteld door kern B"
-	else
-		echo "   ROOD conntrack: gevangen '${CAUGHT:-?}', hersteld/van '${BACK:-?}'"
-		fail=1
-	fi
-fi
 if [ "$MODE" != mismatch ]; then
 	# De lease ging mee (H1): kern B deed geen DHCP.
-	CARRIED="$(tr -d '\r' <"$LOG" | sed -n 's/.*net: carried over: lease \([0-9.]*\),.*/\1/p' | head -1)"
+	CARRIED="$(tr -d '\r' <"$LOG" | sed -n 's/.*dhcp: lease \([0-9.]*\)\/[0-9]* from the previous kernel.*/\1/p' | head -1)"
 	if after "HOPOS_DHCP_BOUND"; then
 		echo "   ROOD de lease: kern B deed DHCP ($(tr -d '\r' <"$LOG" | awk '/HOPOS_FLIP_BOOT/ { f = 1 } f' | grep -m1 HOPOS_DHCP_BOUND))"
 		fail=1
 	elif [ -n "$CARRIED" ] && [ "$CARRIED" != 0.0.0.0 ]; then
 		echo "   ok  de lease: $CARRIED van kern A overgenomen, geen DHCP op kern B"
 	else
-		echo "   ROOD de lease: niet overgenomen ('${CARRIED:-geen HOPOS_NET_CARRIED}')"
+		echo "   ROOD de lease: niet overgenomen ('${CARRIED:-geen HOPOS_DHCP_CARRIED}')"
 		fail=1
 	fi
 fi

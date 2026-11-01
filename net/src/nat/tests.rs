@@ -101,7 +101,7 @@ impl NatIo for TestIo {
 
 /// Go: `resetNAT` plus `setUplink`.
 fn setup() -> (Nat, TestIo) {
-    let mut nat = Nat::new().unwrap();
+    let mut nat = Nat::new(MASQ_BASE).unwrap();
     nat.set_uplink(Uplink::new(NODE_IP, 24, NIC_MAC, GW_IP).unwrap());
     (nat, TestIo::new())
 }
@@ -900,92 +900,6 @@ fn antwoorden_houden_de_next_hop_vers() {
     assert!(is_bcast_arp(&io.sent[2]) && be32(&io.sent[2], 38) == GW_IP);
 }
 
-// --- adoption_test.go ------------------------------------------------------
-
-/// Na de vangst geen nieuwe mapping: hij zou het blob missen.
-#[test]
-fn capture_closes_the_masquerade() {
-    let (mut nat, mut io) = setup();
-    assert!(flow_for(&mut nat, &mut io, PROTO_UDP, 1, 5555, EXT_IP, 443, T0).is_some());
-    let mut out = [FlowState::default(); 8];
-    assert_eq!(nat.capture(T0, &mut out).flows.len(), 1);
-    assert!(flow_for(&mut nat, &mut io, PROTO_UDP, 1, 5556, EXT_IP, 443, T0).is_none());
-}
-
-/// Een hersteld uitgaand tupel houdt op de nieuwe kern zijn oude
-/// node-poort: de peer ziet dezelfde verbinding.
-#[test]
-fn a_restored_flow_keeps_the_port_the_peer_sees() {
-    for proto in [PROTO_TCP, PROTO_UDP] {
-        let (mut nat, mut io) = setup();
-        leer_gateway(&mut io);
-        io.attach(1);
-        let old_port = MASQ_BASE + 17;
-        let flows = [FlowState {
-            proto,
-            slot: 1,
-            slot_ip: port_ip4(1),
-            slot_port: 5555,
-            dst_ip: EXT_IP,
-            dst_port: 443,
-            node_port: old_port,
-            fins: 0,
-        }];
-        let state = NatState {
-            flows: &flows[..],
-            masq_next: 0,
-        };
-        assert_eq!(nat.restore(&state, T0), 1);
-        let mut f = mk_frame(
-            proto,
-            HOST_MAC,
-            port_mac(1),
-            port_ip4(1),
-            EXT_IP,
-            5555,
-            443,
-            b"continued",
-        );
-        assert!(
-            nat.outbound(&mut io, 1, &mut f, T0),
-            "outbound niet geclaimd"
-        );
-        assert_eq!(io.sent.len(), 1);
-        let sent = &io.sent[0];
-        let ip = ipv4_l4(sent).unwrap();
-        assert_eq!(
-            be16(sent, ip.l4),
-            old_port,
-            "retransmit veranderde de poort die de peer ziet"
-        );
-        check_frame(sent, "geadopteerd uitgaand");
-    }
-}
-
-/// De snapshot-vorm (Go: `SnapshotNAT`): verlopen flows gaan niet mee, en
-/// een restore op een verse NAT geeft dezelfde mappings terug.
-#[test]
-fn snapshot_and_restore_round_trip() {
-    let (mut nat, mut io) = setup();
-    let live = flow_for(&mut nat, &mut io, PROTO_TCP, 1, 1001, EXT_IP, 443, T0).unwrap();
-    nat.note_tcp_flags(live, TCP_FIN, false);
-    let dead = flow_for(&mut nat, &mut io, PROTO_UDP, 2, 1002, EXT_IP, 53, T0).unwrap();
-    age(&mut nat, dead, T0 - UDP_IDLE - SEC);
-    let mut out = [FlowState::default(); 8];
-    let s = nat.capture(T0, &mut out);
-    assert_eq!(s.flows.len(), 1);
-    assert_eq!(s.flows[0].fins, 1);
-    let np = s.flows[0].node_port;
-
-    let (mut fresh, _) = setup();
-    assert_eq!(fresh.restore(&s, T0), 1);
-    let id = fresh
-        .flows
-        .by_rev(&RKey(PROTO_TCP, np, EXT_IP, 443))
-        .unwrap();
-    assert!(fresh.flows.get(id).unwrap().fin_fwd);
-}
-
 // --- hairpin_test.go ---------------------------------------------------------
 
 /// Slot 2 belt node-IP:7878 (gepubliceerd door slot 1): heen en terug.
@@ -1233,4 +1147,15 @@ fn vol_slot_neemt_altijd_de_oudste_gesloten_flow() {
     );
     assert_eq!(io.stats.nat_flow_full.load(Relaxed), 0);
     assert!(io.logs.borrow().is_empty());
+}
+
+/// De eerste masquerade-poort ligt per boot ergens anders, en altijd in
+/// het bereik.
+#[test]
+fn the_first_masquerade_port_moves_with_the_clock_and_stays_in_range() {
+    for seed in [0, 1, 29_151, 29_152, u64::MAX, 1_790_639_999_991_823_008] {
+        let p = masq_start(seed);
+        assert!((MASQ_BASE..MASQ_END).contains(&p), "{seed}: {p}");
+    }
+    assert_ne!(masq_start(5), masq_start(6));
 }

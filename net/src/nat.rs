@@ -129,15 +129,6 @@ struct Pub {
     slot_port: u16,
 }
 
-/// Alles wat de NAT aan een volgende kern doorgeeft ([`NatState`]).
-///
-/// Wat BEWUST niet meegaat: de next-hops (die staan in de neighbour-tabel
-/// van de node-stack, en de nieuwe vraagt ze opnieuw op het eerste frame:
-/// een verkeerd overgenomen next-hop is erger dan één ARP-ronde), en `seen`
-/// per flow (de nieuwe kern zet hem op "nu"; de flip-duur telt zo niet als
-/// idle-tijd).
-pub use abi::{FlowState, NatState};
-
 /// De neighbour-tabel van de node-stack, waar de NAT zijn next-hops uit
 /// haalt (Linux: `neigh_resolve_output` uit dezelfde tabel als de eigen
 /// verbindingen). Tijd is de klok van de switch.
@@ -186,24 +177,31 @@ pub struct Nat {
     next_sweep: u64,
     next_full_log: u64,
     next_slot_full_log: [u64; SLOT_CAP + 1],
-    /// De masquerade is dicht: de conntrack is gevangen voor de kern-flip
-    /// ([`Nat::capture`]), en een nieuwe flow zou het blob missen. Hij gaat
-    /// niet meer open: na de vangst springt de kern, of hij valt.
-    closed: bool,
+}
+
+/// Waar de masquerade begint: een plek in het bereik die per boot verschilt
+/// (de klok bij de start), zoals Linux zijn bronpoorten spreidt (RFC 6056).
+/// Een kern na een flip geeft zo niet meteen de node-poorten van de vorige
+/// opnieuw uit aan een peer die het oude tupel nog open heeft: de slirp van
+/// QEMU antwoordde dan een nieuwe SYN met een RST (01-11).
+#[must_use]
+pub fn masq_start(seed: u64) -> u16 {
+    let span = u64::from(MASQ_END - MASQ_BASE);
+    MASQ_BASE + u16::try_from(seed % span).unwrap_or(0)
 }
 
 impl Nat {
-    /// Een lege NAT; alloceert zijn tabellen één keer (boot).
-    pub fn new() -> Result<Self, Error> {
+    /// Een lege NAT die zijn masquerade-poorten vanaf `first` uitdeelt;
+    /// alloceert zijn tabellen één keer (boot).
+    pub fn new(first: u16) -> Result<Self, Error> {
         Ok(Self {
             pubs: BoundedVec::new(),
             uplink: None,
             flows: FlowTable::new()?,
-            masq_next: MASQ_BASE,
+            masq_next: first,
             next_sweep: 0,
             next_full_log: 0,
             next_slot_full_log: [0; SLOT_CAP + 1],
-            closed: false,
         })
     }
 
@@ -677,11 +675,6 @@ impl Nat {
         dst_port: u16,
         now: u64,
     ) -> Option<(Id, bool)> {
-        // Na de vangst geen nieuwe mapping: hij zou het blob missen. De
-        // SYN-retransmit krijgt er op de nieuwe kern een.
-        if self.closed {
-            return None;
-        }
         let k = FKey(proto, slot_ip, dst_ip, slot_port, dst_port);
         if let Some(id) = self.lookup_flow(&k, now) {
             return Some((id, false));
@@ -869,81 +862,6 @@ impl Nat {
     #[must_use]
     pub fn flow_count(&self) -> usize {
         self.flows.len()
-    }
-
-    // --- Kern-flip --------------------------------------------------------
-
-    /// Vangt de levende conntrack in `out` voor het handoff-blob, en zet
-    /// eerst de masquerade dicht: zo staat er na de vangst geen nieuwe flow
-    /// in de tabel die het blob mist. Verlopen flows gaan niet mee. Past
-    /// niet alles, dan gaat het eerste deel mee (de staart heeft plaats voor
-    /// `MAX_FLOWS`).
-    pub fn capture<'o>(&mut self, now: u64, out: &'o mut [FlowState]) -> NatState<&'o [FlowState]> {
-        self.closed = true;
-        let mut n = 0;
-        for id in self.flows.ids() {
-            let Some(fl) = self.flows.get(id) else {
-                continue;
-            };
-            if flow_expired(fl, now) || fl.slot < 1 {
-                continue;
-            }
-            let Some(o) = out.get_mut(n) else { break };
-            *o = FlowState {
-                proto: fl.proto,
-                slot: fl.slot,
-                fins: u8::from(fl.fin_fwd) | (u8::from(fl.fin_rev) << 1),
-                slot_port: fl.slot_port,
-                dst_port: fl.dst_port,
-                node_port: fl.node_port,
-                slot_ip: fl.slot_ip,
-                dst_ip: fl.dst_ip,
-            };
-            n += 1;
-        }
-        NatState {
-            flows: out.get(..n).unwrap_or(&[]),
-            masq_next: self.masq_next,
-        }
-    }
-
-    /// Bouwt de conntrack van de vorige kern terug, vóór de eerste ronde,
-    /// en geeft het aantal herstelde flows. Het blob draagt alleen flows van
-    /// bewoners die meegaan (de vertrekkende kern filtert), en hun slots
-    /// sluiten aan voordat er één frame langskomt.
-    pub fn restore(&mut self, s: &NatState<&[FlowState]>, now: u64) -> usize {
-        if (MASQ_BASE..MASQ_END).contains(&s.masq_next) {
-            self.masq_next = s.masq_next;
-        }
-        let mut n = 0;
-        for f in s.flows {
-            let slot = usize::from(f.slot);
-            if !(1..=SLOT_CAP).contains(&slot) {
-                continue;
-            }
-            if self.flows.is_full() || self.flows.count(slot) >= MAX_FLOWS_PER_SLOT {
-                continue;
-            }
-            let fl = Flow {
-                proto: f.proto,
-                slot: f.slot,
-                fin_fwd: f.fins & 1 != 0,
-                fin_rev: f.fins & 2 != 0,
-                slot_ip: f.slot_ip,
-                dst_ip: f.dst_ip,
-                slot_port: f.slot_port,
-                dst_port: f.dst_port,
-                node_port: f.node_port,
-                seen: now,
-            };
-            if self.flows.by_fwd(&fl.fkey()).is_some() || self.flows.by_rev(&fl.rkey()).is_some() {
-                continue;
-            }
-            if self.flows.insert(fl).is_some() {
-                n += 1;
-            }
-        }
-        n
     }
 }
 

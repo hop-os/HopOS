@@ -24,10 +24,10 @@
 //! - [`place`]: de plaatsingstoets van een app-image.
 //! - [`sha256`]: SHA-256, voor de DRBG, hopfs en de flip-bundel.
 //!
-//! Drie dingen hier hebben geen app-gebruiker: [`sha256`], [`checksum`] en
-//! [`FlowState`] (met [`NatState`]). Ze staan hier omdat kern en net ze
-//! allebei nodig hebben en `abi` de laagste crate is die beide kennen; een
-//! ontwerpkeuze (docs/description.md 8.3), geen lek in het contract.
+//! Twee dingen hier hebben geen app-gebruiker: [`sha256`] en [`checksum`].
+//! Ze staan hier omdat kern en hopos ze allebei nodig hebben en `abi` de
+//! laagste crate is die beide kennen; een ontwerpkeuze
+//! (docs/description.md 8.3), geen lek in het contract.
 //!
 //! Wat hier NIET staat: toegang tot device-geheugen buiten de ring. Wie een
 //! control-page-veld leest, doet `dev::read64(tail.ctrl_page().add(..))` met
@@ -111,52 +111,6 @@ impl Region {
             _ => true,
         }
     }
-}
-
-/// Eén masquerade-flow van de switch in overdraagbare vorm: platte velden,
-/// vaste maten, 24 bytes in het handoff-blob van een kern-flip (de volle
-/// conntrack past zo in ~96 KB van de staart). `net::nat` maakt en leest
-/// hem, `kern::kernflip` legt hem in het blob en haalt hem eruit.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FlowState {
-    /// IP-protocol (6 of 17).
-    pub proto: u8,
-    /// Het slot (1..=255; de switch-MAC codeert hem ook in één byte).
-    pub slot: u8,
-    /// Bit 0 = FIN gezien richting peer, bit 1 = richting client.
-    pub fins: u8,
-    /// Poort in het slot.
-    pub slot_port: u16,
-    /// Poort van de peer.
-    pub dst_port: u16,
-    /// De node-poort die de peer kent.
-    pub node_port: u16,
-    /// IP in het slot.
-    pub slot_ip: u32,
-    /// IP van de peer.
-    pub dst_ip: u32,
-}
-
-/// De volle conntrack van de switch (`hopswitch.MaxFlows`): het
-/// anti-DoS-plafond van de NAT (een app laat HOP's geheugen op core 0 nooit
-/// vollopen) en dus ook wat het handoff-blob van een kern-flip draagt.
-pub const MAX_FLOWS: usize = 4096;
-
-/// Alles wat de NAT aan een volgende kern doorgeeft: de levende flows en de
-/// volgende masquerade-kandidaat (één woord, en het scheelt de eerste
-/// allocaties een scan).
-///
-/// `F` houdt de flows: een `Vec<FlowState>` waar de staat eigendom is (de
-/// snapshot van de switch, het handoff-blob van `kern::kernflip`), een
-/// `&[FlowState]` waar de NAT hem beschrijft of terugzet (`net::nat`).
-/// Eén vorm voor de drie plekken die hem eerst elk zelf hadden; deze crate
-/// alloceert niet, dus de houder kiest de aanroeper.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NatState<F> {
-    /// De levende flows, hoogstens [`MAX_FLOWS`].
-    pub flows: F,
-    /// De volgende masquerade-kandidaat.
-    pub masq_next: u16,
 }
 
 /// Waarom een ABI-operatie weigerde; elke variant draagt de getallen.

@@ -424,13 +424,13 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     OS_ASID.store(node_cfg.one("hopos.oscore.asid") != "0", Relaxed);
 
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
-    // de node-stack, de lease en de system-listener; met een overdracht het
-    // net van de vorige kern. Zonder NIC draait de kern door zonder net; dat
-    // is een board, geen fout. Een NIC die faalt (geen link), probeert
-    // [`nic_retry`] opnieuw, naast de rest van de boot; met een overdracht
-    // is dat het einde, want haar poorten en flows wachten niet.
+    // de node-stack, de lease en de system-listener; met een overdracht de
+    // lease van de vorige kern. Zonder NIC draait de kern door zonder net;
+    // dat is een board, geen fout. Een NIC die faalt (geen link), probeert
+    // [`nic_retry`] opnieuw, naast de rest van de boot; na een flip is dat
+    // `HOPOS_FATAL` (Derek, 01-11): de bewoners rekenen op hun net.
     let (hok, carried) = match landing {
-        Some(l) => (Some(l.slots), Some(l.net)),
+        Some(l) => (Some(l.slots), Some(l.lease)),
         None => (None, None),
     };
     match board.probe_nic() {
@@ -481,13 +481,14 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
 }
 
 /// Het netwerkvlak op een NIC die opkwam, bij de boot of bij een
-/// [`nic_retry`].
+/// [`nic_retry`]. `carried`: na een flip (`Some`), met de lease van de
+/// vorige kern als die er een had; dan is een net dat niet opkomt fataal.
 fn nic_up(
     exec: &'static Executor,
     board: &'static Machine,
     system: &'static KernSystem,
     nic: <Machine as Board>::Nic,
-    carried: Option<net::Carried>,
+    carried: Option<Option<kern::kernflip::Lease>>,
 ) {
     println!("net: nic up HOPOS_NIC_UP mac={}", nic.mac());
     let params = net::Params {
@@ -497,7 +498,7 @@ fn nic_up(
         resident: slots::resident,
     };
     let landed = carried.is_some();
-    match net::start(exec, nic, params, system_api(system), carried) {
+    match net::start(exec, nic, params, system_api(system), carried.flatten()) {
         Ok(()) => {}
         Err(e) if landed => fatal(format_args!("net: {e} HOPOS_NET_FAIL")),
         Err(e) => println!("net: {e} HOPOS_NET_FAIL"),

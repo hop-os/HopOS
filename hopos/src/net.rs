@@ -49,7 +49,7 @@ use net::nat::{Neighbors, Uplink};
 use net::plan::MAX_LAN_FRAME;
 use net::pump::Pump;
 use net::ring::{AbiTx, KIND_UPLINK, Reader as _, Writer as _};
-use net::switch::{self, Ack, Command, Commands, Doorbell, NatReply, Published, Switch, Wiring};
+use net::switch::{self, Ack, Command, Commands, Doorbell, Published, Switch, Wiring};
 use net::{Egress, Ingress, Stats};
 use netdev::Device;
 use sync::mpsc::Mailbox;
@@ -269,19 +269,6 @@ pub(crate) struct Params {
     pub(crate) resident: fn(usize) -> bool,
 }
 
-/// Het net van de vorige kern (de warme flip): de lease, de gepubliceerde
-/// poorten van de bewoners (`(slot, poort)`) en de conntrack. De switch
-/// neemt het over vóór zijn eerste ronde, de host-taak slaat DHCP over.
-pub(crate) struct Carried {
-    /// De lease van de uplink; `None` (een vorige kern die hem niet
-    /// meegaf): DHCP, zoals bij een koude boot.
-    pub(crate) lease: Option<kernflip::Lease>,
-    /// De poorten die open stonden.
-    pub(crate) ports: Vec<(usize, u16)>,
-    /// De flows door de masquerade.
-    pub(crate) nat: abi::NatState<Vec<abi::FlowState>>,
-}
-
 /// Wat de system-listener van de lifecycle-kant krijgt: de system-API en de
 /// lijm die `serve` vraagt, alle `static` (alle verbindingstaken lenen ze).
 pub(crate) struct SystemApi {
@@ -328,15 +315,14 @@ impl fmt::Display for Error {
 /// host-taak. De host-taak haalt de lease, zet de stack op en spawnt dan de
 /// DHCP-keeper en de system-listener.
 ///
-/// Met `carried` (het net van de vorige kern) begint de switch niet leeg
-/// maar met diens uplink, poorten en conntrack, en neemt de host-taak de
-/// lease over in plaats van DHCP.
+/// Met `lease` (die van de vorige kern, de warme flip) neemt de host-taak
+/// hem over in plaats van DHCP.
 pub(crate) fn start<D: Device + 'static>(
     exec: &'static Executor,
     nic: D,
     p: Params,
     api: SystemApi,
-    carried: Option<Carried>,
+    lease: Option<kernflip::Lease>,
 ) -> Result<(), Error> {
     let mac = nic.mac().0;
     let [a, b, c, d, e, f] = mac;
@@ -375,10 +361,6 @@ pub(crate) fn start<D: Device + 'static>(
     )
     .map_err(Error::Net)?;
     sw.attach_host(sw_tx, sw_rx);
-    let lease = match carried {
-        Some(c) => restore(&mut sw, c, mac)?,
-        None => None,
-    };
 
     // De stop van de switch ([`net::switch::Xoff`]): de pomp opent hem als
     // de NIC weer frames neemt.
@@ -424,39 +406,9 @@ pub(crate) fn start<D: Device + 'static>(
         tx: hop_tx,
         buf: host_buf,
     };
-    exec.spawn(node.run(api, lease))
+    exec.spawn(node.run(api, lease.as_ref().map(from_carried)))
         .map_err(|_| Error::Spawn("host"))?;
     Ok(())
-}
-
-/// Geeft de switch het net van de vorige kern terug, vóór zijn eerste
-/// ronde, en de lease voor de host-taak.
-fn restore(
-    sw: &mut Switch<'static, RingRx, RingTx>,
-    c: Carried,
-    mac: [u8; 6],
-) -> Result<Option<(Lease, u64)>, Error> {
-    let lease = c.lease.as_ref().map(from_carried);
-    let uplink = match &lease {
-        Some((l, _)) => Some(
-            Uplink::new(u32::from(l.ip), l.cidr().prefix, mac, u32::from(l.gateway))
-                .map_err(Error::Net)?,
-        ),
-        None => None,
-    };
-    let nat = abi::NatState {
-        flows: c.nat.flows.as_slice(),
-        masq_next: c.nat.masq_next,
-    };
-    let n = sw.restore(uplink, &c.ports, &nat).map_err(Error::Net)?;
-    println!(
-        "net: carried over: lease {}, {} published port(s), {n} of {} NAT flow(s) HOPOS_NET_CARRIED flows={n} of={}",
-        Ipv4Addr::from(c.lease.map_or(0, |l| l.ip)),
-        c.ports.len(),
-        c.nat.flows.len(),
-        c.nat.flows.len()
-    );
-    Ok(lease)
 }
 
 /// De lease uit het blob, en de tellerstand van zijn ACK.
@@ -475,17 +427,9 @@ fn from_carried(l: &kernflip::Lease) -> (Lease, u64) {
     (lease, l.bound_ns)
 }
 
-/// De lease en de conntrack voor de kern-flip. De vangst zet de masquerade
-/// dicht (`net::switch::Command::CaptureNat`). Zonder switch (geen NIC)
-/// niets; een switch die niet binnen `wait` antwoordt, is een fout.
-pub(crate) async fn capture(
-    exec: &'static Executor,
-    wait: Duration,
-) -> Result<(Option<kernflip::Lease>, abi::NatState<Vec<abi::FlowState>>), &'static str> {
-    if !switch_up() {
-        return Ok((None, abi::NatState::default()));
-    }
-    let lease = LEASE.borrow().map(|(l, bound_ns)| kernflip::Lease {
+/// De lease voor de kern-flip, zoals de keeper hem houdt; `None` zonder.
+pub(crate) fn lease() -> Option<kernflip::Lease> {
+    LEASE.borrow().map(|(l, bound_ns)| kernflip::Lease {
         ip: u32::from(l.ip),
         mask: u32::from(l.mask),
         gateway: u32::from(l.gateway),
@@ -493,31 +437,8 @@ pub(crate) async fn capture(
         server: u32::from(l.server),
         secs: [l.lease_secs, l.t1_secs, l.t2_secs],
         bound_ns,
-    });
-    let mut buf: Vec<abi::FlowState> = Vec::new();
-    if buf.try_reserve_exact(net::MAX_FLOWS).is_err() {
-        return Err("out of memory for the conntrack buffer");
-    }
-    buf.resize(net::MAX_FLOWS, abi::FlowState::default());
-    let cmd = Command::CaptureNat {
-        buf,
-        reply: &NAT_REPLY,
-    };
-    match select(
-        sync::oneshot::call(&COMMANDS, &NAT_REPLY, cmd),
-        exec.after(wait),
-    )
-    .await
-    {
-        Either::Left(Ok(nat)) => Ok((lease, nat)),
-        Either::Left(Err(_)) => Err("switch mailbox full"),
-        Either::Right(()) => Err("the switch did not answer"),
-    }
+    })
 }
-
-/// De antwoordplek van [`capture`] bij de switch-actor (één aanroeper: de
-/// flip-taak).
-static NAT_REPLY: NatReply = NatReply::new();
 
 /// De console als `LogFn` voor de switch.
 fn log_line(args: fmt::Arguments<'_>) {
@@ -575,23 +496,22 @@ struct Node {
 
 impl Node {
     /// De levensloop, in één reeks: de lease, de uplink, de stack, de
-    /// keeper en de listeners, en dan de lus van poort 0 tot de stop. Met
-    /// een meegegeven lease (de warme flip) geen DHCP en geen `SetUplink`:
-    /// de switch kreeg de uplink al in [`restore`]. Tot de listener luistert
-    /// staat er geen `.await` meer in de weg, dus hij staat er vóór Hop een
-    /// beurt krijgt.
+    /// keeper en de listeners ([`NET_READY`]), en dan de lus van poort 0 tot
+    /// de stop. Met een meegegeven lease (de warme flip) geen DHCP.
     async fn run(mut self, api: SystemApi, carried: Option<(Lease, u64)>) {
         let exec = self.exec;
         let mac = self.mac;
         let (lease, bound) = match carried {
-            Some(c) => c,
-            None => {
-                let lease = self.lease().await;
-                let bound = exec.now();
-                set_uplink(&lease, mac).await;
-                (lease, bound)
+            Some(c) => {
+                println!(
+                    "dhcp: lease {} from the previous kernel, no DHCP HOPOS_DHCP_CARRIED",
+                    c.0.cidr()
+                );
+                c
             }
+            None => (self.lease().await, exec.now()),
         };
+        set_uplink(&lease, mac).await;
         let ip = u32::from(lease.ip);
 
         let stack = match Stack::new(stack_config(&lease, mac), iss_seed(exec, mac)) {

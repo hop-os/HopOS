@@ -166,16 +166,12 @@ mod counters {
     /// op zijn control-page, en of zijn bewoner nu rekent (het ctx-blok).
     pub(super) struct SlotHost {
         exec: &'static Executor,
-        plan: Option<abi::layout::Plan>,
     }
 
     impl SlotHost {
-        /// De tellers van `exec`, met het slot-plan van de OS-core.
+        /// De tellers van `exec`.
         pub(super) fn new(exec: &'static Executor) -> Self {
-            Self {
-                exec,
-                plan: crate::slots::os_plan().ok(),
-            }
+            Self { exec }
         }
 
         /// Wil de bewoner van slot `i` de core? Hij rekent (`Running`), of hij
@@ -188,11 +184,7 @@ mod counters {
         /// hem midden in zijn rekenwerk onderbrak.
         fn running(&self, i: kern::Slot) -> bool {
             use abi::layout::CtxState;
-            let Some(plan) = &self.plan else {
-                return true;
-            };
-            let Some(ctx) = abi::layout::Slot::new(i.get()).and_then(|s| plan.ctx_pa(s).ok())
-            else {
+            let Some(ctx) = crate::glue::ctx_of(i) else {
                 return true;
             };
             match cpu::el2::ctx_state(ctx) {

@@ -545,6 +545,27 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
         None
     }
 
+    /// Zet een chunk van het kooi-geheugen (`kern::cageheap`, 2 MB uit de
+    /// pool) op Device in de kernmap (`device`), of terug op Normal
+    /// write-back vóór hij de pool weer in gaat. De app-cores lezen dit
+    /// geheugen op EL2 met de MMU uit, zoals de kooi-regio in het
+    /// device-venster van het plan. Alleen waar de kern de pool Normal mapt
+    /// ([`Board::SLOT_RINGS`] `Hardware`); Apple en de Radxa mappen hem al
+    /// Device, en riscv64 kent geen map maar onderhoud.
+    fn map_cage(&self, pa: u64, size: u64, device: bool) -> Result<(), TailError> {
+        if !matches!(Self::SLOT_RINGS, Coherence::Hardware) {
+            return Ok(());
+        }
+        let r = if device {
+            // Eerst de regels van de vorige huurder (een partitie) weg.
+            dev::pull(Pa(pa), usize::try_from(size).unwrap_or(0));
+            cpu::memattr::device(pa, size)
+        } else {
+            cpu::memattr::normal_wb(pa, size)
+        };
+        r.map_err(TailError::Attr)
+    }
+
     /// Draagt `hopos.cfg` van het bootmedium mee in het nieuwe image van
     /// een flip, dat gestaged op `src` ligt (`len` bytes)? `true` als dat
     /// gebeurde. Alleen Apple: de plek 0xF000 van de loader.

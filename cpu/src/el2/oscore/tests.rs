@@ -4,14 +4,9 @@
 //! zelftest bij boot).
 
 use super::*;
-use crate::el2::harness::plan;
-use abi::layout::Slot;
+use crate::el2::harness::{Kit, plan};
 
-fn ctx(plan: &Plan, i: usize) -> Pa {
-    plan.ctx_pa(Slot::new(i).unwrap()).unwrap()
-}
-
-fn list(plan: &Plan) -> Vec<u8> {
+fn list(plan: &Plan) -> Vec<u64> {
     let sched = os_sched(plan).unwrap();
     (0..roster::len(sched))
         .map(|i| roster::get(sched, i))
@@ -28,7 +23,8 @@ fn host_at(plan: &Plan, c: Pa, entry: u64, arg: u64) {
 #[test]
 fn host_prepares_the_first_turn_and_joins_the_list() {
     let (_b, plan) = plan(2);
-    let c = ctx(&plan, 1);
+    let kit = Kit::new(&plan, 3);
+    let c = kit.ctx(1);
     // Rommel in het blok: verse DRAM is geen nul.
     for off in (0..CTX_FP_END).step_by(8) {
         dev::write64(c.add(off), 0xdead_beef);
@@ -46,21 +42,20 @@ fn host_prepares_the_first_turn_and_joins_the_list() {
     assert_eq!(ctx_read(c, CTX_REGIME), SCTLR_EL1_CLEAN);
     assert!((1..CTX_REGIME_ARM_WORDS).all(|w| ctx_read(c, CTX_REGIME + 8 * w) == 0));
     assert_eq!(ctx_read(c, CTX_WAKE), 0);
-    assert_eq!(list(&plan), [1]);
+    assert_eq!(list(&plan), [c.0]);
     assert!(hosts(&plan, c));
     // Idempotent: een tweede keer is geen tweede plek.
     host_at(&plan, c, 0x5001_0000, 0xbfe0_0000);
-    assert_eq!(list(&plan), [1]);
-    // Een adres dat geen kooi-context is, weigert.
-    assert!(host(&plan, Pa(0x1234)).is_err());
+    assert_eq!(list(&plan), [c.0]);
 }
 
 #[test]
 fn the_rotation_turns_round_robin_and_sleeps_on_the_earliest_wake() {
     let (_b, plan) = plan(2);
+    let kit = Kit::new(&plan, 3);
     let mut os = OsCore::new(&plan, Flavor::Nvhe, None).unwrap();
     assert_eq!(os.run(0), Turn::Idle { wake: None });
-    let (c1, c2) = (ctx(&plan, 1), ctx(&plan, 2));
+    let (c1, c2) = (kit.ctx(1), kit.ctx(2));
     host_at(&plan, c1, 1, 0x1000);
     host_at(&plan, c2, 1, 0x2000);
     // Op de host komt elke beurt terug op een IRQ: Saved en meteen weer aan
@@ -82,23 +77,23 @@ fn the_rotation_turns_round_robin_and_sleeps_on_the_earliest_wake() {
     assert_eq!(ctx_read(c1, CTX_KICK_PENDING), 0);
     // Een dode of uit de lijst gehaalde bewoner draait nooit meer.
     ctx_write(c1, CTX_STATE, CtxState::Dead.raw());
-    roster::remove(os_sched(&plan).unwrap(), 2);
+    roster::remove(os_sched(&plan).unwrap(), c2);
     assert_eq!(os.run(0), Turn::Idle { wake: None });
 }
 
 #[test]
 fn next_is_the_rule_of_the_switcher() {
     let (_b, plan) = plan(2);
+    let kit = Kit::new(&plan, 3);
     let sched = os_sched(&plan).unwrap();
-    let cage = plan.vec_base_pa();
-    let (c1, c2) = (ctx(&plan, 1), ctx(&plan, 2));
+    let (c1, c2) = (kit.ctx(1), kit.ctx(2));
     host_at(&plan, c1, 1, 0x1000);
     host_at(&plan, c2, 1, 0x2000);
     for c in [c1, c2] {
         ctx_write(c, CTX_STATE, CtxState::Saved.raw());
         ctx_write(c, CTX_WAKE, 500);
     }
-    assert_eq!(next(sched, cage, 0), Next::Idle { wake: Some(500) });
+    assert_eq!(next(sched, 0), Next::Idle { wake: Some(500) });
     // RX achter een gewapende deurbel maakt een slaper meteen due, ook
     // vóór zijn wektijd: de bel van de switch is geen tik.
     let mut page = vec![0u64; 512];
@@ -107,19 +102,19 @@ fn next_is_the_rule_of_the_switcher() {
     ctx_write(c2, abi::layout::CTX_RING_HEAD_PA, head.as_mut_ptr() as u64);
     page[(abi::hopabi::CTRL_RX_DOOR / 8) as usize] = 64 | abi::hopabi::RX_DOOR_ARMED;
     head[0] = 64;
-    assert_eq!(next(sched, cage, 0), Next::Idle { wake: Some(500) });
+    assert_eq!(next(sched, 0), Next::Idle { wake: Some(500) });
     head[0] = 128;
     assert!(matches!(
-        next(sched, cage, 0),
+        next(sched, 0),
         Next::Turn {
-            id: 2,
+            ctx,
             fresh: false,
             ..
-        }
+        } if ctx == c2
     ));
     // Ingetrokken terwijl hij aan de beurt was: dood, zonder beurt.
     ctx_write(c2, CTX_REVOKE, 1);
-    assert_eq!(next(sched, cage, 0), Next::Idle { wake: Some(500) });
+    assert_eq!(next(sched, 0), Next::Idle { wake: Some(500) });
     assert_eq!(ctx_state(c2), Some(CtxState::Dead));
 }
 
@@ -130,9 +125,9 @@ fn next_is_the_rule_of_the_switcher() {
 #[test]
 fn a_recalled_resident_dies_in_next_without_a_turn() {
     let (_b, plan) = plan(2);
+    let kit = Kit::new(&plan, 3);
     let sched = os_sched(&plan).unwrap();
-    let cage = plan.vec_base_pa();
-    let (c1, c2, c3) = (ctx(&plan, 1), ctx(&plan, 2), ctx(&plan, 3));
+    let (c1, c2, c3) = (kit.ctx(1), kit.ctx(2), kit.ctx(3));
     for c in [c1, c2] {
         host_at(&plan, c, 1, 0x1000);
         ctx_write(c, CTX_STATE, CtxState::Saved.raw());
@@ -140,29 +135,30 @@ fn a_recalled_resident_dies_in_next_without_a_turn() {
     }
     // De aanvraag alleen: een slaper leest hem pas als hij aan de beurt is.
     ctx_write(c2, CTX_REVOKE, 1);
-    assert_eq!(next(sched, cage, 0), Next::Idle { wake: Some(500) });
+    assert_eq!(next(sched, 0), Next::Idle { wake: Some(500) });
     assert_eq!(ctx_state(c2), Some(CtxState::Saved));
     // De kick erbij (`recall`): nu aan de beurt, en dood in plaats van een
     // beurt; de buur slaapt door.
     recall(c2);
-    assert_eq!(next(sched, cage, 0), Next::Idle { wake: Some(500) });
+    assert_eq!(next(sched, 0), Next::Idle { wake: Some(500) });
     assert_eq!(ctx_state(c2), Some(CtxState::Dead));
     assert_eq!(ctx_state(c1), Some(CtxState::Saved));
     // Nog nooit gedraaid: geen koude start.
     host_at(&plan, c3, 1, 0x3000);
     recall(c3);
-    assert_eq!(next(sched, cage, 0), Next::Idle { wake: Some(500) });
+    assert_eq!(next(sched, 0), Next::Idle { wake: Some(500) });
     assert_eq!(ctx_state(c3), Some(CtxState::Dead));
     // De dode bytes blijven tot de volgende bouw van hun slot
     // (`roster::forget`); `hosts` zegt dan nog ja, en de kooi telt dood als
     // stil.
     assert!(hosts(&plan, c2));
-    assert_eq!(list(&plan), [1, 2, 3]);
+    assert_eq!(list(&plan), [c1.0, c2.0, c3.0]);
 }
 
 #[test]
 fn the_kick_is_told_apart_from_an_irq() {
     let (_b, plan) = plan(2);
+    let kit = Kit::new(&plan, 3);
     fn kick() -> u32 {
         9
     }
@@ -173,7 +169,7 @@ fn the_kick_is_told_apart_from_an_irq() {
         pending: kick,
     };
     let mut os = OsCore::new(&plan, Flavor::Nvhe, Some(bell)).unwrap();
-    host_at(&plan, ctx(&plan, 1), 1, 0x1000);
+    host_at(&plan, kit.ctx(1), 1, 0x1000);
     assert_eq!(os.run(0), Turn::Ran(Back::Ipi));
     // Buiten een beurt staat de kick niet scherp.
     let sched = os_sched(&plan).unwrap();
@@ -188,6 +184,7 @@ fn the_kick_is_told_apart_from_an_irq() {
 #[test]
 fn apple_shares_its_os_core_with_the_fast_ipi() {
     let (_b, plan) = plan(2);
+    let kit = Kit::new(&plan, 3);
     // De OS-core op P-core 6 (cpu6, MPIDR 0x80010100, GEMETEN 28-08):
     // cluster 1, core 0.
     let bell = Bell::apple(0x8001_0100);
@@ -203,7 +200,7 @@ fn apple_shares_its_os_core_with_the_fast_ipi() {
     os.listen(false);
     assert_eq!(dev::read64(sched.add(SCHED_OS_KICK)), 0);
     // Op de host wacht er geen IPI: een onderbreking is een device.
-    host_at(&plan, ctx(&plan, 1), 1, 0x1000);
+    host_at(&plan, kit.ctx(1), 1, 0x1000);
     assert_eq!(os.run(0), Turn::Ran(Back::Irq));
 }
 
@@ -248,6 +245,7 @@ fn the_vector_index_tells_how_a_turn_ended() {
 #[test]
 fn a_gicv2_bell_publishes_its_mmio_address() {
     let (_b, plan) = plan(2);
+
     fn none() -> u32 {
         1023
     }
@@ -287,6 +285,7 @@ fn the_selftest_names_the_line_that_interrupted_it() {
     // peekt hier de NIC-lijn van de Pi 5 (INTID 166), die al vóór de
     // overgang pending stond.
     let (_b, plan) = plan(2);
+
     fn nic() -> u32 {
         166
     }

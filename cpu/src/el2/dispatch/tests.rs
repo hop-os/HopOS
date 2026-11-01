@@ -2,31 +2,13 @@
 //! startschot en de ctx-lezers, over buffers. De assembly bewijst het board.
 
 use super::*;
-use crate::el2::harness::{Buf, plan};
-use crate::el2::roster::{forget, residents};
+use crate::el2::harness::{Buf, Kit, plan};
+use crate::el2::roster::{self, forget, residents};
 use abi::checksum::fnv64;
-use abi::layout::{CTX_BOOT_PC, CTX_NEXT_PA, CTX_SLEEPS, CTX_SMP, SCHED_COUNT, SCHED_LIST};
-
-/// Het ctx-blok van context-id `id`: dezelfde rekensom als de switcher
-/// (`hopos_el2_ctx_of`), om [`context_id`] tegen te toetsen.
-fn context_pa(plan: &Plan, id: u8) -> Result<Pa, Error> {
-    let i = usize::from(id);
-    if let Some(slot) = Slot::new(i).filter(|_| i <= SLOT_CAP) {
-        return plan.ctx_pa(slot).map_err(Error::Plan);
-    }
-    let core = i
-        .checked_sub(SLOT_CAP - 1)
-        .and_then(Core::new)
-        .ok_or(Error::BadContextId { id })?;
-    plan.smp_ctx_pa(core).map_err(Error::Plan)
-}
+use abi::layout::{CTX_BOOT_PC, CTX_NEXT_PA, CTX_OFF, CTX_SLEEPS, CTX_SMP, SCHED_COUNT};
 
 fn core(i: usize) -> Core {
     Core::new(i).unwrap()
-}
-
-fn slot(i: usize) -> Slot {
-    Slot::new(i).unwrap()
 }
 
 #[test]
@@ -153,7 +135,7 @@ fn init_writes_thunks_park_schedules_and_empty_contexts() {
     let (_buf, p) = plan(3);
     // Vuil, zoals verse DRAM.
     dev::write64(p.park_mbox_pa(core(2)).unwrap().add(SCHED_COUNT), 77);
-    dev::write64(p.ctx_pa(slot(3)).unwrap(), 0xdead);
+    dev::write64(p.smp_ctx_pa(core(3)).unwrap(), 0xdead);
     let entry = p.switch_code_pa().add(SW_HEAD);
     let park = [0xAAu8; 48];
     init_region(&p, entry, Some(&park)).unwrap();
@@ -173,10 +155,10 @@ fn init_writes_thunks_park_schedules_and_empty_contexts() {
         assert_eq!(dev::read64(mb.add(SCHED_S2_PA)), vecs.0);
         assert_eq!(dev::read64(mb.add(SCHED_COUNT)), 0);
     }
-    for s in 1..=3 {
-        let block = p.cage_table_pa(slot(s)).unwrap();
-        assert_eq!(dev::read64(block.add(CTX_OFF)), CtxState::Empty.raw());
-        assert_eq!(dev::read64(block.add(SMP_CTX_OFF)), CtxState::Empty.raw());
+    // De ctx-blokken van de cores; die van een slot begint de bouw schoon.
+    for c in 2..=3 {
+        let ctx = p.smp_ctx_pa(core(c)).unwrap();
+        assert_eq!(dev::read64(ctx), CtxState::Empty.raw());
     }
 }
 
@@ -205,43 +187,23 @@ fn a_kept_park_loop_keeps_mailbox_word_zero() {
 }
 
 #[test]
-fn context_ids_round_trip_like_the_switcher() {
-    let (_buf, p) = plan(3);
-    for id in 1..=3u8 {
-        let ctx = context_pa(&p, id).unwrap();
-        assert_eq!(ctx, p.ctx_pa(slot(usize::from(id))).unwrap());
-        assert_eq!(context_id(&p, ctx), Some(id));
-    }
-    // Secundaire core 2 en 3: id 129 en 130 (hopos_el2_ctx_of: id - 127).
-    for c in 2..=3 {
-        let id = core(c).smp_context_id().unwrap();
-        let ctx = context_pa(&p, id).unwrap();
-        assert_eq!(ctx, p.smp_ctx_pa(core(c)).unwrap());
-        assert_eq!(context_id(&p, ctx), Some(id));
-    }
-    assert_eq!(context_pa(&p, 0), Err(Error::BadContextId { id: 0 }));
-    assert!(context_pa(&p, 4).is_err());
-    assert_eq!(context_id(&p, p.vec_base_pa().add(CTX_OFF)), None);
-    assert_eq!(context_id(&p, p.ctx_pa(slot(1)).unwrap().add(8)), None);
-}
-
-#[test]
 fn dispatch_resets_the_rotation_and_fires_the_mailbox() {
     let (_buf, p) = plan(3);
     init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
-    let ctx = p.ctx_pa(slot(2)).unwrap();
+    let kit = Kit::new(&p, 3);
+    let ctx = kit.ctx(2);
     let mb = p.park_mbox_pa(core(1)).unwrap();
-    dev::write64(mb.add(SCHED_LIST + 8), 0x0909);
+    roster::add(mb, kit.ctx(3)).unwrap();
+    roster::add(mb, kit.ctx(1)).unwrap();
 
     let start = dispatch(&p, core(1), ctx, Pa(0x4000_A100), 0x5100_0000).unwrap();
     assert_eq!(start, Start::Cold);
     assert_eq!(dev::read64(mb.add(SCHED_MBOX_CTX)), 0x5100_0000);
     assert_eq!(dev::read64(mb.add(SCHED_MBOX_PC)), 0x4000_A100);
-    assert_eq!(dev::read64(mb.add(SCHED_CURRENT)), 2);
+    assert_eq!(dev::read64(mb.add(SCHED_CURRENT)), ctx.0);
     assert_eq!(dev::read64(mb.add(SCHED_CURSOR)), 0);
     assert_eq!(dev::read64(mb.add(SCHED_COUNT)), 1);
-    assert_eq!(dev::read8(mb.add(SCHED_LIST)), 2);
-    assert_eq!(dev::read64(mb.add(SCHED_LIST + 8)), 0);
+    assert_eq!((roster::get(mb, 0), roster::get(mb, 1)), (ctx.0, 0));
     assert_eq!(ctx_state(ctx), Some(CtxState::Running));
     assert_eq!(core_state(&p, core(1)), Ok(CoreState::Running(0x5100_0000)));
 
@@ -260,15 +222,10 @@ fn dispatch_resets_the_rotation_and_fires_the_mailbox() {
         dispatch(&p, core(1), ctx, Pa(0x4000_A100), 0x5100_0000),
         Ok(Start::Woken)
     );
-    // x0 = 0 of 1 leest de lus als koud of geparkeerd; een vreemd adres is
-    // geen ctx-blok.
+    // x0 = 0 of 1 leest de lus als koud of geparkeerd.
     assert_eq!(
         dispatch(&p, core(2), ctx, Pa(0), PARK_PARKED),
         Err(Error::BadArg { arg: PARK_PARKED })
-    );
-    assert_eq!(
-        dispatch(&p, core(2), ctx.add(8), Pa(0), 0x5100_0000),
-        Err(Error::BadContext { pa: ctx.0 + 8 })
     );
 }
 
@@ -285,7 +242,7 @@ fn smp_handoff_owns_privileges_and_freezes_request() {
     for (off, want) in [
         (CTRL_SMP_SP, 0x5001_2000),
         (CTRL_S2_TABLE, 0x8000_0000),
-        (CTRL_SLOT, 3),
+        (CTRL_VMID, 3),
         (CTRL_SMP_MBOX, 0x8100_0000),
         (CTRL_VEC_PA, 0x8200_0000),
     ] {
@@ -358,10 +315,17 @@ fn apple_kick_targets_core_and_cluster() {
 #[test]
 fn revoke_clears_the_tables_of_the_slot_only() {
     let (_buf, p) = plan(3);
-    let block = p.cage_table_pa(slot(2)).unwrap();
+    let kit = Kit::new(&p, 3);
+    let block = kit.block(2);
     dev::write64(block, 0x1234_0003);
+    dev::write64(kit.block(3), 0x5678_0003);
     dev::write64(block.add(CTX_OFF), CtxState::Saved.raw());
-    revoke(&p, slot(2)).unwrap();
+    revoke(block);
+    assert_eq!(
+        dev::read64(kit.block(3)),
+        0x5678_0003,
+        "a neighbour's table"
+    );
     assert_eq!(dev::read64(block), 0);
     assert_eq!(
         dev::read64(block.add(CTX_OFF)),
@@ -373,16 +337,16 @@ fn revoke_clears_the_tables_of_the_slot_only() {
 /// De keuze van de rotatie (`switch.rs`, `.Lrotate`): [`crate::el2::next`]
 /// is dezelfde regel in Rust (round-robin vanaf cursor+1, de eerste die
 /// boot-pending is, of Saved en aan de beurt op `now`). Schrijft wat de
-/// switcher dan schrijft (cursor, current, staat) en geeft de gekozen
-/// context-id, of `None` (slapen of parkeren).
-fn rotate(p: &Plan, c: Core, now: u64) -> Option<u8> {
+/// switcher dan schrijft (cursor, current, staat) en geeft het gekozen
+/// ctx-blok, of `None` (slapen of parkeren).
+fn rotate(p: &Plan, c: Core, now: u64) -> Option<Pa> {
     let mb = p.park_mbox_pa(c).unwrap();
-    match crate::el2::next(mb, p.vec_base_pa(), now) {
-        crate::el2::Next::Turn { i, id, ctx, .. } => {
+    match crate::el2::next(mb, now) {
+        crate::el2::Next::Turn { i, ctx, .. } => {
             dev::write64(mb.add(SCHED_CURSOR), i as u64);
-            dev::write64(mb.add(SCHED_CURRENT), u64::from(id));
+            dev::write64(mb.add(SCHED_CURRENT), ctx.0);
             ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
-            Some(id)
+            Some(ctx)
         }
         crate::el2::Next::Idle { .. } => None,
     }
@@ -401,7 +365,8 @@ fn yield_at(ctx: Pa, wake: u64) {
 fn two_residents_take_turns_on_one_app_core() {
     let (_buf, p) = plan(3);
     init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
-    let (a, b) = (p.ctx_pa(slot(1)).unwrap(), p.ctx_pa(slot(2)).unwrap());
+    let kit = Kit::new(&p, 2);
+    let (a, b) = (kit.ctx(1), kit.ctx(2));
     let mb = p.park_mbox_pa(core(1)).unwrap();
 
     // Koud: join weigert te schrijven, het is een gewoon startschot.
@@ -424,8 +389,8 @@ fn two_residents_take_turns_on_one_app_core() {
     assert_eq!(ctx_read(b, CTX_BOOT_PC), 0x4000_A100);
     assert_eq!(ctx_read(b, CTX_BOOT_ARG), 0x5200_0000);
     let mut ids = Vec::new();
-    assert_eq!(residents(&p, core(1), |id| ids.push(id)), Ok(2));
-    assert_eq!(ids, [1, 2]);
+    assert_eq!(residents(&p, core(1), |x| ids.push(x)), Ok(2));
+    assert_eq!(ids, [a, b]);
     // Twee keer erbij is één keer.
     join(&p, core(1), b, Pa(0x4000_A100), 0x5200_0000).unwrap();
     assert_eq!(dev::read64(mb.add(SCHED_COUNT)), 2);
@@ -433,28 +398,28 @@ fn two_residents_take_turns_on_one_app_core() {
     // A yieldt tot t=100: B boot. B yieldt tot t=50: op t=10 is niemand aan
     // de beurt (de switcher slaapt), op t=60 B, op t=100 A.
     yield_at(a, 100);
-    assert_eq!(rotate(&p, core(1), 0), Some(2));
+    assert_eq!(rotate(&p, core(1), 0), Some(b));
     yield_at(b, 50);
     assert_eq!(rotate(&p, core(1), 10), None);
-    assert_eq!(rotate(&p, core(1), 60), Some(2));
+    assert_eq!(rotate(&p, core(1), 60), Some(b));
     yield_at(b, 500);
-    assert_eq!(rotate(&p, core(1), 100), Some(1));
+    assert_eq!(rotate(&p, core(1), 100), Some(a));
     // Om de beurt: met beide aan de beurt wint de volgende na de cursor.
     yield_at(a, 0);
     yield_at(b, 0);
-    let turns: Vec<u8> = (0..4)
+    let turns: Vec<Pa> = (0..4)
         .map(|_| {
-            let id = rotate(&p, core(1), 1000).unwrap();
-            yield_at(context_pa(&p, id).unwrap(), 0);
-            id
+            let x = rotate(&p, core(1), 1000).unwrap();
+            yield_at(x, 0);
+            x
         })
         .collect();
-    assert_eq!(turns, [2, 1, 2, 1]);
+    assert_eq!(turns, [b, a, b, a]);
 
     // Een lid eraf: A uit de lijst en dood (hij lag geyield), B draait door.
     assert_eq!(evict(&p, core(1), a), Ok(true));
     assert_eq!(ctx_state(a), Some(CtxState::Dead));
-    assert_eq!(rotate(&p, core(1), 1000), Some(2));
+    assert_eq!(rotate(&p, core(1), 1000), Some(b));
     assert_eq!(rotate(&p, core(1), 1000), None, "B is running, A is gone");
     // Een draaiende bewoner blijft Running: hij faultt zelf op de intrekking.
     assert_eq!(evict(&p, core(1), b), Ok(true));
@@ -472,23 +437,18 @@ fn two_residents_take_turns_on_one_app_core() {
 fn a_forgotten_slot_is_never_booted_by_its_old_core() {
     let (_buf, p) = plan(3);
     init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
-    let (a, b) = (p.ctx_pa(slot(1)).unwrap(), p.ctx_pa(slot(2)).unwrap());
+    let kit = Kit::new(&p, 3);
+    let (a, b) = (kit.ctx(1), kit.ctx(2));
     dispatch(&p, core(1), a, Pa(0x4000_A100), 0x5100_0000).unwrap();
     join(&p, core(1), b, Pa(0x4000_A100), 0x5200_0000).unwrap();
     ctx_write(b, CTX_STATE, CtxState::Dead.raw());
-    forget(&p, slot(2)).unwrap();
+    forget(&p, b).unwrap();
     let mut ids = Vec::new();
-    residents(&p, core(1), |id| ids.push(id)).unwrap();
-    assert_eq!(ids, [1]);
-    // Slot 2 staat nu boot-pending op core 2; core 1 ziet hem niet meer.
-    dispatch(
-        &p,
-        core(2),
-        p.ctx_pa(slot(3)).unwrap(),
-        Pa(0x4000_A100),
-        0x5300_0000,
-    )
-    .unwrap();
+    residents(&p, core(1), |x| ids.push(x)).unwrap();
+    assert_eq!(ids, [a]);
+    // Het blok van B staat nu boot-pending op core 2; core 1 ziet hem niet
+    // meer.
+    dispatch(&p, core(2), kit.ctx(3), Pa(0x4000_A100), 0x5300_0000).unwrap();
     join(&p, core(2), b, Pa(0x4000_A100), 0x5200_0000).unwrap();
     yield_at(a, 1_000_000);
     assert_eq!(rotate(&p, core(1), 0), None);
@@ -502,13 +462,15 @@ fn a_forgotten_slot_is_never_booted_by_its_old_core() {
 fn secondary_contexts_chain_back_to_the_primary() {
     let (_buf, p) = plan(3);
     init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
-    let prim = p.ctx_pa(slot(1)).unwrap();
+    let kit = Kit::new(&p, 1);
+    let prim = kit.ctx(1);
     let ctrl = Pa(0x5100_0000);
+    let vttbr = kit.block(1).0 | 7 << 48;
     dev::write64(p.smp_ctx_pa(core(2)).unwrap().add(CTX_KICK_PENDING), 1);
-    let sec = prepare_secondary(&p, core(2), slot(1), ctrl, 0x2).unwrap();
-    let sec3 = prepare_secondary(&p, core(3), slot(1), ctrl, 0x3).unwrap();
+    let sec = prepare_secondary(&p, core(2), vttbr, ctrl, 0x2).unwrap();
+    let sec3 = prepare_secondary(&p, core(3), vttbr, ctrl, 0x3).unwrap();
     assert_eq!(ctx_read(sec, CTX_CTRL_PA), ctrl.0);
-    assert_eq!(ctx_read(sec, CTX_UNIT_SLOT), 1);
+    assert_eq!(ctx_read(sec, CTX_VTTBR), vttbr, "the unit's table and VMID");
     assert_eq!(ctx_read(sec, CTX_RING_HEAD_PA), 0);
     assert_eq!(ctx_read(sec, CTX_KICK_TARGET), 0x2);
     assert_eq!(ctx_read(sec, CTX_KICK_PENDING), 0, "a stale latch survived");
@@ -517,13 +479,10 @@ fn secondary_contexts_chain_back_to_the_primary() {
     assert_eq!(ctx_read(prim, CTX_NEXT_PA), sec.0);
     assert_eq!(ctx_read(sec, CTX_NEXT_PA), sec3.0);
     assert_eq!(ctx_read(sec3, CTX_NEXT_PA), prim.0);
-    // Het startschot van de secundaire: zijn eigen context-id op zijn core.
+    // Het startschot van de secundaire: zijn eigen ctx-blok op zijn core.
     dispatch(&p, core(2), sec, Pa(0x4000_A200), sec.0 + CTX_SMP).unwrap();
     let mb = p.park_mbox_pa(core(2)).unwrap();
-    assert_eq!(
-        dev::read64(mb.add(SCHED_CURRENT)),
-        u64::from(core(2).smp_context_id().unwrap())
-    );
+    assert_eq!(dev::read64(mb.add(SCHED_CURRENT)), sec.0);
     // Eén context: geen schakel meer.
     chain(&[prim]);
     assert_eq!(ctx_read(prim, CTX_NEXT_PA), 0);

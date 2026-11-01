@@ -19,6 +19,7 @@
 //! hoe HOP een slot stopt stage-2 intrekken, parkeert    reset, of de kill-tick
 //! ```
 
+use crate::cageheap::CageMem;
 use crate::slots::ServicerCtl;
 use crate::{Core, Region, Slot};
 use alloc::rc::Rc;
@@ -187,12 +188,22 @@ pub const fn esr_class(esr: u64) -> &'static str {
 /// vanuit de lifecycle-actor aan, dus `&mut self` is de eigendomsregel: er
 /// is precies één aanroeper.
 pub trait Cage {
+    /// Zet een verse chunk van het kooi-geheugen op het attribuut dat de
+    /// app-cores met de MMU uit zien (`on`: Device in de map van de kern), of
+    /// een lege terug op dat van de pool (`kern::cageheap`). Een functie en
+    /// geen methode: de lifecycle roept hem midden in een call van de kooi.
+    /// `false` = het lukte niet. Standaard niets: een board dat de pool al
+    /// Device mapt, of de toetsen.
+    const MAP_CAGE: fn(Region, bool) -> bool = |_, _| true;
     /// Wis `len` bytes op `base` en publiceer de writes (één brok van de
     /// scrub; de lifecycle yieldt ertussen).
     fn clear(&mut self, base: u64, len: u64);
     /// Bouw de complete context en de beschermingsgrens van `slot` over
     /// `part`, vóór publicatie (E5). `cores` is de vertrouwde SMP-breedte,
-    /// `first` de eerste fysieke core van de span.
+    /// `first` de eerste fysieke core van de span. Wat de kooi buiten de
+    /// partitie nodig heeft (zijn kooi-blok, de VMID, groei van een
+    /// bewonerslijst), neemt hij hier, uit `mem`; past het niet, dan is het
+    /// een weigering en nam hij niets.
     fn build(
         &mut self,
         slot: Slot,
@@ -200,7 +211,20 @@ pub trait Cage {
         entry: u64,
         first: Core,
         cores: usize,
+        mem: &mut dyn CageMem,
     ) -> Result<(), CageError>;
+    /// Geeft wat [`Cage::build`] voor `slot` nam terug (het kooi-blok en de
+    /// VMID): na de bevestigde stop, of na een start die nooit draaide. Een
+    /// slot zonder bouw: niets.
+    fn release(&mut self, slot: Slot, mem: &mut dyn CageMem) {
+        let _ = (slot, mem);
+    }
+    /// Wat de kooi van `slot` de volgende kern meegeeft (de flip): de PA van
+    /// zijn kooi-blok en zijn VMID (op riscv de ASID).
+    fn carry(&self, slot: Slot) -> (u64, u32) {
+        let _ = slot;
+        (0, 0)
+    }
     /// Geef de levensduur van `slot` zijn servicer-taak
     /// ([`crate::slots::servicer_task`] met `ctl`), na de bouw en vóór het
     /// startschot. Een `Err` (de taak kan er niet bij) is een weigering: er

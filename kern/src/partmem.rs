@@ -381,6 +381,23 @@ impl PartitionPool {
         Ok(base)
     }
 
+    /// Neemt een blok van de vorige kern over als apparaatreservering (de
+    /// flip: het kooi-geheugen): helemaal vrij of geweigerd, zoals
+    /// [`PartitionPool::adopt`].
+    pub fn adopt_device(&mut self, base: u64, size: u64) -> Result {
+        let end = base.checked_add(size).ok_or(Error::Range { base, size })?;
+        if size == 0 || !base.is_multiple_of(GRAIN) || !size.is_multiple_of(GRAIN) {
+            return Err(Error::Range { base, size });
+        }
+        if !self.free_span(base, end) {
+            return Err(Error::NotFree { base, size });
+        }
+        self.room_for_claim()?;
+        self.take_range(base, end)?;
+        self.capacity = self.capacity.saturating_sub(size);
+        Ok(())
+    }
+
     /// Geeft een apparaatreservering terug (het ijzer kwam niet op).
     pub fn release_device(&mut self, base: u64, size: u64) -> Result {
         let Some(size) = align_grain(size).filter(|s| *s != 0) else {

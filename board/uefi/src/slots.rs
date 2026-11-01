@@ -24,7 +24,8 @@ use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 /// De control-pages van de eigen cores van de kern: het begin van het
 /// kooi-venster.
 pub const NODE_CTRL_PA: u64 = ADMIN.base.0;
-/// De kooi-regio: 1 MB verder, tot (SLOT_CAP + 1) blokken van 64 KB.
+/// De kooi-regio: 1 MB verder, blok 0 en de ctx-blokken van de cores
+/// (`abi::layout::cage_len`). Wat per slot is, komt uit de pool.
 pub const CAGE_PA: u64 = ADMIN.base.0 + 0x10_0000;
 /// Het Device-venster van de kooi.
 pub const DEVICE_WINDOW: Region = Region::new(ADMIN.base.0, ADMIN.size);
@@ -42,11 +43,11 @@ pub const STAGE_MAX: u64 = LOADER.base.0 + LOADER.size - STAGE_PA;
 const _: () = {
     assert!(BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN <= STAGE_HDR_PA);
     assert!(STAGE_ROLE_PA + 8 <= STAGE_PA);
-    // Node-control (SLOT_CAP + 1 pagina's) vóór de kooi, de kooi binnen het
-    // venster, ook bij het volle plafond.
-    let blocks = abi::layout::SLOT_CAP as u64 + 1;
-    assert!(NODE_CTRL_PA + blocks * abi::layout::CTRL_STRIDE <= CAGE_PA);
-    assert!(CAGE_PA + blocks * abi::layout::CAGE_STRIDE <= ADMIN.base.0 + ADMIN.size);
+    // Node-control (een pagina per core) vóór de kooi, de kooi binnen het
+    // venster, ook bij het grootste aantal cores dat het plan draagt.
+    let cores = abi::layout::CORES_MAX - 1;
+    assert!(NODE_CTRL_PA + abi::layout::node_ctrl_len(cores) <= CAGE_PA);
+    assert!(CAGE_PA + abi::layout::cage_len(cores) <= ADMIN.base.0 + ADMIN.size);
 };
 
 /// De memory map zoals hij bij de exit was.
@@ -101,7 +102,6 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         net_dma_pa: crate::NET_DMA.base.0,
         pool: pool()?,
         ram_base: ram_base(),
-        max_slots: (app_cores + 1).max(abi::layout::SLOTS_DEFAULT),
         app_cores,
         os_core,
         ..PlanSpec::default()

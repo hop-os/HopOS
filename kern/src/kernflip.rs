@@ -15,15 +15,18 @@
 //! (`POST /flip`), dat de bundel in een gereserveerd slot stroomt.
 
 use crate::cage::PhysMem;
+use crate::cageheap::Chunk;
 use crate::slots::{Mount, SlotState, try_push};
 use crate::{Error, Result};
 use alloc::vec::Vec;
 
 /// "HOPHAND1" little-endian.
 pub const HAND_MAGIC: u64 = 0x3144_4E41_4850_4F48;
-/// De versie van het blob: 7 sinds 01-11 (de lease erin; de conntrack, de
-/// koude vlag en de nulwoorden van oudere vormen eruit).
-pub const HAND_VERSION: u64 = 7;
+/// De versie van het blob: 8 sinds 01-11 (per slot zijn kooi-blok en zijn
+/// VMID, en de chunks van het kooi-geheugen: er is geen maximum aantal
+/// slots, dus de kooi van een slot ligt niet meer vast in het plan). 7 had
+/// de lease erin, de conntrack en de koude vlag eruit.
+pub const HAND_VERSION: u64 = 8;
 /// De plek van het blob op elk board (`abi::layout::FLIP_HANDOFF_LEN`):
 /// 256 KB. Past het hok er niet in, dan is dat `HOPOS_FATAL` na de 202
 /// (Derek, 01-11: geen begrenzing vooraf tot blijkt dat ze nodig is).
@@ -45,7 +48,7 @@ pub const MAX_FLIP_PATH: usize = abi::systemapi::MAX_MOUNT_PATH;
 /// De kop: magic, versie, het aantal bewoners, de generatie, de wandklok en
 /// de vijf woorden van de lease.
 const HAND_HEAD: usize = 80;
-const SLOT_HEAD: usize = 80;
+const SLOT_HEAD: usize = 96;
 
 /// Wat de vertrekkende kern achterliet: per onderdeel zijn eigen stuk. De
 /// boot van de nieuwe kern loopt dezelfde reeks als een koude boot; per stap
@@ -66,6 +69,10 @@ pub struct Handoff {
     /// Het hok: de bewoners, in hun kooien op de switch-code die blijft
     /// staan, met hun poorten.
     pub slots: Vec<SlotState>,
+    /// Het kooi-geheugen van het hok (`kern::cageheap`): de chunks en hun
+    /// bezetting, met de kooi-blokken van de bewoners en de bewonerslijsten
+    /// van de cores erin.
+    pub cage: Vec<Chunk>,
 }
 
 /// De lease van de uplink, zoals de DHCP-keeper hem hield: de velden van
@@ -171,6 +178,8 @@ pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
             s.mounts.len() as u64,
             s.share_group.len() as u64,
             s.group_cores.len() as u64,
+            s.cage_block,
+            u64::from(s.vmid),
         ] {
             put64(&mut b, v)?;
         }
@@ -191,6 +200,11 @@ pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
             put(&mut b, &m.shared)?;
             pad8(&mut b)?;
         }
+    }
+    put64(&mut b, h.cage.len() as u64)?;
+    for c in &h.cage {
+        put64(&mut b, c.base)?;
+        put64(&mut b, u64::from(c.used))?;
     }
     if b.len() > max {
         return Err(Error::TooLarge { len: b.len(), max });
@@ -285,6 +299,8 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
         let n_mounts = r.u64()?;
         let group_len = bounded(r.u64()?, MAX_FLIP_JOB as u64, r.pos)?;
         let n_group = bounded(r.u64()?, 1024, r.pos)?;
+        s.cage_block = r.u64()?;
+        s.vmid = u32::try_from(r.u64()?).map_err(|_| Error::Corrupt { at: r.pos })?;
         if n_group * 8 + group_len > r.left() {
             return Err(Error::Corrupt { at: r.pos });
         }
@@ -312,6 +328,15 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
             r.align();
         }
         try_push(&mut h.slots, s)?;
+    }
+    let n = r.u64()?;
+    if n.saturating_mul(16) > r.left() {
+        return Err(Error::Corrupt { at: r.pos });
+    }
+    for _ in 0..n {
+        let base = r.u64()?;
+        let used = u32::try_from(r.u64()?).map_err(|_| Error::Corrupt { at: r.pos })?;
+        try_push(&mut h.cage, Chunk { base, used })?;
     }
     Ok(h)
 }
@@ -593,8 +618,11 @@ pub fn mark_early_boot(mem: &mut impl PhysMem, plan: &FlipPlan) {
 /// koude adres van de oude, dus een Go-bundel wordt hier geweigerd.
 /// 4 sinds 01-11: het blob van versie 7; een kern van ABI 3 weigert zo'n
 /// bundel vóór de 202 in plaats van dat de nieuwe kern op een blob landt
-/// dat hij niet leest.
-pub const FLIP_ABI: u32 = 4;
+/// dat hij niet leest. 5 (01-11, v3.2.0): het blob van versie 8 en de
+/// indeling van de kooi zonder maximum aantal slots (het kooi-blok per slot
+/// uit de pool, de bewonerslijst als array van ctx-PA's, de VMID in het
+/// ctx-blok); de switch-code van een kern van ABI 4 leest die niet.
+pub const FLIP_ABI: u32 = 5;
 /// "HOPRELO1" little-endian: hetzelfde woord als `mkkernel -elfreloc`.
 pub const RELOC_MAGIC: u64 = 0x314F_4C45_5250_4F48;
 /// De kop van de staart: magic, versie, flip-ABI, ELF-maat, linkbasis,
@@ -847,6 +875,16 @@ mod tests {
         let h = Handoff {
             generation: 2,
             slots: vec![first, st(7, 0x9000_0000, 48, 3)],
+            cage: vec![
+                Chunk {
+                    base: 0xA000_0000,
+                    used: 0b11,
+                },
+                Chunk {
+                    base: 0xA020_0000,
+                    used: 1 << 31,
+                },
+            ],
             wall_off: 1_790_767_915_253_886_881,
             lease: Some(Lease {
                 ip: 0x0A00_020F,

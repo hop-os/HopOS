@@ -36,6 +36,7 @@
 extern crate alloc;
 
 pub mod cage;
+pub mod cageheap;
 #[cfg(feature = "media")]
 pub mod codecabi;
 pub mod conport;
@@ -57,11 +58,6 @@ pub mod watchdog;
 mod testutil;
 
 pub use error::{Error, Result};
-
-/// De harde kooi-bovengrens: het hoogste slotnummer dat de kern ooit kent
-/// (128, de Ampere Altra); een board zet zijn eigen, lagere `max_slots` bij
-/// boot.
-pub use abi::layout::SLOT_CAP;
 
 mod slotvec;
 pub use slotvec::SlotVec;

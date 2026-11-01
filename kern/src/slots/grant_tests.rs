@@ -221,7 +221,7 @@ fn adoption_restores_the_grants_before_the_services() {
 
     let (svc2, con2) = (Servicers::new(), FakeConsole::default());
     let mut b = counted(&svc2, &con2, Obey::Exit);
-    assert_eq!(b.adopt(&states), Ok(2));
+    assert_eq!(b.adopt(&states, &[]), Ok(2));
     assert_eq!(b.grants.adopt, [2, 3]);
     assert!(svc2.current(s(2)).is_some() && svc2.current(s(3)).is_some());
     assert!(b.grants.release.is_empty());
@@ -229,7 +229,7 @@ fn adoption_restores_the_grants_before_the_services() {
     let (svc3, con3) = (Servicers::new(), FakeConsole::default());
     let mut c = counted(&svc3, &con3, Obey::Exit);
     c.grants.fail_adopt = true;
-    assert_eq!(c.adopt(&states), Err(Error::StillOwned { slot: 9 }));
+    assert_eq!(c.adopt(&states, &[]), Err(Error::StillOwned { slot: 9 }));
     assert!(con3.saw("slot 2: device grant not restored"));
     assert!(con3.saw("HOPOS_GRANT_ADOPT_FAIL"));
     assert_eq!(svc3.current(s(2)), None, "no service after a refused grant");

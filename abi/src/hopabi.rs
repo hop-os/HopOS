@@ -92,8 +92,11 @@ pub const CTRL_SMP_STUB: u64 = 0xA8;
 /// App naar secundaire: de stage-1-L1-tabel, zodat de stub geen geheugen
 /// leest vóór zijn MMU aan staat (een pre-MMU-lees kan stale zijn).
 pub const CTRL_SMP_TTBR0: u64 = 0xB0;
-/// Kern naar trampoline: het slotnummer (= VMID).
-pub const CTRL_SLOT: u64 = 0xB8;
+/// Kern naar trampoline: de VMID van de kooi. Tot v3.2.0 het slotnummer
+/// (de VMID was het slot); nu deelt de kern de VMID bij de plaatsing uit,
+/// met zoveel bits als het ijzer heeft. Geen app leest dit veld (zijn slot
+/// komt uit de patch van zijn image).
+pub const CTRL_VMID: u64 = 0xB8;
 /// App naar kern: de core-index die de runtime als extra SMP-core wil
 /// (0 = geen verzoek). De kern valideert tegen [`CTRL_CORES`].
 pub const CTRL_SMP_REQ: u64 = 0xC0;
@@ -391,7 +394,7 @@ const FIELDS: &[(u64, u64)] = &[
     (CTRL_SMP_FN, 8),
     (CTRL_SMP_STUB, 8),
     (CTRL_SMP_TTBR0, 8),
-    (CTRL_SLOT, 8),
+    (CTRL_VMID, 8),
     (CTRL_SMP_REQ, 8),
     (CTRL_MBOX_PA, 8),
     (CTRL_SMP_MBOX, 8),

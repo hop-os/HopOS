@@ -29,7 +29,8 @@ use dev::Pa;
 /// De control-pages van de eigen cores van de kern: het begin van het
 /// kooi-venster.
 pub const NODE_CTRL_PA: u64 = ADMIN.base.0;
-/// De kooi-regio: 1 MB verder, tot (SLOT_CAP + 1) blokken van 64 KB.
+/// De kooi-regio: 1 MB verder, blok 0 en de ctx-blokken van de cores
+/// (`abi::layout::cage_len`). Wat per slot is, komt uit de pool.
 pub const CAGE_PA: u64 = ADMIN.base.0 + 0x10_0000;
 /// De vluchtrecorder van de kern-flip: buiten het image, want iBoot legt
 /// het bootobject bij élke boot terug over het begin van het venster
@@ -62,9 +63,9 @@ pub const POOL_FALLBACK: Region = Region::new(WINDOW_END, 1 << 30);
 const _: () = {
     assert!(BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN <= STAGE_HDR_PA);
     assert!(STAGE_MAGIC_PA + 8 <= STAGE_PA);
-    let blocks = abi::layout::SLOT_CAP as u64 + 1;
-    assert!(NODE_CTRL_PA + blocks * abi::layout::CTRL_STRIDE <= CAGE_PA);
-    assert!(CAGE_PA + blocks * abi::layout::CAGE_STRIDE <= FLIP_SCRATCH_PA);
+    let cores = abi::layout::CORES_MAX - 1;
+    assert!(NODE_CTRL_PA + abi::layout::node_ctrl_len(cores) <= CAGE_PA);
+    assert!(CAGE_PA + abi::layout::cage_len(cores) <= FLIP_SCRATCH_PA);
     assert!(FLIP_SCRATCH_PA + 8 <= BLACK_BOX.base);
     assert!(BLACK_BOX.base + BLACK_BOX.size <= ADMIN.base.0 + ADMIN.size);
     assert!(CAGE_PA.is_multiple_of(2048));
@@ -240,7 +241,6 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         net_dma_pa: crate::NET_DMA.base.0,
         ram_base: crate::DRAM_BASE,
         pool: pool().0,
-        max_slots: (app_cores + 1).max(abi::layout::SLOTS_DEFAULT),
         app_cores,
         os_core,
         ..PlanSpec::default()
@@ -332,7 +332,6 @@ mod tests {
             net_dma_pa: crate::NET_DMA.base.0,
             ram_base: crate::DRAM_BASE,
             pool: pool_of(0, 0, 0).0,
-            max_slots: 2,
             app_cores: 1,
             os_core: 0,
             ..PlanSpec::default()

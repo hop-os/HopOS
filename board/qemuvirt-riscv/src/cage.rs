@@ -123,7 +123,9 @@ pub fn selftest(
     part: u64,
     clint: cpu::riscv::clint::Clint,
 ) -> Result<Report, &'static str> {
-    const SLOT: u8 = 1;
+    // De bewonerslijst ligt achter de partitie, in de pool (zoals het
+    // kooi-geheugen hem uit de pool neemt), net als het ctx-blok.
+    let list = Pa(part + 0x21_0000);
     let ctrl = part + 0x10_0000;
     let tables = part + 0x18_0000;
     dev::clear(sched, PARK_MBOX_LEN as usize);
@@ -140,7 +142,8 @@ pub fn selftest(
         sched.add(SCHED_TICK_TICKS),
         cpu::riscv::idle::ns_to_ticks(TICK_NS, cpu::riscv::idle::hz()),
     );
-    cpu::el2::roster::reset(sched, Some(SLOT));
+    cpu::el2::roster::grow(sched, list, 1);
+    cpu::el2::roster::reset(sched, Some(ctx)).map_err(|_| "roster")?;
     dev::push(sched, PARK_MBOX_LEN as usize);
 
     // De eerste bewoner: gelinkt op LINK_BASE, fysiek op `part`.
@@ -214,10 +217,12 @@ pub fn selftest(
     clint.set_msip(hart, true);
     let after = wait_state(ctx, CtxState::Dead as u64, 200);
 
-    // Opruimen: de lijst leeg, de partitie terug naar nul.
-    cpu::el2::roster::reset(sched, None);
+    // Opruimen: de lijst weg, de partitie en wat erachter lag terug naar nul.
+    dev::clear(sched, PARK_MBOX_LEN as usize);
+    dev::push(sched, PARK_MBOX_LEN as usize);
     dev::clear(Pa(part), 2 << 20);
     dev::clear(ctx, CTX_LEN as usize);
+    dev::clear(list, abi::layout::CAGE_STRIDE as usize);
     Ok(Report {
         resume,
         first,

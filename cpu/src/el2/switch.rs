@@ -29,21 +29,20 @@ use super::dispatch::{
     VEC_SYNC_LOWER,
 };
 use super::layout::{
-    CAGE_STRIDE, CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_GPRS, CTX_KICK_PENDING,
-    CTX_KICK_TARGET, CTX_NEXT_PA, CTX_OFF, CTX_REGIME, CTX_REGIME_ARM_WORDS, CTX_RESUME,
-    CTX_RING_HEAD_PA, CTX_SLEEPS, CTX_SP, CTX_STATE, CTX_UNIT_SLOT, CTX_WAKE, CTX_WAKE_NO_PEEK,
-    CTX_WAKES, CtxState, PARK_CODE_OFF, PARK_MBOX_OFF, PARK_PARKED, SCHED_COUNT, SCHED_CURRENT,
-    SCHED_CURSOR, SCHED_LIST, SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_S2_PA, SCHED_SCRATCH, SLOT_CAP,
-    SMP_CTX_OFF,
+    CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_GPRS, CTX_KICK_PENDING, CTX_KICK_TARGET,
+    CTX_NEXT_PA, CTX_REGIME, CTX_REGIME_ARM_WORDS, CTX_RESUME, CTX_RING_HEAD_PA, CTX_SLEEPS,
+    CTX_SP, CTX_STATE, CTX_VTTBR, CTX_WAKE, CTX_WAKE_NO_PEEK, CTX_WAKES, CtxState, PARK_CODE_OFF,
+    PARK_MBOX_OFF, PARK_PARKED, ROSTER_CAP, ROSTER_ENTRIES, SCHED_COUNT, SCHED_CURRENT,
+    SCHED_CURSOR, SCHED_LIST_PA, SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_S2_PA, SCHED_SCRATCH,
 };
 use super::oscore::{
     SCHED_OS_KICK, SCHED_OS_KICK_PA, SCTLR_EL1_CLEAN, SPSR_EL1H_MASKED, apple_kick_target,
 };
 use abi::hopabi::{
     CTRL_DOOR_IRQ, CTRL_ENTRY, CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC, CTRL_MBOX_PA,
-    CTRL_RX_DOOR, CTRL_S2_TABLE, CTRL_SLOT, CTRL_SMP_FN, CTRL_SMP_G0, CTRL_SMP_MAIR, CTRL_SMP_MBOX,
+    CTRL_RX_DOOR, CTRL_S2_TABLE, CTRL_SMP_FN, CTRL_SMP_G0, CTRL_SMP_MAIR, CTRL_SMP_MBOX,
     CTRL_SMP_MP, CTRL_SMP_SP, CTRL_SMP_STUB, CTRL_SMP_TCR, CTRL_SMP_TTBR0, CTRL_SMP_VBAR,
-    CTRL_VEC_PA, RX_DOOR_ARMED,
+    CTRL_VEC_PA, CTRL_VMID, RX_DOOR_ARMED,
 };
 use core::arch::{asm, global_asm};
 
@@ -59,7 +58,7 @@ const SP_CURRENT: u64 = SCHED_CURRENT - SCHED_SCRATCH;
 const SP_S2_PA: u64 = SCHED_S2_PA - SCHED_SCRATCH;
 const SP_CURSOR: u64 = SCHED_CURSOR - SCHED_SCRATCH;
 const SP_COUNT: u64 = SCHED_COUNT - SCHED_SCRATCH;
-const SP_LIST: u64 = SCHED_LIST - SCHED_SCRATCH;
+const SP_LIST: u64 = SCHED_LIST_PA - SCHED_SCRATCH;
 const _: () = assert!(SP_CURRENT == 32 && SP_S2_PA == 208);
 const _: () = assert!(SP_CURSOR == 64 && SP_COUNT == 72 && SP_LIST == 80);
 
@@ -67,12 +66,12 @@ const _: () = assert!(SP_CURSOR == 64 && SP_COUNT == 72 && SP_LIST == 80);
 // woorden, en die passen vóór SCHED_CURRENT.
 const _: () = assert!(SCRATCH_X2 + 16 <= SCHED_CURRENT - SCHED_SCRATCH);
 
-/// Kooi-blokken liggen op een macht van twee: de context-index schuift erin.
-const CAGE_SHIFT: u32 = CAGE_STRIDE.trailing_zeros();
-const _: () = assert!(1u64 << CAGE_SHIFT == CAGE_STRIDE);
-
 /// De VMID staat in VTTBR_EL2 op bit 48.
 const VMID_SHIFT: u32 = 48;
+/// VTCR_EL2.VS: VMID's van zestien bits, als het ijzer ze heeft
+/// (ID_AA64MMFR1_EL1.VMIDBits = 2, v8.1); zonder telt het silicium er acht
+/// (Linux: `VTCR_EL2_VS` in `kvm_get_vtcr`).
+const VTCR_VS: u64 = 1 << 19;
 
 /// VTCR_EL2 zonder PS-veld: 4 KB-granule, 39-bit IPA (T0SZ=25, SL0=1),
 /// inner/outer write-back, inner shareable, RES1 op bit 31.
@@ -133,23 +132,6 @@ global_asm!(
     .pushsection .text.hopos_el2, "ax"
 
 // ===========================================================================
-// hopos_el2_ctx_of: het ctx-blok van een context-id (was vijf keer inline in
-// switch.s). Id's 1..SLOT_CAP zijn kooi-contexten op CTX_OFF van hun blok;
-// id's erboven zijn secundaire cores (id - (SLOT_CAP-1)) op SMP_CTX_OFF. In:
-// id in het eerste register, de kooi-basis in het tweede. Uit: het tweede
-// register is het ctx-blok, het eerste is geklobberd.
-// ===========================================================================
-    .macro hopos_el2_ctx_of id, pa
-    cmp \id, #{slot_cap}
-    b.ls 8f
-    sub \id, \id, #({slot_cap} - 1)
-    add \pa, \pa, #({smp_ctx_off} - {ctx_off})
-8:
-    add \pa, \pa, \id, lsl #{cage_shift}
-    add \pa, \pa, #{ctx_off}
-    .endm
-
-// ===========================================================================
 // hopos_el2_i_hygiene (hygiene.h): de I-cache van DEZE core leeg vóór een
 // sprong in vers geschreven code. Een PIPT-I$ houdt de instructies van de
 // vorige huurder van dezelfde PA's vast; de D-veeg van de plaatser raakt de
@@ -196,7 +178,8 @@ global_asm!(
     eret
     .endm
 
-// VTCR_EL2 (el2.s): 4 KB-granule, 39-bit IPA, PS = min(PARange, 44 bit). De
+// VTCR_EL2 (el2.s): 4 KB-granule, 39-bit IPA, PS = min(PARange, 44 bit), en
+// VS als het ijzer zestien VMID-bits heeft. De
 // pool ligt op servers ver boven de oude 40-bit-aanname (Altra 15-07: met
 // PS=40 stierf elke loader op een address-size-fault bij zijn eerste
 // instructie uit een hoge partitie). Klemmen is verplicht: PS boven PARange
@@ -211,6 +194,13 @@ global_asm!(
     movz x4, #({vtcr} & 0xffff)
     movk x4, #({vtcr} >> 16), lsl #16
     orr x4, x4, x5, lsl #{vtcr_ps}
+    // Zestien VMID-bits als het ijzer ze heeft: de kern deelt ze zo uit.
+    mrs x5, id_aa64mmfr1_el1
+    ubfx x5, x5, #4, #4
+    cmp x5, #2
+    b.ne 9f
+    orr x4, x4, #{vtcr_vs}
+9:
     msr vtcr_el2, x4
     .endm
 
@@ -340,9 +330,7 @@ global_asm!(
 // ctx-blok, waarna zijn eigen blok op Running bleef en de core parkeerde
 // (QEMU + M4, 03-09).
 .L\p\()_yield:
-    ldr x0, [sp, #{sp_current}]
-    ldr x1, [sp, #{sp_s2pa}]
-    hopos_el2_ctx_of x0, x1
+    ldr x1, [sp, #{sp_current}]
     stp x4, x5, [x1, #({gprs} + 4 * 8)]
     stp x6, x7, [x1, #({gprs} + 6 * 8)]
     stp x8, x9, [x1, #({gprs} + 8 * 8)]
@@ -439,9 +427,7 @@ global_asm!(
 // het de kern: zijn servicer leest de laatste woorden en ziet de dode
 // context zonder te pollen (docs/sequence-hopos.md §13.3).
 .L\p\()_exited:
-    ldr x0, [sp, #{sp_current}]
-    ldr x1, [sp, #{sp_s2pa}]
-    hopos_el2_ctx_of x0, x1
+    ldr x1, [sp, #{sp_current}]
     mov x2, #{st_dead}
     str x2, [x1, #{state}]
     dsb sy
@@ -457,9 +443,7 @@ global_asm!(
 // context houdt zijn fault-PC in zijn resume-woord. Daarna draait de rest
 // van de core gewoon door. x2 is nog de vectorindex.
 .L\p\()_fault:
-    ldr x0, [sp, #{sp_current}]
-    ldr x1, [sp, #{sp_s2pa}]
-    hopos_el2_ctx_of x0, x1
+    ldr x1, [sp, #{sp_current}]
     mrs x0, elr_el2
     str x0, [x1, #{resume}]
     ldr x3, [x1, #{ctrl_pa}]
@@ -510,6 +494,17 @@ global_asm!(
     ldr x4, [sp, #{sp_cursor}]
     ldr x5, [sp, #{sp_count}]
     cbz x5, .L\p\()_park
+    // De lijst (een array van ctx-PA's in het kooi-geheugen, woord 0 de
+    // capaciteit) en de lengte, geklemd op die capaciteit: een lijst die de
+    // kern intussen liet groeien, heeft dezelfde ingangen, en de oude blijft
+    // bestaan.
+    ldr x7, [sp, #{sp_list}]
+    cbz x7, .L\p\()_park
+    ldr x9, [x7, #{roster_cap}]
+    cmp x5, x9
+    csel x5, x9, x5, hi
+    cbz x5, .L\p\()_park
+    add x7, x7, #{roster_entries}
     mov x6, x5
 .L\p\()_next:
     add x4, x4, #1
@@ -517,12 +512,9 @@ global_asm!(
     b.lt .L\p\()_scan
     mov x4, #0
 .L\p\()_scan:
-    add x7, sp, #{sp_list}
-    ldrb w8, [x7, x4]
+    ldr x8, [x7, x4, lsl #3]
     cbz x8, .L\p\()_skip
-    ldr x1, [sp, #{sp_s2pa}]
-    mov x9, x8
-    hopos_el2_ctx_of x9, x1
+    mov x1, x8
     ldr x9, [x1, #{state}]
     // De hercontrole (30-09, sharegroups op app-cores): staat de byte er na
     // de staat nog? De kern haalt een slot eerst uit elke lijst en schrijft
@@ -531,7 +523,7 @@ global_asm!(
     // een oude core een slot dat intussen op een andere core boot-pending
     // stond, als hij tussen byte en staat werd opgehouden.
     dmb sy
-    ldrb w10, [x7, x4]
+    ldr x10, [x7, x4, lsl #3]
     cmp x10, x8
     b.ne .L\p\()_skip
     cmp x9, #{st_boot_pending}
@@ -592,8 +584,8 @@ global_asm!(
     ldr x2, [x1, #{boot_pc}]
     br x2
 
-// resume: de volgende bewoner terug. VTTBR naar zijn EENHEID (CTX_UNIT_SLOT):
-// een secundaire deelt tabel en VMID met zijn primaire. GEEN TLBI: de
+// resume: de volgende bewoner terug. VTTBR naar zijn EENHEID (CTX_VTTBR, de
+// kern zette hem): een secundaire deelt tabel en VMID met zijn primaire. GEEN TLBI: de
 // entries zijn VMID-getagd, de vertalingen van beide bewoners bestaan naast
 // elkaar, en dat maakt de wissel goedkoop.
 .L\p\()_resume:
@@ -603,10 +595,7 @@ global_asm!(
     str x9, [x1, #{state}]
     str xzr, [x1, #{kick_pending}]
     dsb sy
-    ldr x9, [x1, #{unit_slot}]
-    ldr x2, [sp, #{sp_s2pa}]
-    add x2, x2, x9, lsl #{cage_shift}
-    orr x2, x2, x9, lsl #{vmid_shift}
+    ldr x2, [x1, #{vttbr}]
     msr vttbr_el2, x2
     // Het EL1-regime terug, spiegel van de save; de ERET synchroniseert.
     ldp x2, x3, [x1, #({regime} + 0 * 8)]
@@ -683,9 +672,7 @@ global_asm!(
     mrs x0, s3_5_c15_c1_1
     cbz x0, .L\p\()_fault
     msr s3_5_c15_c1_1, x0
-    ldr x1, [sp, #{sp_current}]
-    ldr x2, [sp, #{sp_s2pa}]
-    hopos_el2_ctx_of x1, x2
+    ldr x2, [sp, #{sp_current}]
     ldr x3, [x2, #{ctrl_pa}]
     cbz x3, .L\p\()_fiqdone
     ldr x3, [x3, #{c_door_irq}]
@@ -731,9 +718,7 @@ global_asm!(
 // landt na zijn T. Alleen x0..x3 zijn klad; x4/x5 gaan even in het GPR-vak
 // van de eigen ctx, dat dood is tot de volgende yield.
 .L\p\()_wake:
-    ldr x1, [sp, #{sp_current}]
-    ldr x2, [sp, #{sp_s2pa}]
-    hopos_el2_ctx_of x1, x2
+    ldr x2, [sp, #{sp_current}]
     stp x4, x5, [x2, #({gprs} + 4 * 8)]
     ldr x0, [sp]
     ldr x1, [x2, #{ctrl_pa}]
@@ -792,7 +777,7 @@ global_asm!(
     msr vbar_el2, x1
     ldr x2, [x0, #{c_s2_table}]
     ldr x3, [x0, #{c_entry}]
-    ldr x6, [x0, #{c_slot}]
+    ldr x6, [x0, #{c_vmid}]
     // TPIDR_EL2 = de eigen mailbox: de parkeerlus vindt hem zonder MPIDR.
     ldr x7, [x0, #{c_mbox_pa}]
     msr tpidr_el2, x7
@@ -806,7 +791,7 @@ global_asm!(
     mrs x4, mpidr_el1
     msr vmpidr_el2, x4
     hopos_el2_vtcr
-    // VTTBR = L1 | VMID(slot) << 48; ISB vóór de TLBI zodat hij deze VMID
+    // VTTBR = L1 | VMID << 48; ISB vóór de TLBI zodat hij deze VMID
     // raakt.
     lsl x5, x6, #{vmid_shift}
     orr x5, x5, x2
@@ -842,7 +827,7 @@ global_asm!(
     ldr x14, [x1, #{c_smp_ttbr0}]
     ldr x15, [x1, #{c_smp_stub}]
     ldr x2, [x1, #{c_s2_table}]
-    ldr x6, [x1, #{c_slot}]
+    ldr x6, [x1, #{c_vmid}]
     ldr x7, [x1, #{c_smp_mbox}]
     msr tpidr_el2, x7
     add x8, x7, #{sched_scratch}
@@ -936,11 +921,10 @@ hopos_el2_park_end:
 
     .popsection
 "#,
-    slot_cap = const SLOT_CAP,
-    ctx_off = const CTX_OFF,
-    smp_ctx_off = const SMP_CTX_OFF,
-    cage_shift = const CAGE_SHIFT,
     vmid_shift = const VMID_SHIFT,
+    vtcr_vs = const VTCR_VS,
+    roster_cap = const ROSTER_CAP,
+    roster_entries = const ROSTER_ENTRIES,
     sctlr_clean = const SCTLR_EL1_CLEAN,
     cptr_vhe = const CPTR_NOTRAP_VHE,
     cptr_nvhe = const CPTR_NOTRAP_NVHE,
@@ -982,7 +966,7 @@ hopos_el2_park_end:
     ctrl_pa = const CTX_CTRL_PA,
     sleeps = const CTX_SLEEPS,
     ring_head = const CTX_RING_HEAD_PA,
-    unit_slot = const CTX_UNIT_SLOT,
+    vttbr = const CTX_VTTBR,
     boot_arg = const CTX_BOOT_ARG,
     boot_pc = const CTX_BOOT_PC,
     wakes = const CTX_WAKES,
@@ -1005,7 +989,7 @@ hopos_el2_park_end:
     c_vec_pa = const CTRL_VEC_PA,
     c_s2_table = const CTRL_S2_TABLE,
     c_entry = const CTRL_ENTRY,
-    c_slot = const CTRL_SLOT,
+    c_vmid = const CTRL_VMID,
     c_mbox_pa = const CTRL_MBOX_PA,
     c_smp_sp = const CTRL_SMP_SP,
     c_smp_mp = const CTRL_SMP_MP,

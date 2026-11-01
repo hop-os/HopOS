@@ -18,8 +18,8 @@ use core::sync::atomic::{
 use dev::Pa;
 use fw::acpi::{self, Phys, Tables};
 
-/// Zoveel cores houden we bij: meer dan de Altra (128) en onder het
-/// plafond van `abi::layout::SLOT_CAP` + 1.
+/// Zoveel cores houden we bij: meer dan de Altra (128) en binnen wat het
+/// plan draagt (`abi::layout::CORES_MAX`).
 pub(crate) const MAX_CORES: usize = 129;
 /// Zoveel ECAM-vensters (PCIe-segmenten): de Altra heeft er tot acht.
 pub(crate) const MAX_ECAM: usize = 8;

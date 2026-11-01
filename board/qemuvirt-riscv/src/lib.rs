@@ -232,15 +232,17 @@ impl QemuVirtRiscv {
             );
             return;
         }
-        let (Ok(plan), Some(core), Some(slot)) = (
-            slots::plan(self.cores(), 0),
-            abi::layout::Core::new(1),
-            abi::layout::Slot::new(1),
-        ) else {
+        let (Ok(plan), Some(core)) = (slots::plan(self.cores(), 0), abi::layout::Core::new(1))
+        else {
             cpu::println!("cage: riscv switcher self-test: no plan HOPOS_RV_CAGE_FAIL");
             return;
         };
-        let (Ok(sched), Ok(ctx)) = (plan.park_mbox_pa(core), plan.ctx_pa(slot)) else {
+        // Het ctx-blok van de proef achter zijn partitie in de pool, zoals
+        // het kooi-geheugen een kooi-blok uit de pool neemt.
+        let (Ok(sched), Ok(ctx)) = (
+            plan.park_mbox_pa(core),
+            Ok::<_, ()>(Pa(slots::POOL[0].base + 0x20_0000)),
+        ) else {
             cpu::println!(
                 "cage: riscv switcher self-test: no sched or ctx block HOPOS_RV_CAGE_FAIL"
             );

@@ -439,7 +439,7 @@ fn setup(
     // reset hem, en de koude boot is de nieuwe poging. Na een flip is het
     // meteen `HOPOS_FATAL`: de bewoners rekenen op hun net.
     let (hok, carried) = match landing {
-        Some(l) => (Some(l.slots), Some(l.lease)),
+        Some(l) => (Some((l.slots, l.cage)), Some(l.lease)),
         None => (None, None),
     };
     match board.probe_nic() {

@@ -26,18 +26,17 @@
 //! bewoner, waarna die dood is en de core doorroteert.
 
 use super::layout::{
-    CAGE_STRIDE, CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_KICK_PENDING, CTX_KICK_TARGET,
-    CTX_LEN, CTX_NEXT_PA, CTX_OFF, CTX_RING_HEAD_PA, CTX_STATE, CTX_UNIT_SLOT, CTX_WAKE, Core,
-    CtxState, PARK_CODE_OFF, PARK_COLD, PARK_MBOX_LEN, PARK_MBOX_OFF, PARK_PARKED, Plan,
-    SCHED_CURRENT, SCHED_CURSOR, SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_ROTOR, SCHED_S2_PA, SLOT_CAP,
-    SMP_CTX_OFF, SWITCH_CODE_MAX, Slot,
+    CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_KICK_PENDING, CTX_KICK_TARGET, CTX_LEN,
+    CTX_NEXT_PA, CTX_RING_HEAD_PA, CTX_STATE, CTX_VTTBR, CTX_WAKE, Core, CtxState, PARK_CODE_OFF,
+    PARK_COLD, PARK_MBOX_LEN, PARK_MBOX_OFF, PARK_PARKED, Plan, SCHED_CURRENT, SCHED_CURSOR,
+    SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_ROTOR, SCHED_S2_PA, SWITCH_CODE_MAX,
 };
 use super::{Error, roster, stage2, switch};
 use abi::checksum::Fnv64;
 use abi::hopabi::{
-    CTRL_RX_DOOR, CTRL_S2_TABLE, CTRL_SLOT, CTRL_SMP_FN, CTRL_SMP_G0, CTRL_SMP_MAIR, CTRL_SMP_MBOX,
+    CTRL_RX_DOOR, CTRL_S2_TABLE, CTRL_SMP_FN, CTRL_SMP_G0, CTRL_SMP_MAIR, CTRL_SMP_MBOX,
     CTRL_SMP_MP, CTRL_SMP_SP, CTRL_SMP_STUB, CTRL_SMP_TCR, CTRL_SMP_TTBR0, CTRL_SMP_VBAR,
-    CTRL_VEC_PA, RX_DOOR_ARMED,
+    CTRL_VEC_PA, CTRL_VMID, RX_DOOR_ARMED,
 };
 use dev::Pa;
 
@@ -328,7 +327,7 @@ pub(crate) fn check_parked(plan: &Plan) -> Result<(), Error> {
     for c in 1..=plan.app_cores() {
         let core = Core::new(c).ok_or(Error::Plan(abi::Error::OutOfPlan {
             index: c,
-            max: SLOT_CAP,
+            max: plan.app_cores(),
         }))?;
         let mbox = dev::read64(plan.park_mbox_pa(core).map_err(Error::Plan)?);
         if mbox > PARK_PARKED {
@@ -390,7 +389,7 @@ fn init_region(plan: &Plan, entry: Pa, park: Option<&[u8]>) -> Result<(), Error>
     for c in 0..=plan.app_cores() {
         let core = Core::new(c).ok_or(Error::Plan(abi::Error::OutOfPlan {
             index: c,
-            max: SLOT_CAP,
+            max: plan.app_cores(),
         }))?;
         let mb = plan.park_mbox_pa(core).map_err(Error::Plan)?;
         if park.is_none() {
@@ -402,14 +401,12 @@ fn init_region(plan: &Plan, entry: Pa, park: Option<&[u8]>) -> Result<(), Error>
     }
     // De ctx-staat van elke kooi expliciet Empty: de kern leest dit woord al
     // vóór de eerste build van dat slot, en verse DRAM is geen nul.
-    for s in 1..=plan.max_slots() {
-        let slot = Slot::new(s).ok_or(Error::Plan(abi::Error::OutOfPlan {
-            index: s,
-            max: SLOT_CAP,
-        }))?;
-        let block = plan.cage_table_pa(slot).map_err(Error::Plan)?;
-        dev::write64(block.add(CTX_OFF + CTX_STATE), CtxState::Empty.raw());
-        dev::write64(block.add(SMP_CTX_OFF + CTX_STATE), CtxState::Empty.raw());
+    // De ctx-blokken van de secundaire cores; die van de slots begint de
+    // bouw schoon (`stage2::build`), uit het kooi-geheugen.
+    for c in 2..=plan.app_cores() {
+        if let Some(ctx) = Core::new(c).and_then(|c| plan.smp_ctx_pa(c).ok()) {
+            dev::write64(ctx.add(CTX_STATE), CtxState::Empty.raw());
+        }
     }
     Ok(())
 }
@@ -417,24 +414,6 @@ fn init_region(plan: &Plan, entry: Pa, park: Option<&[u8]>) -> Result<(), Error>
 // ---------------------------------------------------------------------------
 // Contexten en cores.
 // ---------------------------------------------------------------------------
-
-/// De context-id van ctx-blok `ctx`, of `None` als `ctx` geen ctx-blok van
-/// dit plan is: 1..=`SLOT_CAP` is een kooi, erboven een secundaire core
-/// ([`Core::smp_context_id`]). De inverse van de rekensom van de switcher
-/// (`hopos_el2_ctx_of`).
-#[must_use]
-pub(crate) fn context_id(plan: &Plan, ctx: Pa) -> Option<u8> {
-    let off = ctx.0.checked_sub(plan.vec_base_pa().0)?;
-    let index = usize::try_from(off / CAGE_STRIDE).ok()?;
-    if index == 0 || index > plan.max_slots() {
-        return None;
-    }
-    match off % CAGE_STRIDE {
-        CTX_OFF => u8::try_from(index).ok(),
-        SMP_CTX_OFF => Core::new(index)?.smp_context_id(),
-        _ => None,
-    }
-}
 
 /// Wat mailbox-woord 0 van een core zegt.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -491,7 +470,6 @@ pub fn dispatch(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result
     if arg <= PARK_PARKED {
         return Err(Error::BadArg { arg });
     }
-    let id = context_id(plan, ctx).ok_or(Error::BadContext { pa: ctx.0 })?;
     let mb = plan.park_mbox_pa(core).map_err(Error::Plan)?;
     let was = dev::read64(mb.add(SCHED_MBOX_CTX));
     if was > PARK_PARKED {
@@ -502,8 +480,8 @@ pub fn dispatch(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result
     }
     dev::write64(mb.add(SCHED_CURSOR), 0);
     dev::write64(mb.add(SCHED_ROTOR), 0);
-    dev::write64(mb.add(SCHED_CURRENT), u64::from(id));
-    roster::reset(mb, Some(id));
+    dev::write64(mb.add(SCHED_CURRENT), ctx.0);
+    roster::reset(mb, Some(ctx))?;
     dev::push(mb, PARK_MBOX_LEN as usize);
     ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
     // Het doel vóór het startschot: woord 0 = arg maakt de core meteen
@@ -553,7 +531,6 @@ pub fn join(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result<Joi
     if arg <= PARK_PARKED {
         return Err(Error::BadArg { arg });
     }
-    let id = context_id(plan, ctx).ok_or(Error::BadContext { pa: ctx.0 })?;
     let mb = roster::sched(plan, core)?;
     if dev::read64(mb.add(SCHED_MBOX_CTX)) <= PARK_PARKED {
         return Ok(Join::Idle);
@@ -563,7 +540,7 @@ pub fn join(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result<Joi
     ctx_write(ctx, CTX_WAKE, 0);
     ctx_write(ctx, CTX_KICK_PENDING, 0);
     dev::mb();
-    roster::enlist(mb, ctx, id)?;
+    roster::enlist(mb, ctx)?;
     Ok(Join::Joined)
 }
 
@@ -579,8 +556,7 @@ pub fn join(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result<Joi
 /// keer: op de ingetrokken tabel faultt hij bij zijn eerste instructie, en
 /// is hij opnieuw dood.
 pub fn evict(plan: &Plan, core: Core, ctx: Pa) -> Result<bool, Error> {
-    let id = context_id(plan, ctx).ok_or(Error::BadContext { pa: ctx.0 })?;
-    let was = roster::remove(roster::sched(plan, core)?, id);
+    let was = roster::remove(roster::sched(plan, core)?, ctx);
     if matches!(
         ctx_state(ctx),
         Some(CtxState::BootPending | CtxState::Saved)
@@ -591,9 +567,10 @@ pub fn evict(plan: &Plan, core: Core, ctx: Pa) -> Result<bool, Error> {
 }
 
 /// Maakt het ctx-blok van de secundaire op `core` klaar voor een nieuwe
-/// levensduur van eenheid `unit` (`prepareSMPContexts`): gewist, de
-/// control-page van de eenheid (het fault-rapport en de wek-keten vinden
-/// hem hier), de eenheid zelf (tabel en VMID bij een hervatting), GEEN
+/// levensduur van de eenheid met VTTBR `vttbr` (`prepareSMPContexts`):
+/// gewist, de control-page van de eenheid (het fault-rapport en de
+/// wek-keten vinden hem hier), de eenheid zelf (tabel en VMID bij een
+/// hervatting), GEEN
 /// RX-peek (alleen de primaire leest de ring; een secundaire op elk frame
 /// hervatten is alleen maar een pingpong), en het wekdoel van zijn core.
 ///
@@ -604,14 +581,14 @@ pub fn evict(plan: &Plan, core: Core, ctx: Pa) -> Result<bool, Error> {
 pub fn prepare_secondary(
     plan: &Plan,
     core: Core,
-    unit: Slot,
+    vttbr: u64,
     ctrl: Pa,
     kick_target: u64,
 ) -> Result<Pa, Error> {
     let ctx = plan.smp_ctx_pa(core).map_err(Error::Plan)?;
     dev::clear(ctx, CTX_LEN as usize);
     ctx_write(ctx, CTX_CTRL_PA, ctrl.0);
-    ctx_write(ctx, CTX_UNIT_SLOT, unit.get() as u64);
+    ctx_write(ctx, CTX_VTTBR, vttbr);
     ctx_write(ctx, CTX_RING_HEAD_PA, 0);
     ctx_write(ctx, CTX_KICK_TARGET, kick_target);
     ctx_write(ctx, CTX_STATE, CtxState::Empty.raw());
@@ -656,14 +633,14 @@ pub fn kick(flavor: Flavor, mpidr: u64) {
     }
 }
 
-/// De hard-kill van `slot`: nult zijn stage-2-tabellen en invalideert de
+/// De hard-kill van het slot met kooi-blok `block`: nult zijn
+/// stage-2-tabellen en invalideert de
 /// TLB's ([`stage2::revoke`]). Elke core van het slot (een SMP-app deelt
 /// tabel en VMID) faultt op zijn volgende vertaalde toegang naar de
 /// switcher, die hem dood meldt en doorroteert; de SEV aan het eind wekt
 /// ook de WFE-slapers (19-07).
-pub fn revoke(plan: &Plan, slot: Slot) -> Result<(), Error> {
-    stage2::revoke(plan.cage_table_pa(slot).map_err(Error::Plan)?);
-    Ok(())
+pub fn revoke(block: Pa) {
+    stage2::revoke(block);
 }
 
 /// Publiceert een node-owned SMP-startcontext op `dst` (`PrepareSMP`).
@@ -689,7 +666,7 @@ pub fn prepare_smp(dst: Pa, src: Pa, table: u64, vmid: u64, mailbox: Pa, vectors
         dev::write64(dst.add(off), dev::read64(src.add(off)));
     }
     dev::write64(dst.add(CTRL_S2_TABLE), table);
-    dev::write64(dst.add(CTRL_SLOT), vmid);
+    dev::write64(dst.add(CTRL_VMID), vmid);
     dev::write64(dst.add(CTRL_SMP_MBOX), mailbox.0);
     dev::write64(dst.add(CTRL_VEC_PA), vectors.0);
     dev::push(dst, 256);

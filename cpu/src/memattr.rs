@@ -45,7 +45,7 @@
 //! `dev` woordgewijs kopiëren, wat op Normal-geheugen correct is, alleen
 //! niet zo snel als het kan.
 
-use crate::boot::{ATTR_NORMAL, ATTR_NORMAL_NC};
+use crate::boot::{ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC};
 use bounded::BoundedVec;
 use core::fmt;
 use dev::Pa;
@@ -74,6 +74,10 @@ pub enum Attr {
     NormalWb,
     /// Normal, non-cacheable: write-combine.
     NormalNc,
+    /// Device-nGnRnE: wat de boot-map buiten de eigen RAM geeft. Voor het
+    /// kooi-geheugen uit de pool (`kern::cageheap`): de app-cores lezen het
+    /// op EL2 met de MMU uit, dus de kern mag het niet gecached zien.
+    Device,
 }
 
 impl Attr {
@@ -86,6 +90,7 @@ impl Attr {
         let idx = match self {
             Self::NormalWb => ATTR_NORMAL,
             Self::NormalNc => ATTR_NORMAL_NC,
+            Self::Device => ATTR_DEVICE,
         };
         crate::boot::block_e2h(pa, idx, e2h) | crate::boot::xn(e2h)
     }
@@ -219,6 +224,14 @@ pub fn normal_wb(va: u64, size: u64) -> Result {
 /// aanroep schrijft dezelfde entries. Het venster blijft zo tot de reboot.
 pub fn normal_nc(va: u64, size: u64) -> Result {
     arch::apply(va, size, Attr::NormalNc)
+}
+
+/// Zet `[va, va+size)` in de eigen map op Device-nGnRnE: de terugweg van
+/// [`normal_wb`], voor een stuk van de pool dat de kooi als kooi-geheugen
+/// gebruikt. De aanroeper veegt het venster eerst uit de caches (een vuile
+/// regel van een vorige huurder klobbert anders later de verse bytes).
+pub fn device(va: u64, size: u64) -> Result {
+    arch::apply(va, size, Attr::Device)
 }
 
 /// Het venster, getoetst: `(lo, hi)` in 2 MB-blokken, of de weigering.

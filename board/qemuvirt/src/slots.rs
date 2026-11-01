@@ -70,7 +70,6 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         device_window: DEVICE_WINDOW,
         boot_scratch_pa: BOOT_SCRATCH_PA,
         pool: pool_of(POOL)?,
-        max_slots: (app_cores + 1).max(abi::layout::SLOTS_DEFAULT),
         app_cores,
         os_core,
         ..PlanSpec::default()

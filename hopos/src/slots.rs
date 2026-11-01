@@ -293,7 +293,7 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 pub(crate) fn start(
     exec: &'static Executor,
     role: Result<StagedRole, u64>,
-    adopt: Option<Vec<kern::slots::SlotState>>,
+    adopt: Option<(Vec<kern::slots::SlotState>, Vec<kern::cageheap::Chunk>)>,
     cfg: NodeCfg<'static>,
     system: &'static crate::KernSystem,
 ) {
@@ -301,7 +301,7 @@ pub(crate) fn start(
     // FLIP: een geadopteerde Hop zit waar hij zat, met zijn groep en core.
     let carried = adopt
         .as_ref()
-        .and_then(|v| v.iter().find(|st| st.slot == HOP_SLOT));
+        .and_then(|(v, _)| v.iter().find(|st| st.slot == HOP_SLOT));
     init_hop_group(&cfg, carried);
     let hop_core = carried.map(|st| st.core);
     let plan = match os_plan() {
@@ -324,15 +324,18 @@ pub(crate) fn start(
             }
         },
     };
-    for st in adopt.iter().flatten() {
+    for st in adopt.iter().flat_map(|(v, _)| v) {
         let r = Slot::new(st.slot).map_or(Err(kern::cage::CageError { code: 0 }), |s| {
             // De SMP-breedte mee, anders vindt een revoke de secundaires
-            // van een SMP-app niet.
+            // van een SMP-app niet; het kooi-blok en de VMID van de vorige
+            // kern, want die liggen niet meer vast in het plan.
             cage.adopt_slot(
                 s,
                 Region::new(st.part_base, st.part_size),
                 st.core,
                 st.cores,
+                st.cage_block,
+                st.vmid,
             )
         });
         if let Err(e) = r {
@@ -421,8 +424,8 @@ pub(crate) fn start(
     ));
     // Eerst alle eigendomsclaims terug, dan pas verzoeken: vóór de actor
     // zijn eerste bericht leest. De poorten pas als het net luistert.
-    if let Some(states) = &adopt {
-        match lc.adopt(states) {
+    if let Some((states, chunks)) = &adopt {
+        match lc.adopt(states, chunks) {
             Ok(n) => println!(
                 "HOPOS_FLIP_ADOPT {n} of {} resident(s) adopted, ownership restored before the first request",
                 states.len()
@@ -1362,9 +1365,7 @@ async fn place(
 
 /// Eén meetregel: app-status, ctx-staat, mailbox en heartbeat.
 fn probe(plan: &abi::layout::Plan, slot: Slot, core: usize, st: &SlotStatus, dt: u64) {
-    let ctx = abi::layout::Slot::new(slot.get())
-        .and_then(|s| plan.ctx_pa(s).ok())
-        .and_then(el2::ctx_state);
+    let ctx = crate::glue::ctx_of(slot).and_then(el2::ctx_state);
     let mbox = abi::layout::Core::new(core).and_then(|c| arch::core_state(plan, c).ok());
     println!(
         "slot {slot}: +{} ms app={} ctx={:?} mbox={:?} beat={} core_on={}",

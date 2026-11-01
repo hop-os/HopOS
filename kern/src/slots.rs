@@ -50,6 +50,7 @@
 //! het ijzer niet op, dan gaat het terug ([`Request::ReleaseDevice`]).
 
 use crate::cage::{Cage, Console, Cores, PortError, Power, Status, Timer};
+use crate::cageheap::{CageHeap, Chunk, Lend};
 use crate::grants::{Grants, NoGrants};
 use crate::kernflip::{MAX_FLIP_JOB, MAX_FLIP_MOUNTS, MAX_FLIP_PATH, MAX_FLIP_PORTS};
 use crate::partmem::{Owned, Partition, PartitionPool, Stopped};
@@ -327,7 +328,7 @@ pub enum Response {
     /// De slots van [`Request::Occupied`].
     Occupied(Vec<Slot>),
     /// De bewoners voor het handoff-blob van de kern-flip.
-    Snapshot(Vec<SlotState>),
+    Snapshot(Vec<SlotState>, Vec<Chunk>),
     /// De env van de start, met wat de grant-aanbieder erbij zette.
     Env(Vec<u8>),
     /// Het blok van een [`Request::ReserveDevice`].
@@ -815,6 +816,11 @@ pub struct SlotState {
     pub ports: Vec<u16>,
     /// De volumes.
     pub mounts: Vec<Mount>,
+    /// De PA van zijn kooi-blok (stage-2-tabellen en ctx-blok), uit het
+    /// kooi-geheugen.
+    pub cage_block: u64,
+    /// Zijn VMID (op riscv de ASID).
+    pub vmid: u32,
 }
 
 /// De lifecycle-actor. Eén taak; hij bezit de pool, de plaatsing, de
@@ -825,6 +831,9 @@ pub struct Lifecycle<'s, C, K, T, L, G = NoGrants> {
     timer: T,
     log: L,
     parts: PartitionPool,
+    /// Het kooi-geheugen (de blokken van de kooi buiten de partities); het
+    /// komt uit `parts` en gaat erin terug.
+    heap: CageHeap,
     places: Places,
     residents: SlotVec<Resident>,
     svc: &'s Servicers,
@@ -856,6 +865,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             timer,
             log,
             parts,
+            heap: CageHeap::new(),
             places,
             residents: SlotVec::new(),
             svc,
@@ -894,7 +904,9 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                 self.smp(slot);
                 Ok(Response::Done)
             }
-            Request::Snapshot => self.snapshot().map(Response::Snapshot),
+            Request::Snapshot => self
+                .snapshot()
+                .and_then(|s| Ok(Response::Snapshot(s, try_vec(self.heap.chunks())?))),
             Request::ReserveDevice { size, what } => {
                 self.reserve_device(size, what).map(Response::Device)
             }
@@ -1064,7 +1076,12 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             self.abort(grant);
             return Err(e);
         }
-        if let Err(e) = self.cage.build(slot, region, entry, core, span) {
+        let mut mem = Lend {
+            heap: &mut self.heap,
+            pool: &mut self.parts,
+            map: C::MAP_CAGE,
+        };
+        if let Err(e) = self.cage.build(slot, region, entry, core, span, &mut mem) {
             // Nooit gedispatcht: bevestigde afwezigheid van uitvoering. De
             // poorten gingen al open; die horen bij deze start en gaan dicht.
             if !ports.is_empty() {
@@ -1224,9 +1241,20 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         }
         let slot = grant.slot();
         self.grants.release(slot);
+        self.release_cage(slot);
         grant.part.abandon(&mut self.parts);
         self.places.release(slot);
         self.residents.remove(slot);
+    }
+
+    /// Het kooi-geheugen van `slot` terug (de kooi weet wat hij nam).
+    fn release_cage(&mut self, slot: Slot) {
+        let mut mem = Lend {
+            heap: &mut self.heap,
+            pool: &mut self.parts,
+            map: C::MAP_CAGE,
+        };
+        self.cage.release(slot, &mut mem);
     }
 
     /// De env-haak van een lopende start (Go: `prepareGrantedEnv`): de
@@ -1412,8 +1440,9 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             return Ok(());
         };
         // Pas na de bevestigde stop gaat de device-grant terug (Go:
-        // `grantRelease` in `releaseSlot`).
+        // `grantRelease` in `releaseSlot`), en het kooi-geheugen.
         self.grants.release(slot);
+        self.release_cage(slot);
         if let Held::Running(p) = r.held {
             p.release(&mut self.parts, Stopped::confirmed(slot))?;
         }
@@ -1526,10 +1555,13 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                 return Err(Error::NotLive { slot: slot.get() });
             }
             let Some(r) = r else { continue };
+            let (cage_block, vmid) = self.cage.carry(slot);
             let mut st = SlotState {
                 slot: slot.get(),
                 part_base: region.base,
                 part_size: region.size,
+                cage_block,
+                vmid,
                 core: r.core.get(),
                 cores: r.span,
                 job: try_vec(&r.job)?,
@@ -1565,8 +1597,20 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
 
     /// Herstelt EERST alle eigendomsclaims, daarna de diensten (E8). Een
     /// onbruikbare overdracht is een fout vóór er iets geclaimd is.
-    pub fn adopt(&mut self, states: &[SlotState]) -> Result<usize> {
+    pub fn adopt(&mut self, states: &[SlotState], cage: &[Chunk]) -> Result<usize> {
         validate_adoption(states, &self.cores, &self.places, &self.parts)?;
+        // Het kooi-geheugen eerst: zijn chunks uit de pool, terug op Device
+        // in de map van deze kern, met de bezetting van de vorige.
+        for c in cage {
+            self.parts.adopt_device(c.base, GRAIN)?;
+            if !(C::MAP_CAGE)(Region::new(c.base, GRAIN), true) {
+                return Err(Error::Range {
+                    base: c.base,
+                    size: GRAIN,
+                });
+            }
+        }
+        self.heap.adopt(cage)?;
         for st in states {
             let slot = Slot::new(st.slot).ok_or(Error::SlotRange {
                 slot: st.slot,
@@ -1797,6 +1841,7 @@ mod grant_tests;
 pub(crate) mod tests {
     use super::*;
     use crate::cage::CageError;
+    use crate::cageheap::CageMem;
     use crate::partmem::Geometry;
     use crate::pool::tests::FakeCores;
     use crate::testutil::{FakeTimer, block_on, join2};
@@ -1827,6 +1872,8 @@ pub(crate) mod tests {
         pub(crate) revoked: [bool; FAKE_SLOTS],
         pub(crate) cleared: Vec<(u64, u64)>,
         pub(crate) built: Vec<(usize, Region, usize, usize)>,
+        /// De kooi-blokken die de bouw nam, per slot.
+        pub(crate) blocks: Vec<(usize, u64)>,
         pub(crate) dispatched: Vec<(usize, usize)>,
         pub(crate) secondaries: Vec<(usize, usize)>,
         pub(crate) fail_dispatch: bool,
@@ -1870,6 +1917,7 @@ pub(crate) mod tests {
                 revoked: [false; FAKE_SLOTS],
                 cleared: Vec::new(),
                 built: Vec::new(),
+                blocks: Vec::new(),
                 dispatched: Vec::new(),
                 secondaries: Vec::new(),
                 fail_dispatch: false,
@@ -1902,12 +1950,28 @@ pub(crate) mod tests {
             _: u64,
             first: Core,
             cores: usize,
+            mem: &mut dyn CageMem,
         ) -> core::result::Result<(), CageError> {
             if self.fail_build {
                 return Err(CageError { code: 7 });
             }
+            // Zoals de echte kooi: een kooi-blok uit het kooi-geheugen.
+            let block = mem.alloc(1).map_err(|_| CageError { code: 9 })?;
+            self.blocks.push((slot.get(), block));
             self.built.push((slot.get(), part, first.get(), cores));
             Ok(())
+        }
+        fn release(&mut self, slot: Slot, mem: &mut dyn CageMem) {
+            if let Some(i) = self.blocks.iter().position(|b| b.0 == slot.get()) {
+                let (_, block) = self.blocks.swap_remove(i);
+                mem.free(block, 1);
+            }
+        }
+        fn carry(&self, slot: Slot) -> (u64, u32) {
+            self.blocks
+                .iter()
+                .find(|b| b.0 == slot.get())
+                .map_or((0, 0), |b| (b.1, slot.get() as u32))
         }
         fn dispatch(&mut self, slot: Slot, core: Core) -> core::result::Result<(), CageError> {
             self.dispatched.push((slot.get(), core.get()));
@@ -2039,8 +2103,10 @@ pub(crate) mod tests {
         cores: usize,
         grants: G,
     ) -> Actor<'s, G> {
+        // De pool plus één chunk voor het kooi-geheugen: een toets die de
+        // pool precies vult met partities, vult hem zo nog steeds precies.
         let parts = PartitionPool::new(
-            &[Region::new(0x8000_0000, pool_mib * MIB)],
+            &[Region::new(0x8000_0000, pool_mib * MIB + GRAIN)],
             Region::default(),
             Geometry::FLAT,
         )
@@ -2168,7 +2234,7 @@ pub(crate) mod tests {
     /// De adoptie van kern B, met het vertrek van elke servicer klaar zoals
     /// bij [`start`]: de servicer-taken draait de toets niet.
     pub(crate) fn adopt<G: Grants>(a: &mut Actor<'_, G>, states: &[SlotState]) -> Result<usize> {
-        let n = a.adopt(states)?;
+        let n = a.adopt(states, &[])?;
         for st in states {
             a.svc.ctl(s(st.slot)).unwrap().gone.set();
         }
@@ -2801,7 +2867,7 @@ pub(crate) mod tests {
         let mut a = actor(&svc, &con, Obey::Exit, 256, 4);
         let mut states = [st(1, 3, 2, 0x8000_0000), st(2, 1, 1, 0x8200_0000)];
         states[1].ports = vec![80];
-        assert_eq!(a.adopt(&states).unwrap(), 2);
+        assert_eq!(a.adopt(&states, &[]).unwrap(), 2);
         // De NAT van de nieuwe kern is leeg: de poorten gaan open als het
         // net luistert, alleen slot 2 had er.
         assert!(a.cage.published.is_empty());
@@ -2852,7 +2918,7 @@ pub(crate) mod tests {
         // De nieuwe kern.
         let (svc2, con2) = (Servicers::new(), FakeConsole::default());
         let mut b = actor(&svc2, &con2, Obey::Exit, 256, 3);
-        b.adopt(&states).unwrap();
+        b.adopt(&states, &[]).unwrap();
         assert_eq!(start(&mut b, 3, 8, 1), Ok(()));
         assert_eq!(b.places.placement_of(s(3)).unwrap().0.get(), 3);
         assert!(
@@ -2884,7 +2950,7 @@ pub(crate) mod tests {
 
         let (svc2, con2) = (Servicers::new(), FakeConsole::default());
         let mut b = actor(&svc2, &con2, Obey::Exit, 256, 3);
-        b.adopt(&states).unwrap();
+        b.adopt(&states, &[]).unwrap();
         assert_eq!(svc2.with_mounts(s(2), <[Mount]>::to_vec), Some(vec![vol]));
         assert!(con2.saw("slot 2: 1 volume(s) mounted: /data -> /volumes/demo HOPOS_SLOT_MOUNTS"));
     }

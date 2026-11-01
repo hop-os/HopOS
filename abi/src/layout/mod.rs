@@ -8,10 +8,13 @@
 //!   geen enkel absoluut adres. Deze indeling wijzigen is de app-ABI breken;
 //!   daarom staat er een versie op ([`crate::ABI_VERSION`]).
 //! - **Het PA-plan** ([`Plan`]): waar de kern zijn éígen structuren fysiek
-//!   legt: de partitie-pool waar slots uit gesneden worden, de
-//!   stage-2-tabellen met hun ctx-blokken en park-mailboxen, de
-//!   boot-scratch, en de control-pages van de eigen node-cores (die hebben
-//!   geen partitie).
+//!   legt: de partitie-pool waar slots uit gesneden worden, blok 0 van de
+//!   kooi (de vectoren, de park-mailboxen, de switch-code) met de ctx-blokken
+//!   van de cores, de boot-scratch, en de control-pages van de eigen
+//!   node-cores (die hebben geen partitie). Alles per core: cores zijn vast.
+//!   Wat per slot is (zijn kooi-blok met stage-2-tabellen en ctx-blok), komt
+//!   bij de plaatsing uit de pool en gaat bij de stop terug: er is geen
+//!   maximum aantal slots.
 //!
 //! Het canonieke linkadres ([`LINK_BASE`]) hoort bij de MAP-helft van de
 //! kooi: die legt elke partitie op hetzelfde adres, zodat één artifact in
@@ -64,19 +67,6 @@ pub const USB_DMA_SIZE: u64 = 0x0020_0000;
 /// venster loopt tot de rand van het IPA-regime (`hopos::cage::link_window`).
 /// Er is geen venster per slot: elke kooi ziet hetzelfde beeld.
 pub const SLOTS_BASE: u64 = 0x5000_0000;
-/// De compile-time bovengrens op het aantal slots.
-///
-/// 128 dekt de Ampere Altra (127 app-cores). De per-slot plan-regio's
-/// (control-pages van node-cores, kooi-blokken) worden voor
-/// [`PlanSpec::max_slots`] gereserveerd; een board zet die lager.
-pub const SLOT_CAP: usize = 128;
-/// De kooi-capaciteit die een board standaard neemt: kooien tellen niet
-/// mee als cores (meerdere kooien delen één core, Go: `MaxSlots` los van
-/// `NumAppCores`), dus een board met één app-core heeft toch plaats voor
-/// 32 apps. Elke kooi kost een servicer-taak, een control-page en een
-/// kooi-blok; een board met een kleine staart (LicheeRV, Radxa) zet het
-/// lager, een board met meer app-cores dan dit neemt die plus één.
-pub const SLOTS_DEFAULT: usize = 32;
 /// De basis waartegen elk app-image gelinkt is ([`SLOTS_BASE`]).
 /// [`crate::place::build`] toetst segmenten tegen `[LINK_BASE, LINK_BASE +
 /// app_ram)`.
@@ -84,8 +74,6 @@ pub const LINK_BASE: u64 = SLOTS_BASE;
 /// Waar de tekst van een image binnen het linkvenster begint. De eerste
 /// 64 KB draagt de stage-1-tabellen van de app-runtime.
 pub const LINK_TEXT_OFF: u64 = 0x10000;
-
-const _: () = assert!(SLOT_CAP <= u8::MAX as usize);
 
 /// De IPA-basis van de oude control-regio. Wat ervan over is, is de
 /// boot-scratch: het énige IPA-venster buiten de partitie dat een slot nog
@@ -342,23 +330,24 @@ impl fmt::Display for Slot {
     }
 }
 
-/// Een fysieke core-index in de plan-tabellen: 0 tot en met [`SLOT_CAP`]
-/// (het plan reserveert `max_slots + 1` blokken).
+/// Een logische core-index in de plan-tabellen: 0 (de OS-core) tot en met
+/// [`CORES_MAX`] min één. Cores zijn vast: zoveel sched-blokken passen in
+/// blok 0 van de kooi, een grens van die indeling en niet van de slots.
 ///
 /// # Invariants
 ///
-/// `self.0 <= SLOT_CAP`.
+/// `self.0 < CORES_MAX`.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Core(u8);
 
 impl Core {
-    /// Core `i`, of `None` boven [`SLOT_CAP`].
+    /// Core `i`, of `None` vanaf [`CORES_MAX`].
     #[must_use]
     pub const fn new(i: usize) -> Option<Core> {
-        if i > SLOT_CAP {
+        if i >= CORES_MAX {
             return None;
         }
-        // INVARIANT: zojuist begrensd.
+        // INVARIANT: zojuist begrensd; CORES_MAX past in een u8.
         Some(Core(i as u8))
     }
 
@@ -366,18 +355,6 @@ impl Core {
     #[must_use]
     pub const fn get(self) -> usize {
         self.0 as usize
-    }
-
-    /// De context-id van deze core als secundaire van een SMP-app: 129 tot
-    /// en met 255, zodat hij in een bewonersbyte ([`SchedBlock::list`])
-    /// naast de kooi-id's 1..=128 past. `None` voor core 0 en 1: die zijn
-    /// nooit een secundaire.
-    #[must_use]
-    pub const fn smp_context_id(self) -> Option<u8> {
-        if self.0 < 2 {
-            return None;
-        }
-        Some((SLOT_CAP as u8 - 1) + self.0)
     }
 }
 
@@ -388,19 +365,22 @@ impl fmt::Display for Core {
 }
 
 // ---------------------------------------------------------------------------
-// De kooi-regio ([`Plan`]): per slot een blok van CAGE_STRIDE.
+// De kooi: blok 0 en de ctx-blokken van de cores in het plan, een blok per
+// slot uit de pool.
 // ---------------------------------------------------------------------------
 
-/// De maat van één kooi-blok. Blok 0 draagt de gedeelde EL2-vectoren van de
-/// app-cores (+0, 2 KB), de parkeerlus, de sched-blokken en de
-/// switch-code-kopie; blok i draagt de stage-2-tabellen van slot i (+0 tot
-/// [`CTX_OFF`]), zijn ctx-blok en het ctx-blok van secundaire core i.
+/// De maat van één kooi-blok. Blok 0 (in het plan) draagt de gedeelde
+/// EL2-vectoren van de app-cores (+0, 2 KB), de parkeerlus, de sched-blokken
+/// en de switch-code-kopie; daarachter liggen de ctx-blokken van de
+/// secundaire cores ([`CORE_CTX_OFF`]). Het blok van een slot komt bij de
+/// plaatsing uit de pool (het kooi-geheugen van de kern, `kern::cageheap`)
+/// en draagt zijn stage-2-tabellen (+0 tot [`CTX_OFF`]) en zijn ctx-blok.
 pub const CAGE_STRIDE: u64 = 0x10000;
 /// De parkeerlus in blok 0. Een gestopte app-core gaat niet terug naar de
 /// firmware (PSCI CPU_OFF is op de Pi 5-stockfirmware een eenrichtingsdeur,
 /// gemeten 10-07) maar parkeert op EL2 in een WFE-lus op zijn mailbox.
 pub const PARK_CODE_OFF: u64 = 0x1000;
-/// Het eerste sched-blok in blok 0; `SLOT_CAP + 1` blokken van
+/// Het eerste sched-blok in blok 0; [`CORES_MAX`] blokken van
 /// [`PARK_MBOX_LEN`], één per core.
 pub const PARK_MBOX_OFF: u64 = 0x1100;
 /// De maat van een sched-blok: de park-mailbox plus de staat van de
@@ -411,19 +391,47 @@ pub const PARK_MBOX_LEN: u64 = 256;
 /// om bij een kern-flip het oude kern-venster te kunnen verlaten.
 pub const SWITCH_CODE_OFF: u64 = 0xA000;
 /// De harde bovengrens van de switch-code-kopie: de rest van blok 0. Liever
-/// hard bij boot dan stil in het tabelblok van slot 1 schrijven.
+/// hard bij boot dan stil in de ctx-blokken van de cores schrijven.
 pub const SWITCH_CODE_MAX: u64 = CAGE_STRIDE - SWITCH_CODE_OFF;
-/// Het ctx-blok van slot i binnen kooi-blok i.
+/// Hoeveel cores (de OS-core inbegrepen) het plan kan dragen: zoveel
+/// sched-blokken passen tussen de parkeerlus en de switch-code. 143: ruim
+/// boven de Altra (128 app-cores). Een grens van de indeling, niet van de
+/// slots: cores zijn vast en worden gedeeld.
+pub const CORES_MAX: usize = ((SWITCH_CODE_OFF - PARK_MBOX_OFF) / PARK_MBOX_LEN) as usize;
+/// Het ctx-blok van een slot binnen zijn kooi-blok: na de zes
+/// tabelpagina's, met de FP-kier erachter ([`CTX_FP_END`]), op één pagina.
 pub const CTX_OFF: u64 = 0x6000;
-/// Het ctx-blok van secundaire core i binnen kooi-blok i: los van de
-/// kooi-contexten, zonder de administratie te vergroten.
-pub const SMP_CTX_OFF: u64 = 0x6800;
+/// Waar in het plan de ctx-blokken van de cores beginnen (een secundaire
+/// core van een SMP-app draait daarin): direct na blok 0, [`CTX_LEN`] per
+/// core. Een secundaire heeft geen FP-kier.
+pub const CORE_CTX_OFF: u64 = CAGE_STRIDE;
+
+/// De maat van de kooi-regio in het plan voor `app_cores` app-cores: blok 0
+/// en de ctx-blokken van alle cores, op een hele [`CAGE_STRIDE`].
+#[must_use]
+pub const fn cage_len(app_cores: usize) -> u64 {
+    CORE_CTX_OFF + ((app_cores as u64 + 1) * CTX_LEN).next_multiple_of(CAGE_STRIDE)
+}
+
+/// De maat van de control-pages van de node-cores voor `app_cores`
+/// app-cores: één pagina per core.
+#[must_use]
+pub const fn node_ctrl_len(app_cores: usize) -> u64 {
+    (app_cores as u64 + 1) * CTRL_STRIDE
+}
 
 const _: () = assert!(PARK_CODE_OFF >= 0x800 && PARK_CODE_OFF + 0x100 <= PARK_MBOX_OFF);
-const _: () = assert!(PARK_MBOX_OFF + (SLOT_CAP as u64 + 1) * PARK_MBOX_LEN == 0x9200);
-const _: () = assert!(0x9200 <= SWITCH_CODE_OFF);
-const _: () = assert!(CTX_OFF + CTX_LEN <= SMP_CTX_OFF);
-const _: () = assert!(SMP_CTX_OFF + CTX_LEN <= CAGE_STRIDE);
+const _: () = assert!(PARK_MBOX_OFF + CORES_MAX as u64 * PARK_MBOX_LEN <= SWITCH_CODE_OFF);
+const _: () = assert!(CORES_MAX <= u8::MAX as usize && CORES_MAX >= 129);
+const _: () = assert!(CTX_FP_END <= 0x1000);
+
+/// De bewonerslijst van een core ([`SCHED_LIST_PA`]): een array in het
+/// kooi-geheugen, buiten het sched-blok, zodat hij met de bewoners kan
+/// groeien. Woord 0 is de capaciteit in ingangen; daarna de ingangen, elk
+/// de PA van een ctx-blok (0 = een gat).
+pub const ROSTER_CAP: u64 = 0;
+/// De eerste ingang van een bewonerslijst.
+pub const ROSTER_ENTRIES: u64 = 8;
 
 // ---------------------------------------------------------------------------
 // Het sched-blok: één per core, 256 bytes.
@@ -436,12 +444,11 @@ pub const SCHED_MBOX_PC: u64 = 8;
 /// Vier werkregisters van de getrapte app (ARM x0..x3 in de vector-thunks;
 /// RISC-V x5..x7).
 pub const SCHED_SCRATCH: u64 = 16;
-/// Welke context er nu draait (een slot, of een SMP-context boven
-/// [`SLOT_CAP`]; 0 = geen). Op beide architecturen: de dispatch en de
-/// OS-core schrijven het, de switcher leest er bij een yield de bewoner
-/// uit (op ARM niet uit het VMID, dat een secundaire core met zijn
-/// primaire deelt, 03-09), en de kern leest er de vasthouder van een core
-/// uit (`hopos/src/kooi.rs` `holder`).
+/// Welke context er nu draait: de PA van zijn ctx-blok (0 = geen). Op beide
+/// architecturen: de dispatch en de OS-core schrijven het, de switcher
+/// leest er bij een yield de bewoner uit (op ARM niet uit het VMID, dat een
+/// secundaire core met zijn primaire deelt, 03-09), en de kern leest er de
+/// vasthouder van een core uit (`hopos/src/kooi.rs` `holder`).
 pub const SCHED_CURRENT: u64 = 48;
 /// De laatst gedispatchte lijst-index. Alleen de RISC-V-switcher leest
 /// hem; de dispatch zet hem op beide architecturen op 0 bij een start. Een
@@ -461,8 +468,11 @@ pub const SCHED_OS_BELL: u64 = 72;
 pub const SCHED_CURSOR: u64 = 80;
 /// De lijstlengte (monotoon; 0-bytes zijn gaten).
 pub const SCHED_COUNT: u64 = 88;
-/// De bewonerslijst: [`SLOT_CAP`] bytes met context-id's.
-pub const SCHED_LIST: u64 = 96;
+/// De bewonerslijst: de PA van een array in het kooi-geheugen
+/// ([`ROSTER_CAP`], [`ROSTER_ENTRIES`]); 0 = nog geen lijst (dan is de
+/// lengte 0). De array groeit door een nieuwe; een oude blijft bestaan, dus
+/// een lezer die hem nog vasthoudt, leest nooit vrijgegeven geheugen.
+pub const SCHED_LIST_PA: u64 = 96;
 /// De fysieke basis van de kooi-regio, zodat de switcher ctx, VTTBR en
 /// park afleidt.
 pub const SCHED_S2_PA: u64 = 224;
@@ -512,8 +522,9 @@ pub struct SchedBlock {
     pub cursor: u64,
     /// De lijstlengte.
     pub count: u64,
-    /// De bewonerslijst.
-    pub list: [u8; SLOT_CAP],
+    /// De bewonerslijst ([`SCHED_LIST_PA`]).
+    pub list_pa: u64,
+    _pad: [u64; 15],
     /// De kooi-regio-PA.
     pub s2_pa: u64,
     /// De `mtimecmp`-PA.
@@ -534,7 +545,7 @@ const _: () = assert!(offset_of!(SchedBlock, tick_ticks) as u64 == SCHED_TICK_TI
 const _: () = assert!(offset_of!(SchedBlock, os_bell) as u64 == SCHED_OS_BELL);
 const _: () = assert!(offset_of!(SchedBlock, cursor) as u64 == SCHED_CURSOR);
 const _: () = assert!(offset_of!(SchedBlock, count) as u64 == SCHED_COUNT);
-const _: () = assert!(offset_of!(SchedBlock, list) as u64 == SCHED_LIST);
+const _: () = assert!(offset_of!(SchedBlock, list_pa) as u64 == SCHED_LIST_PA);
 const _: () = assert!(offset_of!(SchedBlock, s2_pa) as u64 == SCHED_S2_PA);
 const _: () = assert!(offset_of!(SchedBlock, clint_pa) as u64 == SCHED_CLINT_PA);
 const _: () = assert!(offset_of!(SchedBlock, sleep_cap) as u64 == SCHED_SLEEP_CAP);
@@ -587,10 +598,15 @@ pub const CTX_KICK_TARGET: u64 = 480;
 pub const CTX_KICK_NONE: u64 = 1 << 63;
 /// Hoe vaak een sibling deze bewoner via HVC #4 wekte.
 pub const CTX_WAKES: u64 = 488;
-/// Het slot van de eenheid waar deze bewoner bij hoort (zijn eigen, of dat
-/// van de primaire). Door de kern gezet vóór de dispatch; buiten elke kooi,
-/// dus niet te vervalsen.
-pub const CTX_UNIT_SLOT: u64 = 496;
+/// ARM: de VTTBR_EL2 van de eenheid waar deze bewoner bij hoort (zijn eigen
+/// L1 en VMID, of die van de primaire). Door de kern gezet vóór de
+/// dispatch; buiten elke kooi, dus niet te vervalsen. De VMID deelt de kern
+/// bij de plaatsing uit (er zijn er zoveel als het ijzer heeft), dus de
+/// switcher rekent hem niet meer uit een slotnummer.
+pub const CTX_VTTBR: u64 = 496;
+/// RISC-V: de ASID van deze bewoner op het hart van de kern (0 = geen; dan
+/// een flush per wissel). Door de kern gezet vóór de dispatch.
+pub const CTX_ASID: u64 = 504;
 /// De intrekking door de kern (RISC-V): niet-nul is "beëindig bij de eerste
 /// gelegenheid". Eén schrijver (de kern) en een eigen cacheline, want de
 /// intrekking komt terwijl de bewoner leeft en de switcher in regel 0
@@ -606,6 +622,9 @@ pub const CTX_RING_HEAD_PA: u64 = 520;
 pub const CTX_KICK_PENDING: u64 = 536;
 /// Het entry-argument van een node-core, los van de control-page.
 pub const CTX_BOOT_ARG: u64 = 544;
+/// ARM, de OS-core: de luie FP van deze bewoner (`cpu::el2::oscore`), drie
+/// bits. Alleen de kern schrijft en leest hem.
+pub const CTX_FP_BITS: u64 = 552;
 /// De vertrouwde, circulaire link naar het ctx-blok van de volgende sibling;
 /// nooit door de app te schrijven.
 pub const CTX_NEXT_PA: u64 = 576;
@@ -615,8 +634,8 @@ pub const CTX_SMP: u64 = 768;
 /// De maat van het hele ctx-blok. FP staat er bewust niet in: de laag die
 /// de kern bezit draait met de MMU uit en een SIMD-store naar Device faultt.
 pub const CTX_LEN: u64 = 1024;
-/// De FP-registers van een bewoner, in de kier achter het ctx-blok (vóór
-/// [`SMP_CTX_OFF`]). Alleen voor kooi-contexten: een secundair ctx-blok
+/// De FP-registers van een bewoner, in de kier achter het ctx-blok, op de
+/// pagina van het ctx-blok. Alleen voor kooi-contexten: een secundair ctx-blok
 /// heeft deze kier niet.
 ///
 /// riscv64: f0..f31 en `fcsr`, 33 woorden. De riscv-switcher en de
@@ -629,7 +648,7 @@ pub const CTX_LEN: u64 = 1024;
 /// GP-registers, want ook deze kier is op sommige borden Device. De
 /// switcher van de app-cores wisselt alleen op een yield en bewaart geen FP.
 pub const CTX_FPRS: u64 = CTX_LEN;
-const _: () = assert!(CTX_OFF + CTX_FPRS + 33 * 8 <= SMP_CTX_OFF);
+const _: () = assert!(CTX_FPRS + 33 * 8 <= 0x1000);
 /// Het aantal FP-woorden op arm64: 32 keer 16 bytes plus FPCR en FPSR.
 pub const CTX_FPRS_ARM_WORDS: u64 = 66;
 /// arm64: niet-nul = [`CTX_FPRS`] draagt de FP-staat van de bewoner en de
@@ -640,7 +659,6 @@ pub const CTX_FP_LIVE: u64 = CTX_FPRS + 8 * CTX_FPRS_ARM_WORDS;
 /// Het einde van wat een ctx-blok van een kooi-context inclusief zijn
 /// FP-kier beslaat, voor een kladblok buiten het plan (de zelftests).
 pub const CTX_FP_END: u64 = CTX_FP_LIVE + 8;
-const _: () = assert!(CTX_OFF + CTX_FP_END <= SMP_CTX_OFF);
 
 /// De toestand van een ctx-blok ([`CTX_STATE`]). De kern schrijft `Empty`,
 /// `BootPending` en `Running`; de switcher `Running`, `Saved` en `Dead`.
@@ -708,9 +726,10 @@ pub struct CtxBlock {
     pub kick_target: u64,
     /// [`CTX_WAKES`].
     pub wakes: u64,
-    /// [`CTX_UNIT_SLOT`].
-    pub unit_slot: u64,
-    _pad1: u64,
+    /// [`CTX_VTTBR`].
+    pub vttbr: u64,
+    /// [`CTX_ASID`].
+    pub asid: u64,
     /// [`CTX_REVOKE`].
     pub revoke: u64,
     /// [`CTX_RING_HEAD_PA`].
@@ -720,7 +739,9 @@ pub struct CtxBlock {
     pub kick_pending: u64,
     /// [`CTX_BOOT_ARG`].
     pub boot_arg: u64,
-    _pad3: [u64; 3],
+    /// [`CTX_FP_BITS`].
+    pub fp_bits: u64,
+    _pad3: [u64; 2],
     /// [`CTX_NEXT_PA`].
     pub next_pa: u64,
     _pad4: [u64; 23],
@@ -740,7 +761,9 @@ const _: () = assert!(offset_of!(CtxBlock, wake) as u64 == CTX_WAKE);
 const _: () = assert!(offset_of!(CtxBlock, sleeps) as u64 == CTX_SLEEPS);
 const _: () = assert!(offset_of!(CtxBlock, kick_target) as u64 == CTX_KICK_TARGET);
 const _: () = assert!(offset_of!(CtxBlock, wakes) as u64 == CTX_WAKES);
-const _: () = assert!(offset_of!(CtxBlock, unit_slot) as u64 == CTX_UNIT_SLOT);
+const _: () = assert!(offset_of!(CtxBlock, vttbr) as u64 == CTX_VTTBR);
+const _: () = assert!(offset_of!(CtxBlock, asid) as u64 == CTX_ASID);
+const _: () = assert!(offset_of!(CtxBlock, fp_bits) as u64 == CTX_FP_BITS);
 const _: () = assert!(offset_of!(CtxBlock, revoke) as u64 == CTX_REVOKE);
 const _: () = assert!(offset_of!(CtxBlock, ring_head_pa) as u64 == CTX_RING_HEAD_PA);
 const _: () = assert!(offset_of!(CtxBlock, kick_pending) as u64 == CTX_KICK_PENDING);

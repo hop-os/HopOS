@@ -273,6 +273,8 @@ pub(crate) fn jumped() -> bool {
 pub(crate) struct Landing {
     /// Het hok: de bewoners om te adopteren, met hun poorten.
     pub(crate) slots: Vec<SlotState>,
+    /// Het kooi-geheugen van het hok: de chunks met hun bezetting.
+    pub(crate) cage: Vec<kern::cageheap::Chunk>,
     /// De lease van de uplink; `None`: DHCP.
     pub(crate) lease: Option<kernflip::Lease>,
 }
@@ -336,6 +338,7 @@ fn landed(h: Handoff) -> Landing {
     );
     Landing {
         slots: h.slots,
+        cage: h.cage,
         lease: h.lease,
     }
 }
@@ -652,8 +655,9 @@ async fn capture_and_jump(exec: &'static Executor, p: Prepared) -> JumpError {
     //    5).
     crate::usb::quiesce(exec).await;
     // 3. Het laatste `.await` van deze kern: het hok.
-    let slots = match kern::slots::call(&crate::LIFECYCLE, &REPLY, Request::Snapshot).await {
-        Ok(Response::Snapshot(s)) => s,
+    let (slots, cage) = match kern::slots::call(&crate::LIFECYCLE, &REPLY, Request::Snapshot).await
+    {
+        Ok(Response::Snapshot(s, c)) => (s, c),
         Ok(Response::Failed(e)) | Err(e) => return JumpError::Kern(e),
         Ok(_) => return JumpError::Kern(kern::Error::Busy),
     };
@@ -663,6 +667,7 @@ async fn capture_and_jump(exec: &'static Executor, p: Prepared) -> JumpError {
         wall_off: crate::clock::offset(),
         lease: crate::net::lease(),
         slots,
+        cage,
     };
     handoff_and_jump(p, &h)
 }

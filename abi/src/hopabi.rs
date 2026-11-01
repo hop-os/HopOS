@@ -271,6 +271,21 @@ pub const fn rng_source(word: u64) -> Option<u8> {
 /// in een hexdump.
 pub const EXIT_APP_FAULT: u64 = 0xFA17;
 
+// De exitcodes van een fatale val, per soort (H9 van 01-11): de kern laat
+// elke ongevraagde exit liggen en de watchdog reset de node, dus voor de
+// kern zijn ze gelijk; de soort is er voor de diagnose (`HOPOS_HOP_EXIT`,
+// [`CTRL_EXIT_CODE`] in `SLOT_STATUS`). Hop eerst (zijn `fail`), elke app
+// mag ze gebruiken. 0 klaar, 1 een spawn en 2 een paniek zijn van applib.
+
+/// De kern antwoordde niet, of weigerde wat hij nooit weigert (Hop:
+/// `HOP_KERNEL_GONE`, zijn `EXIT_KERNEL`).
+pub const EXIT_KERNEL: u64 = 3;
+/// De config klopt niet (H2: `fail(config)`).
+pub const EXIT_CONFIG: u64 = 4;
+/// Een interne invariant brak: een taak die niet spawnt, een poort die niet
+/// bindt, een staat die niet te lezen is.
+pub const EXIT_INTERNAL: u64 = 5;
+
 /// De bit in [`CTRL_RX_DOOR`] die de drempel wapent; een byte-index haalt
 /// dat bit nooit.
 pub const RX_DOOR_ARMED: u64 = 1 << 63;

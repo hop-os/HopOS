@@ -130,10 +130,6 @@ impl Soc for Bcm2712 {
         usb::hosts(ctx)
     }
 
-    /// Op de stockfirmware was CPU_OFF een deur zonder terugweg (gemeten
-    /// 10-07).
-    const CPU_OFF_RETURNS: bool = false;
-
     /// De RP1-keten op 5 en 30 s (de flip-jacht van 30-09).
     fn nic_diag() {
         nic_diag();

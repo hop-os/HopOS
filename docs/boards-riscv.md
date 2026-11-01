@@ -66,7 +66,7 @@ GIC                     PLIC + CLINT
 | dwmac (DWMAC1000, 3.x) met elke descriptor en buffer op een eigen cacheline, als ops-tabel op de gedeelde stmmac-kern | `driver/nic/stmmac` (feature `dwmac1000`) | 12 host-tests voor de DWMAC1000, 12 voor de kern |
 | Linkscript | `hopos/link-riscv.ld` (build.rs zet de basis per board) | |
 | FIP uit de donor, gehasht, met `hopos.cfg` en appspike erin | `image/licheerv-agent.sh` | niet op ijzer |
-| De koude kern-flip: het app-hart uit het image (resetblok of de uit-stub van de switcher), de M-mode-trampoline, de bundel (`virt-riscv`, `licheerv`) | `hopos/src/flip.rs`, `cpu/src/el2/chain.rs`, `cpu/src/riscv/switch.rs` (`off_stub`), `image/flip-bundle.sh` | QEMU: `tools/qemu-riscv-test-flip.sh`; niet op ijzer |
+| De kern-flip | geen: de switch-code draait uit het kern-image, dus riscv64 flipt (nog) niet; de haak weigert vóór de 202 (`hopos/src/flip.rs` `FLIPS`, docs/flip.md) | |
 
 ## Bouwen en draaien
 
@@ -76,7 +76,6 @@ cargo build --target riscv64gc-unknown-none-elf -p appspike
 sh tools/qemu-riscv-test.sh               # boot, kooi-zelftest, appspike in slot 1 en 2, de toets van buiten
 APP= sh tools/qemu-riscv-test.sh          # alleen de boot-poort
 sh tools/qemu-riscv-test-hop.sh           # de kring: Hop op hart 0, een jobspec, appspike op hart 1, de herstart
-sh tools/qemu-riscv-test-flip.sh          # de koude kern-flip met `hop flip --cold` (docs/flip.md, "riscv64")
 
 sh image/licheerv-agent.sh                                  # target/licheerv/fip-licheerv.bin
 CFG=~/lrv.cfg APP=appspike sh image/licheerv-agent.sh /dev/diskN   # met config en appspike, op de kaart

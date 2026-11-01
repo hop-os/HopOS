@@ -16,14 +16,13 @@
 //! de enige producer per RX-ring en de enige consument per TX-ring, zonder
 //! slot. De deur van de executor leest alleen [`Published`], met kale loads.
 
-use crate::nat::{FlowState, Nat, NatIo, NatState, Neighbors, Proto, Uplink};
+use crate::nat::{Nat, NatIo, Neighbors, Proto, Uplink};
 use crate::plan::{
     HOST_MAC, MAX_LAN_FRAME, PORTS, SLOT_CAP, UPLINK_MAX_FRAME, host_ip4, port_ip4, port_mac,
 };
 use crate::ring::{InPlace, KIND_FRAME, KIND_UPLINK, Reader, Writer};
 use crate::wire::{ET_ARP, ET_IPV4, ET_IPV6, ETH_LEN, be16, be32, byte, mac_at, put_mac, put16};
 use crate::{Error, Frame, LogFn, Result, Stats, UPLINK_QUEUE};
-use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 use core::sync::atomic::{
@@ -62,12 +61,6 @@ pub type Commands<'a, R, W> = Mailbox<Command<'a, R, W>, COMMANDS>;
 /// ringen gegarandeerd niet meer aan (ze zijn gedropt), dus een ring-herinit
 /// mag.
 pub type Ack = Oneshot<Result<u32>>;
-
-/// De antwoordplek van [`Command::SnapshotNat`]: de conntrack zoals de
-/// kern-flip hem meeneemt, in de buffer die de aanroeper meegaf
-/// (verplaatst, niet gedeeld, ingekort). Eén aanroeper tegelijk (de
-/// flip-taak).
-pub type NatReply = Oneshot<NatState<Vec<FlowState>>>;
 
 /// Een bericht aan de switch-actor.
 pub enum Command<'a, R, W> {
@@ -116,39 +109,6 @@ pub enum Command<'a, R, W> {
         uplink: Uplink,
         /// Bevestiging.
         ack: &'a Ack,
-    },
-    /// Houdt node-poorten vast tijdens een kern-flip.
-    HoldAdoption {
-        /// De poorten; de aanroeper houdt ze vast tot de bevestiging.
-        ports: &'a [u16],
-        /// Bevestiging.
-        ack: &'a Ack,
-    },
-    /// Einde van de adoptie.
-    FinishAdoption {
-        /// Bevestiging.
-        ack: &'a Ack,
-    },
-    /// Herstelt de conntrack uit het handoff-blob; het resultaat is het
-    /// aantal herstelde flows.
-    RestoreNat {
-        /// De staat van de vorige kern.
-        state: NatState<&'a [FlowState]>,
-        /// Bevestiging.
-        ack: &'a Ack,
-    },
-    /// Beschrijft de conntrack voor de kern-flip in `buf` (de aanroeper
-    /// geeft een buffer van `MAX_FLOWS` plaatsen mee; de actor alloceert
-    /// niets) en bevriest de masquerade-toewijzing: een nieuwe uitgaande
-    /// verbinding tussen deze snapshot en de sprong zou geen flow in het
-    /// blob hebben, en zijn SYN-retransmit krijgt er op de nieuwe kern
-    /// gewoon een. Gaat de flip niet door, dan ontdooit
-    /// [`Command::FinishAdoption`] hem weer.
-    SnapshotNat {
-        /// De buffer, als waarde: hij komt gevuld terug in `reply`.
-        buf: Vec<FlowState>,
-        /// De antwoordplek.
-        reply: &'a NatReply,
     },
     /// De tik van de flow-expiry-taak: veeg de verlopen flows.
     Sweep,
@@ -488,7 +448,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 pump_bell: w.pump_bell,
                 egress_dirty: false,
             },
-            nat: Nat::new()?,
+            nat: Nat::new(crate::nat::masq_start((cfg.now)()))?,
             commands: w.commands,
             door: w.door,
             published: w.published,
@@ -584,33 +544,6 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             Command::SetUplink { uplink, ack } => {
                 self.nat.set_uplink(uplink);
                 ack.put(Ok(0));
-            }
-            Command::HoldAdoption { ports, ack } => {
-                ack.put(self.nat.hold_adoption(ports).map(|()| 0))
-            }
-            Command::FinishAdoption { ack } => {
-                self.nat.finish_adoption();
-                ack.put(Ok(0));
-            }
-            Command::RestoreNat { state, ack } => {
-                let ports = &self.core.ports;
-                let n =
-                    self.nat
-                        .restore(&state, |s| ports.get(s).is_some_and(Option::is_some), now);
-                ack.put(Ok(u32::try_from(n).unwrap_or(u32::MAX)));
-            }
-            Command::SnapshotNat { mut buf, reply } => {
-                // Eerst dicht, dan lezen: zo staat er na de snapshot geen
-                // nieuwe flow meer in de tabel die het blob mist. Een lege
-                // claimlijst past altijd.
-                let _ = self.nat.hold_adoption(&[]);
-                let st = self.nat.snapshot(now, &mut buf);
-                let (n, masq_next) = (st.flows.len(), st.masq_next);
-                buf.truncate(n);
-                reply.put(NatState {
-                    flows: buf,
-                    masq_next,
-                });
             }
             Command::Sweep => self.nat.sweep(now),
         }
@@ -809,8 +742,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
     /// burst. Niets te doen: wachten op de bel of een commando, verder
     /// niets (de failsafe van 1 ms is weg sinds de kick en de deur van de
     /// executor elke publicatie zien, docs/sequence-hopos.md §13.3). Keert
-    /// niet terug; de kern-flip leest de NAT via de brievenbus
-    /// (`SnapshotNat`).
+    /// niet terug.
     pub async fn run(&mut self, buf: &mut [u8]) {
         loop {
             let cmds = self.drain_commands();

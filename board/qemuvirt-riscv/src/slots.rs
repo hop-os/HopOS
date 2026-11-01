@@ -83,9 +83,9 @@ pub fn staged_role() -> Result<StagedRole, u64> {
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
 //
-// Alleen getallen, zoals op arm64 (board/qemuvirt/src/slots.rs). Op riscv64
-// alleen koud (tools/qemu-riscv-test-flip.sh): hart 1 wacht in de uit-stub
-// op FLIP_PARK_PA tot de nieuwe kern hem belt.
+// Alleen getallen, zoals op arm64 (board/qemuvirt/src/slots.rs). riscv64
+// flipt (nog) niet (`flip::FLIPS`); de recorder en de plek van het blob
+// gebruikt de landing van elke boot.
 
 /// Het koude linkadres (`hopos/link-riscv.ld`, `KERN_BASE`).
 pub const FLIP_LINK_BASE: u64 = 0x8000_0000;
@@ -101,14 +101,9 @@ pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 /// Geen zwarte doos: nog geen plek die bewezen een reset overleeft, dus de
 /// console-ring van de kern staat hier in .bss (hopos conport.rs) (de LicheeRV legt zijn kooien in dezelfde staart).
 pub const BLACK_BOX: Region = Region::new(0, 0);
-/// De uit-stub van een app-hart (`cpu::riscv::switch::off_stub`): een
-/// eigen pagina, want het hart wacht er nog terwijl de trampoline op
-/// [`FLIP_TRAMP_PA`] komt, en de nieuwe kern belt hem pas na zijn boot.
-pub const FLIP_PARK_PA: u64 = BOOT_SCRATCH_PA + 0x3000;
 
 const _: () = {
     assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
-    assert!(FLIP_PARK_PA + 0x1000 <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
     assert!(FLIP_TRAMP_PA + 0x1000 <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
 };
 

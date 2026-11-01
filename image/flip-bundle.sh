@@ -4,8 +4,8 @@
 # Hop) doordraaien (image/flip-bundle.sh op tag v2.2.8, docs/flip.md).
 #
 #   image/flip-bundle.sh <board>    -> target/hopos-<board>.flip (+ .sha256)
-#       board: virt, uefi, o6n, altra, rpi4, rpi5, radxa, apple,
-#              virt-riscv, licheerv (riscv64: alleen de koude flip)
+#       board: virt, uefi, o6n, altra, rpi4, rpi5, radxa, apple
+#              (riscv64 flipt niet: hopos/src/flip.rs `FLIPS`)
 #   HOPOS_STAMP=B image/flip-bundle.sh virt   een ander versie-stempel op
 #                                   de boot-regel (tools/qemu-test-flip.sh)
 #   GUI=1 image/flip-bundle.sh rpi5 de gui-smaak (de korte vorm van
@@ -18,10 +18,6 @@
 #   CFG=headless|headfull image/flip-bundle.sh <board>  de lagen van
 #                                   image/cfg: default.cfg, <board>.cfg en
 #                                   die smaak
-#   STAGE=hop.elf image/flip-bundle.sh licheerv  de Hop die de kern in zich
-#                                   draagt (de LicheeRV heeft geen staging
-#                                   van een lader: Hop zit in het image);
-#                                   zonder STAGE bouwt tools/hop-build.sh hem
 #
 # Een bundel is de kern-ELF (zonder debug-info, mét symbolen) plus een
 # HOPRELO1-staart (versie 2, kern::kernflip::Bundle) met de relocatietabel
@@ -47,15 +43,13 @@
 #
 # De switch-code-som: de FNV-1a-64 over de drie nVHE-blobs
 # (cpu::el2::image_hash, `hopos_el2_nvhe_{entry,tramp,smp}`), gelezen uit
-# de symbolen van de KOUDE link; op riscv64 over de M-mode-switcher
-# (`__hopos_parkenter` tot `__hopos_mmode_end`, de som van HOPOS_CAGE_UP). De draaiende kern weigert de bundel vóór
+# de symbolen van de KOUDE link. De draaiende kern weigert de bundel vóór
 # de sprong als die som niet die van de geïnstalleerde kopie is
 # (`HOPOS_FLIP_REFUSED switch code mismatch`): de bewoners draaien in die
 # kopie, en de nieuwe kern mag hem alleen adopteren bij een gelijke som.
 #
 # De node krijgt de bundel op aanvraag, via de agent-API van Hop, achter
-# dezelfde HMAC als een jobspec: POST /flip {"url","sha256"} (en "cold":
-# true voor de koude flip, docs/flip.md: bij een andere switch-code) met de som die
+# dezelfde HMAC als een jobspec: POST /flip {"url","sha256"} met de som die
 # dit script print. Die som is het vertrouwensanker.
 set -eu
 
@@ -85,11 +79,8 @@ altra) FEATURE=board-altra COLD=0 PIE=1 FLAVOR=nvhe ;;
 # De M4: vast linkadres (hopos/link-apple.ld KERN_BASE), de apple-switcher;
 # board/apple/build.rs wil HOPOS_EMBED (de Hop-ELF, of leeg).
 apple) FEATURE=board-apple COLD=0x10100000000 PIE=0 FLAVOR=apple ;;
-# riscv64 (hopos/link-riscv.ld, KERN_BASE per board in hopos/build.rs).
-virt-riscv) FEATURE=board-qemuvirt-riscv COLD=0x80000000 PIE=0 FLAVOR=riscv ;;
-licheerv) FEATURE=board-licheerv COLD=0x84000000 PIE=0 FLAVOR=riscv ;;
 *)
-	echo "gebruik: $0 virt|uefi|o6n|altra|rpi4|rpi5|radxa|apple|virt-riscv|licheerv" >&2
+	echo "gebruik: $0 virt|uefi|o6n|altra|rpi4|rpi5|radxa|apple" >&2
 	exit 64
 	;;
 esac
@@ -109,24 +100,7 @@ fi
 if [ "${GUI:-0}" = 1 ]; then
 	FEATURE="$FEATURE,gui"
 fi
-[ "$FLAVOR" = riscv ] && TARGET=riscv64gc-unknown-none-elf
 need_objcopy flip-bundle
-# De LicheeRV draagt Hop in het image (board/licheerv/build.rs, zoals
-# image/licheerv-agent.sh): de nieuwe kern start na een koude flip die Hop.
-# Een bundel zonder Hop zou een node zonder Hop opleveren, dus geen bundel
-# zonder: STAGE= of de Hop van tools/hop-build.sh. Gestript zoals in
-# image/licheerv-agent.sh (zonder lokale symbolen, voor de schrapruimte).
-if [ "$BOARD" = licheerv ]; then
-	STAGE="${STAGE:-$(sh "$DIR/tools/hop-build.sh" "$TARGET")}"
-	[ -f "$STAGE" ] || { echo "flip-bundle: STAGE=$STAGE bestaat niet" >&2; exit 1; }
-	mkdir -p "$DIR/target/flip-$BOARD"
-	HOPOS_EMBED="$DIR/target/flip-$BOARD/stage.elf"
-	"$OBJCOPY" --strip-debug --discard-all "$STAGE" "$HOPOS_EMBED"
-	HOPOS_EMBED_ROLE=hop
-	export HOPOS_EMBED HOPOS_EMBED_ROLE
-	echo "flip-bundle: Hop in het image: $STAGE ($(wc -c <"$HOPOS_EMBED" | tr -d ' ') bytes)" >&2
-fi
-
 OUT="$DIR/target/hopos-$BOARD.flip"
 # Een eigen target-map: de gewone build (image/qemu-run.sh, uefi-run.sh)
 # blijft staan, en de PIE-build heeft andere RUSTFLAGS.
@@ -195,7 +169,7 @@ shift, cold_base, pie = int(sys.argv[5], 16), int(sys.argv[6], 16), sys.argv[7] 
 flavor = sys.argv[8]  # nvhe | vhe | apple: de symboolnaam van de blobs
 MAGIC = 0x314F4C4552504F48  # "HOPRELO1"
 VERSION = 2                 # kern::kernflip::BUNDLE_VERSION
-FLIP_ABI = 3                # kern::kernflip::FLIP_ABI
+FLIP_ABI = 4                # kern::kernflip::FLIP_ABI
 M64 = (1 << 64) - 1
 
 def die(msg):
@@ -224,18 +198,6 @@ def switch_sum(elf):
     syms = elfs.symbols(elf)
     base, _entry, img = flat(elf)
     h = 0xcbf29ce484222325
-    if flavor == "riscv":
-        # hopos/src/cage_riscv.rs `code_hash`: woordgewijs vanaf het
-        # 8-voud onder de parkeer-ingang tot voorbij het einde.
-        a, b = syms.get("__hopos_parkenter"), syms.get("__hopos_mmode_end")
-        if a is None or b is None or b <= a:
-            die("no riscv switch code symbols (__hopos_parkenter, __hopos_mmode_end)")
-        a &= ~7
-        while a < b:
-            for x in img[a - base:a - base + 8]:
-                h = ((h ^ x) * 0x100000001b3) & M64
-            a += 8
-        return h
     for blob in ("entry", "tramp", "smp"):
         a = syms.get(f"hopos_el2_{flavor}_{blob}")
         b = syms.get(f"hopos_el2_{flavor}_{blob}_end")
@@ -315,11 +277,5 @@ SHA="$(cat "$OUT.sha256")"
 echo "" >&2
 echo "$OUT gebouwd (board $BOARD, stempel $STAMP), sha256 $SHA" >&2
 echo "Zet hem op een webserver en vraag de flip aan op de agent-API van Hop:" >&2
-if [ "$FLAVOR" = riscv ]; then
-	# riscv64 flipt alleen koud (hopos/src/flip.rs `WARM`).
-	echo "  hop --agent <node>:8080 flip http://<ip>:<poort>/$(basename "$OUT") $SHA --cold" >&2
-	exit 0
-fi
 echo "  curl -X POST http://<node>:8080/flip -d '{\"url\":\"http://<ip>:<poort>/$(basename "$OUT")\",\"sha256\":\"$SHA\"}'" >&2
-echo "Weigert de node hem warm (switch code mismatch), dan koud: de taken stoppen, Hop start opnieuw:" >&2
-echo "  curl -X POST http://<node>:8080/flip -d '{\"url\":\"http://<ip>:<poort>/$(basename "$OUT")\",\"sha256\":\"$SHA\",\"cold\":true}'" >&2
+echo "Weigert de node hem (switch code mismatch), dan is de weg een herinstallatie van het bootmedium." >&2

@@ -282,9 +282,10 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // lopen opnieuw, vóór het framebuffer-geduld (de Pi 5, 30-09).
     let wd = watchdog::arm();
     // FLIP: de landing. Daarvóór gingen in `kmain` alleen de heap,
-    // `discover` (het board) en de verhuizing naar de OS-core. Een
-    // overdracht van een vorige kern draagt de bewoners; die adopteren de
-    // slots straks.
+    // `discover` (het board) en de verhuizing naar de OS-core. De boot
+    // hieronder is dezelfde reeks met of zonder overdracht; per stap begint
+    // hij leeg, of neemt hij het stuk van de vorige kern over (flip.rs,
+    // `Landing`).
     let landing = flip::land(dtb);
 
     let exec: &'static Executor = EXEC.get();
@@ -349,7 +350,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // en elke store-call van de meegenomen Hop was "without privilege".
     let hop_adopted = landing
         .as_ref()
-        .is_some_and(|h| h.slots.iter().any(|st| st.slot == slots::HOP_SLOT));
+        .is_some_and(|l| l.slots.iter().any(|st| st.slot == slots::HOP_SLOT));
     // Of er een Hop is, één keer beslist: het token en de watchdog (die
     // bewaakt dan zijn hartslag) kijken naar hetzelfde (24-10, F6).
     let hop_here = role == Ok(StagedRole::Hop) || hop_adopted;
@@ -378,8 +379,10 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     exec.spawn(irq_dispatch(board, bell)).expect("spawn irq");
 
     // De opslag vóór de system-API: die krijgt de hopfs-actor alleen als
-    // er een schijf is (anders weigert elke bestandscall luid).
-    let disk = storage::start(exec, storage::probe());
+    // er een schijf is (anders weigert elke bestandscall luid). Met een
+    // overdracht houdt de opslag de boom die de vorige kern vastlegde, ook
+    // als de config stateless zegt.
+    let disk = storage::start(exec, storage::probe(), landing.is_some());
     // MEDIA: de codec-dienst ná de opslag, want de firmware-blobs staan op
     // het volume (codec.rs); zonder VPU meldt hij luid dat er geen is.
     codec::up(exec);
@@ -418,12 +421,22 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     OS_ASID.store(node_cfg.one("hopos.oscore.asid") != "0", Relaxed);
 
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
-    // de node-stack, DHCP en de system-listener. Zonder NIC draait de kern
-    // door zonder net; dat is een board, geen fout. Een NIC die faalt (geen
-    // link), probeert [`nic_retry`] opnieuw, naast de rest van de boot.
+    // de node-stack, de lease en de system-listener; met een overdracht de
+    // lease van de vorige kern. Zonder NIC draait de kern door zonder net;
+    // dat is een board, geen fout. Een NIC die faalt (geen link), probeert
+    // [`nic_retry`] opnieuw, naast de rest van de boot; na een flip is dat
+    // `HOPOS_FATAL` (Derek, 01-11): de bewoners rekenen op hun net.
+    let (hok, carried) = match landing {
+        Some(l) => (Some(l.slots), Some(l.lease)),
+        None => (None, None),
+    };
     match board.probe_nic() {
-        Ok(Some(nic)) => nic_up(exec, board, system, nic),
+        Ok(Some(nic)) => nic_up(exec, board, system, nic, carried),
+        Ok(None) if carried.is_some() => fatal(format_args!(
+            "net: the previous kernel had a NIC, this one has none"
+        )),
         Ok(None) => println!("net: no NIC on this board HOPOS_NIC_NONE"),
+        Err(e) if carried.is_some() => fatal(format_args!("net: {e} HOPOS_NIC_FAIL")),
         Err(e) => {
             println!("net: {e} HOPOS_NIC_FAIL");
             if matches!(e, board::Error::Nic(_)) {
@@ -441,11 +454,12 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     optical::start(exec);
     usb::start(exec);
 
+    // De flip-taak, en na een landing de guard.
+    flip::start(exec, hok.is_some());
     // De slots: de kooi-lijm, de lifecycle-actor en de servicers (slots.rs).
-    // FLIP: na een landing adopteren de slots de bewoners in plaats van
-    // Hop opnieuw te plaatsen; de flip-taak en de guard spawnen hier.
-    flip::start(exec, landing.is_some());
-    slots::start(exec, role, landing.map(|h| h.slots), node_cfg, system);
+    // Met een overdracht adopteren ze de bewoners, en Hop komt pas als het
+    // net luistert.
+    slots::start(exec, role, hok, node_cfg, system);
 
     // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
     // over zijn bewoners (Hop). Zonder rotatie draait Hop nooit (§13.3).
@@ -458,12 +472,14 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
 }
 
 /// Het netwerkvlak op een NIC die opkwam, bij de boot of bij een
-/// [`nic_retry`].
+/// [`nic_retry`]. `carried`: na een flip (`Some`), met de lease van de
+/// vorige kern als die er een had; dan is een net dat niet opkomt fataal.
 fn nic_up(
     exec: &'static Executor,
     board: &'static Machine,
     system: &'static KernSystem,
     nic: <Machine as Board>::Nic,
+    carried: Option<Option<kern::kernflip::Lease>>,
 ) {
     println!("net: nic up HOPOS_NIC_UP mac={}", nic.mac());
     let params = net::Params {
@@ -472,11 +488,13 @@ fn nic_up(
         slot_wake: slots::wake,
         resident: slots::resident,
     };
-    match net::start(exec, nic, params, system_api(system)) {
+    let landed = carried.is_some();
+    match net::start(exec, nic, params, system_api(system), carried.flatten()) {
         Ok(()) => {}
         // Een NIC zonder lijn is het board dat faalt (§14.1 O3): de pomp
         // pollt niet, dus zonder lijn geen net.
         Err(e @ net::Error::NoLine) => cpu::fatal!("net: {e}"),
+        Err(e) if landed => fatal(format_args!("net: {e} HOPOS_NET_FAIL")),
         Err(e) => println!("net: {e} HOPOS_NET_FAIL"),
     }
 }
@@ -506,9 +524,7 @@ async fn nic_retry(exec: &'static Executor, board: &'static Machine, system: &'s
             Ok(Some(nic)) => {
                 println!("net: the NIC came up on retry {attempt} HOPOS_NIC_RETRY_OK");
                 NIC_RETRY.store(false, Relaxed);
-                nic_up(exec, board, system, nic);
-                // FLIP: wat de adoptie zonder switch niet kon doorzetten.
-                slots::republish(exec);
+                nic_up(exec, board, system, nic, None);
                 return;
             }
             Err(e @ board::Error::Nic(_)) => {
@@ -528,6 +544,28 @@ async fn nic_retry(exec: &'static Executor, board: &'static Machine, system: &'s
         }
         attempt = attempt.saturating_add(1);
     }
+}
+
+/// Hard falen (§13.2): één regel `HOPOS_FATAL <reden>`, en de koude weg
+/// terug. PSCI SYSTEM_RESET; zonder PSCI (Apple, riscv64), of als de reset
+/// terugkeert, de watchdog op zijn kortst en dan parkeren: een geparkeerde
+/// core aait niet meer. Zonder watchdog blijft het bij parkeren, met een
+/// regel die dat zegt.
+///
+/// Tijdelijk hier, voor de flip: de `fatal()` van het fundament (agent D)
+/// vervangt dit.
+pub(crate) fn fatal(why: core::fmt::Arguments<'_>) -> ! {
+    println!("HOPOS_FATAL {why}");
+    if <Machine as Board>::PSCI {
+        let _ = cpu::psci::smc(cpu::psci::SYSTEM_RESET, 0, 0, 0);
+    }
+    println!("fatal: resetting through the watchdog at its shortest alarm HOPOS_FLIP_RESET_WDT");
+    if !watchdog::fire() {
+        println!(
+            "fatal: no PSCI reset and no watchdog on this board: this core parks and the node stays down until a power cycle HOPOS_FLIP_RESET_PARK"
+        );
+    }
+    cpu::boot::park()
 }
 
 /// Meetlat van de IRQ-dispatch: timer-, NIC- en onbekende interrupts.

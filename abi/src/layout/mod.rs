@@ -462,14 +462,6 @@ pub const SCHED_TICK_TICKS: u64 = 64;
 pub const SCHED_OS_BELL: u64 = 72;
 /// De laatst geplande lijst-index (ARM).
 pub const SCHED_CURSOR: u64 = 80;
-/// De uit-stub van de koude flip (RISC-V, `cpu::riscv::switch::off_stub`):
-/// niet-nul is het adres waar de switcher van dit hart bij zijn volgende
-/// ronde in machine mode heen springt, met sp = dit sched-blok. Hetzelfde
-/// woord als [`SCHED_CURSOR`]: dat is van ARM en, op RISC-V, alleen van
-/// sched-blok 0 (de OS-core, `cpu::riscv::oscore`), nooit van een app-hart.
-/// Een regel van de kern. De stub bevestigt in [`SCHED_MBOX_CTX`] (regel 0,
-/// op RISC-V verder ongebruikt) met zijn eigen adres.
-pub const SCHED_OFF_PC: u64 = SCHED_CURSOR;
 /// De lijstlengte (monotoon; 0-bytes zijn gaten).
 pub const SCHED_COUNT: u64 = 88;
 /// De bewonerslijst: [`SLOT_CAP`] bytes met context-id's.

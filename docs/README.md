@@ -15,7 +15,7 @@ virt zonder toets.
 
 `sh tools/qemu-all.sh` draait alle ringen hieronder na elkaar (en de
 riscv-share- en riscv-flip-ring), per ring groen of ROOD met zijn laatste
-regel, en één eindregel; `sh tools/qemu-all.sh hop flip-cold` alleen die.
+regel, en één eindregel; `sh tools/qemu-all.sh hop flip-uefi` alleen die.
 Elke ring kiest vrije host-poorten, dus twee runners botsen niet.
 
 | Test | Wat hij bewijst |
@@ -43,19 +43,17 @@ Elke ring kiest vrije host-poorten, dus twee runners botsen niet.
 | `sh tools/qemu-test-cluster.sh` (in de hop-repo) | een cluster van een QEMU-node en een host-agent met een hoplockserver als lock: beide nodes in `hop agents`, en na het hard doden van de host-leider wint de HopOS-node de lease en plaatst hij een job op de host |
 | `sh tools/qemu-test-flip.sh` | de kern-flip: hopfs bevroren en gecommit, de NAT-flows gevangen, de sprong, Hop overleeft zonder herstart, en een uitgaande TCP-verbinding van een app (rol FLIPCONN) loopt door: drie antwoorden via kern A, drie via kern B, over één verbinding |
 | `MISMATCH=1 sh tools/qemu-test-flip.sh` | een bundel met een andere switch-code wordt vóór de sprong geweigerd (Hop geeft 502) |
-| `COLD=1 sh tools/qemu-test-flip.sh` | de koude flip (`"cold":true` op `POST /flip`): Hop stopt zijn taken, de kern zet de app-cores uit en springt zonder adoptie, Hop start koud en plaatst de job opnieuw |
-| `OSCORE=1 sh tools/qemu-test-flip.sh` | de flip vanaf een verhuisde kern (ook met `COLD=1`, en met `BOARD=uefi OSCORE=2`) |
+| `OSCORE=1 sh tools/qemu-test-flip.sh` | de flip vanaf een verhuisde kern (ook met `BOARD=uefi OSCORE=2`) |
 | `BOARD=rpi4 sh tools/qemu-test-flip.sh` | de flip-ingang van de Pi op raspi4b: een core met het merkteken komt tot de kern en leest de DTB opnieuw |
 | `sh tools/qemu-uefi-test.sh` | de EFI-stub op EDK2, ACPI, PCIe, virtio over PCI met MSI-X via de ITS (`nic=` loopt op in de tik), de hele appspike-keten |
 | `GUI=1 sh tools/qemu-uefi-test.sh` | hetzelfde met de GOP van EDK2 als console |
 | `sh tools/qemu-test-nvme.sh` | de NVMe-kern van de O6N en de Altra: het Altra-image op EDK2 met `-device nvme` en igb, appspike in slot 1 en 2 schrijft, leest terug en leest een bundel (`OP_READ_MANY`) door driver/nvme, met de wachtrij op MSI-X via de ITS (`HOPOS_NVME_UP`, `HOPOS_NVME_IRQ`, `HOPOS_APPSPIKE_FS ok`) |
 | `FEATURES=vhe CPU=neoverse-n1 sh tools/qemu-uefi-test.sh` | de VHE-switcher (E2H=1), de smaak die de O6N eist, op een VHE-model |
-| `BOARD=uefi sh tools/qemu-test-flip.sh` | de kern-flip op EDK2: kern B landt op de PIE-basis van kern A (ook `COLD=1`, en onder VHE met `FEATURES=vhe CPU=neoverse-n1`) |
+| `BOARD=uefi sh tools/qemu-test-flip.sh` | de kern-flip op EDK2: kern B landt op de PIE-basis van kern A (ook onder VHE met `FEATURES=vhe CPU=neoverse-n1`) |
 | `sh tools/qemu-rpi4-test.sh` | het Pi 4-board op QEMU's raspi4b tot de executor-tik |
 | `sh tools/qemu-riscv-test.sh` | QEMU virt riscv64 in machine mode: boot, net, opslag, de zelftest van de PMP-kooi (met de kill-tick), en appspike twee keer door de lifecycle van de kern in een PMP-plus-Sv39-kooi |
 | `sh tools/qemu-riscv-test-hop.sh` | Hop als bewoner op het hart van de kern op riscv64, een `POST /v1/jobs` plaatst appspike, en Hop komt na een herstart terug |
 | `sh tools/qemu-riscv-test-share.sh` | twee bewoners op het ene app-hart (de vorm van de LicheeRV), één yieldt nooit (bench, BURN=1): de tijdschijf van de switcher houdt welcome bereikbaar, twintig GETs elk binnen `MAX_MS` |
-| `sh tools/qemu-riscv-test-flip.sh` | de koude kern-flip op riscv64 met `hop flip --cold`: een warme flip wordt geweigerd, de koude landt (`HOPOS_FLIP_BOOT gen=2`), hart 1 komt uit de uit-stub terug, Hop start koud en plaatst de init-job opnieuw |
 
 `sh tools/gate.sh` is de poort vóór elke commit: host-tests, clippy met
 `-D warnings`, rustfmt, en de target-builds van alle boards (ook met `gui`

@@ -123,9 +123,8 @@ pub fn staged_role() -> Result<StagedRole, u64> {
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
 //
-// Alleen getallen, zoals op arm64 (board/qemuvirt/src/slots.rs). Op riscv64
-// alleen koud; de C906L gaat in reset en de nieuwe kern haalt hem eruit,
-// dus de uit-stub op FLIP_PARK_PA draait hier niet (wel op QEMU).
+// Alleen getallen, zoals op arm64 (board/qemuvirt/src/slots.rs). riscv64
+// flipt (nog) niet (`flip::FLIPS`).
 
 /// Het koude linkadres (`hopos/link-riscv.ld`, `KERN_BASE`).
 pub const FLIP_LINK_BASE: u64 = 0x8400_0000;
@@ -141,12 +140,9 @@ pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 /// Geen zwarte doos: nog geen plek die bewezen een reset overleeft, dus de
 /// console-ring van de kern staat hier in .bss (hopos conport.rs) (de LicheeRV legt zijn kooien in dezelfde staart).
 pub const BLACK_BOX: Region = Region::new(0, 0);
-/// De uit-stub van een app-hart zonder resetblok (`cpu::riscv::switch`).
-pub const FLIP_PARK_PA: u64 = BOOT_SCRATCH_PA + 0x3000;
 
 const _: () = {
     assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
-    assert!(FLIP_PARK_PA + 0x1000 <= NODE_CTRL_PA);
     assert!(FLIP_TRAMP_PA + 0x1000 <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
     assert!(FLIP_IMAGE_END < STAGE_PA && (STAGE_PA + STAGE_MAX).is_multiple_of(2 << 20));
 };

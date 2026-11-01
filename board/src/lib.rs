@@ -380,12 +380,6 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
     /// `secure=on` heeft ook geen EL3, maar emuleert PSCI over SMC.
     const PSCI: bool = true;
 
-    /// Keert PSCI CPU_OFF terug, dat wil zeggen: start CPU_ON een
-    /// uitgezette core weer? Op de Pi 5-stockfirmware niet: daar was
-    /// CPU_OFF een deur zonder terugweg (gemeten 10-07), dus weigert de
-    /// koude flip daar zodra een app-core ooit draaide.
-    const CPU_OFF_RETURNS: bool = true;
-
     /// Geeft de firmware een DTB in x0 (of a1), die een warme flip moet
     /// laten staan? Niet op UEFI (ImageHandle), Apple (de boot-args) en de
     /// LicheeRV.

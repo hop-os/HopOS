@@ -13,12 +13,8 @@
 
 use core::fmt;
 
-/// CPU_OFF.
-pub const CPU_OFF: u32 = 0x8400_0002;
 /// CPU_ON (64-bit conventie).
 pub const CPU_ON: u32 = 0xC400_0003;
-/// AFFINITY_INFO (64-bit conventie).
-pub const AFFINITY_INFO: u32 = 0xC400_0004;
 /// SYSTEM_RESET (SMC32).
 pub const SYSTEM_RESET: u32 = 0x8400_0009;
 /// PSCI_FEATURES (SMC32): kent de firmware deze functie-ID?
@@ -83,35 +79,6 @@ impl fmt::Display for Error {
     }
 }
 
-/// De powertoestand uit AFFINITY_INFO.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Affinity {
-    /// ON (0).
-    On,
-    /// OFF (1).
-    Off,
-    /// ON_PENDING (2).
-    OnPending,
-    /// Een fout van de firmware.
-    Err(Error),
-}
-
-impl Affinity {
-    /// De toestand bij een AFFINITY_INFO-returnwaarde.
-    #[must_use]
-    pub const fn from_ret(ret: u64) -> Affinity {
-        match ret {
-            0 => Self::On,
-            1 => Self::Off,
-            2 => Self::OnPending,
-            other => match Error::from_ret(other) {
-                Some(e) => Self::Err(e),
-                None => Self::On,
-            },
-        }
-    }
-}
-
 /// (major, minor) uit een versiewoord (PSCI_VERSION, TRNG_VERSION).
 #[must_use]
 pub const fn split_version(v: u64) -> (u16, u16) {
@@ -126,12 +93,6 @@ pub fn cpu_on(target: u64, entry: u64, ctx: u64) -> Result<(), Error> {
         None => Ok(()),
         Some(e) => Err(e),
     }
-}
-
-/// De powertoestand van een core (MPIDR-target).
-#[must_use]
-pub fn affinity_info(target: u64) -> Affinity {
-    Affinity::from_ret(smc(AFFINITY_INFO, target, 0, 0))
 }
 
 /// Een SMC #0 met vier argumenten (SMCCC: x0..x3 in, resultaat in x0).
@@ -188,11 +149,6 @@ mod tests {
         assert_eq!(Error::from_ret((-2i64) as u64), Some(Error::InvalidParams));
         assert_eq!(Error::from_ret((-4i64) as u64), Some(Error::AlreadyOn));
         assert_eq!(Error::from_ret((-9i64) as u64).map(Error::code), Some(-9));
-        assert_eq!(Affinity::from_ret(1), Affinity::Off);
-        assert_eq!(
-            Affinity::from_ret((-2i64) as u64),
-            Affinity::Err(Error::InvalidParams)
-        );
     }
 
     #[test]

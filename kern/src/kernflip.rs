@@ -21,12 +21,12 @@ use alloc::vec::Vec;
 
 /// "HOPHAND1" little-endian.
 pub const HAND_MAGIC: u64 = 0x3144_4E41_4850_4F48;
-/// De versie van het blob.
-pub const HAND_VERSION: u64 = 6;
-/// De ruimte boven de RAM-declaratie van de nieuwe kern voor het blob.
-/// 256 KB: de volle conntrack (4096 flows van 24 bytes, ongeveer 96 KB) plus
-/// de kop en de slot-records; 0,1% van een kernvenster, en daarvoor
-/// overleeft elke verbinding door de switch een kernwissel.
+/// De versie van het blob: 7 sinds 01-11 (de lease erin; de conntrack, de
+/// koude vlag en de nulwoorden van oudere vormen eruit).
+pub const HAND_VERSION: u64 = 7;
+/// De plek van het blob op elk board (`abi::layout::FLIP_HANDOFF_LEN`):
+/// 256 KB. Past het hok er niet in, dan is dat `HOPOS_FATAL` na de 202
+/// (Derek, 01-11: geen begrenzing vooraf tot blijkt dat ze nodig is).
 pub const HANDOFF_TAIL: usize = 0x40000;
 // De grenzen van wat het blob per slot draagt. Eén set voor beide kanten:
 // de export (`slots::Lifecycle::snapshot`) weigert erboven vóór de sprong,
@@ -42,56 +42,88 @@ pub const MAX_FLIP_JOB: usize = 256;
 pub const MAX_FLIP_MOUNTS: usize = abi::systemapi::MAX_START_MOUNTS;
 /// Het langste volumepad, om dezelfde reden gelijk aan dat van een start.
 pub const MAX_FLIP_PATH: usize = abi::systemapi::MAX_MOUNT_PATH;
-const HAND_HEAD: usize = 128;
+/// De kop: magic, versie, het aantal bewoners, de generatie, de wandklok en
+/// de vijf woorden van de lease.
+const HAND_HEAD: usize = 80;
 const SLOT_HEAD: usize = 80;
 
-pub use abi::{FlowState, MAX_FLOWS, NatState};
-
-/// Wat de vertrekkende kern achterliet.
+/// Wat de vertrekkende kern achterliet: per onderdeel zijn eigen stuk. De
+/// boot van de nieuwe kern loopt dezelfde reeks als een koude boot; per stap
+/// begint hij leeg, of neemt hij dit stuk over (`hopos/src/flip.rs`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Handoff {
-    /// Het venster van de vorige kern.
-    pub old_base: u64,
-    /// De maat daarvan.
-    pub old_size: u64,
-    /// Het eigen venster, inclusief de handoff-staart.
-    pub window: u64,
-    /// De totale maat daarvan.
-    pub total: u64,
     /// De hoeveelste flip deze boot is (1 = de eerste).
     pub generation: u64,
-    /// De som van de bundel: "flip naar deze URL" in een boot-config mag
-    /// geen eeuwige lus worden.
-    pub bundle_sum: u64,
-    /// De bewoners.
-    pub slots: Vec<SlotState>,
-    /// De conntrack: zonder deze tabel breekt elke verbinding door de
-    /// masquerade bij een kernwissel, terwijl de app doorleeft.
-    pub nat: NatState<Vec<FlowState>>,
-    /// Een KOUDE flip: de vertrekkende kern stopte zijn bewoners en zette
-    /// de app-cores uit, dus er valt niets te adopteren. De nieuwe kern
-    /// boot koud (eigen switch-code, Hop koud uit de staging) en draagt
-    /// alleen de generatie en de som verder (`hopos/src/flip.rs`).
-    pub cold: bool,
     /// De wandklok van de vertrekkende kern: Unix-nanoseconden bij
     /// tellerstand 0 (`hopos/src/clock.rs`), zoals Hop hem via SNTP zette.
     /// De teller loopt door de sprong heen door, dus de offset blijft
-    /// geldig; zonder dit veld begon elke nieuwe generatie weer op de vaste
-    /// boot-klok (gezien 30-09 op de Pi 5: 29-09 00:00:40 op het glas). 0 =
-    /// geen klok. Additief binnen versie 6, op het kopwoord na de vlaggen
-    /// ([`WALL_OFF_OFF`]): een oudere kern schrijft daar nul.
+    /// geldig. 0 = geen klok.
     pub wall_off: u64,
+    /// De lease van de uplink (H1, 01-11): de nieuwe kern slaat DHCP over,
+    /// zodat zijn system-listener er staat vóór Hop een beurt krijgt.
+    /// `None`: de nieuwe kern haalt een lease.
+    pub lease: Option<Lease>,
+    /// Het hok: de bewoners, in hun kooien op de switch-code die blijft
+    /// staan, met hun poorten.
+    pub slots: Vec<SlotState>,
 }
 
-/// De vlaggen van het blob, in het eerste vrije kopwoord ([`FLAGS_OFF`]).
-/// Additief binnen versie 6 (29-09): een kern van vóór de vlag schrijft
-/// daar nul, en dat is de warme flip. Geen nieuwe versie, want die zou een
-/// warme flip vanaf alpha.9 laten vallen op `HOPOS_FLIP_BLOB_BAD`.
-const FLAGS_OFF: usize = 72;
-/// Vlag: een koude flip ([`Handoff::cold`]).
-const FLAG_COLD: u64 = 1;
-/// Het kopwoord met de wandklok ([`Handoff::wall_off`]), na de vlaggen.
-const WALL_OFF_OFF: usize = FLAGS_OFF + 8;
+/// De lease van de uplink, zoals de DHCP-keeper hem hield: de velden van
+/// `leandhcp::Lease` (adressen big-endian als getal) plus de tellerstand
+/// van de laatste ACK, waarop zijn timers lopen.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Lease {
+    /// Ons adres.
+    pub ip: u32,
+    /// Het subnetmasker.
+    pub mask: u32,
+    /// De router.
+    pub gateway: u32,
+    /// De resolver; 0 = geen.
+    pub dns: u32,
+    /// De server die de lease gaf.
+    pub server: u32,
+    /// Looptijd, T1 en T2 in seconden.
+    pub secs: [u32; 3],
+    /// De tellerstand (ns) van de ACK.
+    pub bound_ns: u64,
+}
+
+/// De vijf kopwoorden van de lease ([`Handoff::lease`]), aan het eind van
+/// de kop; een adres 0 is "geen lease".
+const LEASE_OFF: usize = 40;
+const _: () = assert!(LEASE_OFF + 5 * 8 == HAND_HEAD);
+
+impl Lease {
+    /// De vijf kopwoorden.
+    fn words(&self) -> [u64; 5] {
+        let pair = |a: u32, b: u32| u64::from(a) | u64::from(b) << 32;
+        let [secs, t1, t2] = self.secs;
+        [
+            pair(self.ip, self.mask),
+            pair(self.gateway, self.dns),
+            pair(self.server, secs),
+            pair(t1, t2),
+            self.bound_ns,
+        ]
+    }
+
+    /// Terug uit de vijf kopwoorden; een adres 0 is geen lease.
+    fn from_words(w: [u64; 5]) -> Option<Lease> {
+        let [a, b, c, d, bound_ns] = w;
+        let lo = |v: u64| v as u32;
+        let hi = |v: u64| (v >> 32) as u32;
+        (lo(a) != 0).then_some(Lease {
+            ip: lo(a),
+            mask: hi(a),
+            gateway: lo(b),
+            dns: hi(b),
+            server: lo(c),
+            secs: [hi(c), lo(d), hi(d)],
+            bound_ns,
+        })
+    }
+}
 
 fn put(b: &mut Vec<u8>, s: &[u8]) -> Result {
     b.try_reserve(s.len())
@@ -118,19 +150,15 @@ pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
     for v in [
         HAND_MAGIC,
         HAND_VERSION,
-        h.old_base,
-        h.old_size,
-        h.window,
-        h.total,
         h.slots.len() as u64,
         h.generation,
-        h.bundle_sum,
-        if h.cold { FLAG_COLD } else { 0 },
         h.wall_off,
     ] {
         put64(&mut b, v)?;
     }
-    put(&mut b, &[0; HAND_HEAD - WALL_OFF_OFF - 8])?;
+    for v in h.lease.map_or([0; 5], |l| l.words()) {
+        put64(&mut b, v)?;
+    }
     for s in &h.slots {
         for v in [
             s.slot as u64,
@@ -164,27 +192,6 @@ pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
             pad8(&mut b)?;
         }
     }
-    put64(&mut b, u64::from(h.nat.masq_next))?;
-    // Het woord van de gateway-MAC: altijd "onbekend" (bit 56 nul). De
-    // next-hops staan in de neighbour-tabel van de node-stack, en de nieuwe
-    // kern vraagt ze opnieuw; het woord blijft voor de oudere kern.
-    put64(&mut b, 0)?;
-    put64(&mut b, h.nat.flows.len() as u64)?;
-    for f in &h.nat.flows {
-        put64(
-            &mut b,
-            u64::from(f.proto)
-                | u64::from(f.slot) << 8
-                | u64::from(f.fins) << 16
-                | u64::from(f.slot_port) << 32
-                | u64::from(f.dst_port) << 48,
-        )?;
-        put64(&mut b, u64::from(f.slot_ip) | u64::from(f.dst_ip) << 32)?;
-        put64(&mut b, u64::from(f.node_port))?;
-    }
-    // De lengte van de agent-state: altijd nul. Hop bewaart zijn staat zelf
-    // (`/hop/agent-state.json`); het woord blijft voor de oudere kern.
-    put64(&mut b, 0)?;
     if b.len() > max {
         return Err(Error::TooLarge { len: b.len(), max });
     }
@@ -254,25 +261,13 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
             want: HAND_VERSION,
         });
     }
+    let n = bounded(r.u64()?, 1024, r.pos)?;
     let mut h = Handoff {
-        old_base: r.u64()?,
-        old_size: r.u64()?,
-        window: r.u64()?,
-        total: r.u64()?,
+        generation: r.u64()?,
+        wall_off: r.u64()?,
         ..Handoff::default()
     };
-    let n = bounded(r.u64()?, 1024, 48)?;
-    h.generation = r.u64()?;
-    h.bundle_sum = r.u64()?;
-    // Een bit die deze kern niet kent, is een blob van een latere kern:
-    // luid, niet stil als warm gelezen.
-    let flags = r.u64()?;
-    if flags & !FLAG_COLD != 0 {
-        return Err(Error::Corrupt { at: FLAGS_OFF });
-    }
-    h.cold = flags & FLAG_COLD != 0;
-    h.wall_off = r.u64()?;
-    r.pos = HAND_HEAD;
+    h.lease = Lease::from_words([r.u64()?, r.u64()?, r.u64()?, r.u64()?, r.u64()?]);
     for _ in 0..n {
         if r.left() < SLOT_HEAD as u64 {
             return Err(Error::Corrupt { at: r.pos });
@@ -318,32 +313,6 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
         }
         try_push(&mut h.slots, s)?;
     }
-    // Deze versie draagt altijd beide dienstblokken, ook leeg.
-    h.nat.masq_next = r.u64()? as u16;
-    r.u64()?; // de gateway-MAC van een oudere kern: niet overgenomen
-    let nf = bounded(r.u64()?, MAX_FLOWS as u64, r.pos)?;
-    if nf * 24 > r.left() {
-        return Err(Error::Corrupt { at: r.pos });
-    }
-    for _ in 0..nf {
-        let (w0, w1, w2) = (r.u64()?, r.u64()?, r.u64()?);
-        try_push(
-            &mut h.nat.flows,
-            FlowState {
-                proto: w0 as u8,
-                slot: (w0 >> 8) as u8,
-                fins: (w0 >> 16) as u8,
-                slot_port: (w0 >> 32) as u16,
-                dst_port: (w0 >> 48) as u16,
-                slot_ip: w1 as u32,
-                dst_ip: (w1 >> 32) as u32,
-                node_port: w2 as u16,
-            },
-        )?;
-    }
-    // De agent-state van een oudere kern: altijd leeg, niet overgenomen.
-    let na = r.u64()?;
-    r.bytes(na)?;
     Ok(h)
 }
 
@@ -463,22 +432,15 @@ pub fn adopted(mem: &mut impl PhysMem, plan: &FlipPlan, jumped: bool) -> Result<
 
 /// De stappen van de flip, in volgorde. Een nieuwe stap hoort ACHTERAAN:
 /// ertussen schuiven hernummert de rest, en dan meldt een oudere kern zijn
-/// eigen stand verkeerd (06-09, het kostte een ronde).
+/// eigen stand verkeerd (06-09, het kostte een ronde). De vier stappen
+/// zonder schrijver gingen eruit met `FLIP_ABI` 4 (01-11).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum Stage {
     /// Bundel opgehaald en geverifieerd.
     Fetched = 1,
-    /// Het lifecycle-venster vast.
-    WindowHeld,
     /// Bundel gevalideerd.
     BundleOk,
-    /// Venster geleend.
-    Borrowed,
-    /// Vectoren geïnstalleerd.
-    Vectors,
-    /// Venster gewist.
-    Scrubbed,
     /// Segmenten geplaatst.
     Placed,
     /// Relocaties toegepast.
@@ -504,11 +466,7 @@ impl Stage {
         use Stage::*;
         [
             Fetched,
-            WindowHeld,
             BundleOk,
-            Borrowed,
-            Vectors,
-            Scrubbed,
             Placed,
             Rebased,
             Captured,
@@ -528,11 +486,7 @@ impl Stage {
     pub fn describe(self) -> &'static str {
         match self {
             Stage::Fetched => "bundle fetched and verified",
-            Stage::WindowHeld => "slot lifecycle window held",
             Stage::BundleOk => "bundle validated",
-            Stage::Borrowed => "window borrowed from the pool",
-            Stage::Vectors => "vectors installed",
-            Stage::Scrubbed => "window scrubbed",
             Stage::Placed => "segments placed",
             Stage::Rebased => "relocations applied",
             Stage::Captured => "residents and NAT captured",
@@ -637,7 +591,10 @@ pub fn mark_early_boot(mem: &mut impl PhysMem, plan: &FlipPlan) {
 /// en de ingangsconditie samen. De Go-generatie sprak ABI 2 (een geleend
 /// venster, `RamStart`/`RamSize`-patches); v3 plaatst de nieuwe kern op het
 /// koude adres van de oude, dus een Go-bundel wordt hier geweigerd.
-pub const FLIP_ABI: u32 = 3;
+/// 4 sinds 01-11: het blob van versie 7; een kern van ABI 3 weigert zo'n
+/// bundel vóór de 202 in plaats van dat de nieuwe kern op een blob landt
+/// dat hij niet leest.
+pub const FLIP_ABI: u32 = 4;
 /// "HOPRELO1" little-endian: hetzelfde woord als `mkkernel -elfreloc`.
 pub const RELOC_MAGIC: u64 = 0x314F_4C45_5250_4F48;
 /// De kop van de staart: magic, versie, flip-ABI, ELF-maat, linkbasis,
@@ -848,8 +805,8 @@ pub fn flatten(bundle: &Bundle<'_>, mem: &mut impl PhysMem, dst: u64) -> Result<
     Ok(n)
 }
 
-/// De eerste acht bytes van een som als getal: de `bundle_sum` in het
-/// handoff-blob ("flip naar deze bundel" mag geen eeuwige lus worden).
+/// De eerste acht bytes van een som als getal: kort genoeg voor een
+/// foutmelding (`Error::Version`).
 #[must_use]
 pub fn sum64(sum: &[u8; 32]) -> u64 {
     let mut w = [0u8; 8];
@@ -888,14 +845,18 @@ mod tests {
         first.ports = vec![8080, 443];
         first.mounts = vec![m("/data", "/data"), m("/shared/logs", "/logs")];
         let h = Handoff {
-            old_base: 0x4000_0000,
-            old_size: 0x0F00_0000,
-            window: 0xA0E0_0000,
-            total: 0x0F20_0000,
             generation: 2,
             slots: vec![first, st(7, 0x9000_0000, 48, 3)],
             wall_off: 1_790_767_915_253_886_881,
-            ..Handoff::default()
+            lease: Some(Lease {
+                ip: 0x0A00_020F,
+                mask: 0xFFFF_FF00,
+                gateway: 0x0A00_0202,
+                dns: 0x0A00_0203,
+                server: 0x0A00_0202,
+                secs: [86400, 43200, 75600],
+                bound_ns: 1_234_567_890,
+            }),
         };
         let b = encode(&h, HANDOFF_TAIL).unwrap();
         assert_eq!(decode(&b).unwrap(), h);
@@ -937,24 +898,6 @@ mod tests {
     }
 
     #[test]
-    fn a_blob_from_before_the_wall_clock_gives_no_clock() {
-        // Een kern van vóór 30-09 schrijft nul op het kopwoord: dat is
-        // "geen klok", en de rest van het blob blijft wat het was.
-        let h = Handoff {
-            generation: 3,
-            slots: vec![st(1, 0xBC00_0000, 64, 1)],
-            wall_off: 1_790_767_915_253_886_881,
-            ..Handoff::default()
-        };
-        let mut b = encode(&h, HANDOFF_TAIL).unwrap();
-        b[WALL_OFF_OFF..WALL_OFF_OFF + 8].fill(0);
-        let d = decode(&b).unwrap();
-        assert_eq!(d.wall_off, 0);
-        assert_eq!(d.slots, h.slots);
-        assert_eq!(d.generation, 3);
-    }
-
-    #[test]
     fn the_new_image_goes_behind_hop_in_the_staging() {
         let (stage, max) = (0xB020_0000u64, 0x00E0_0000u64);
         // Geen Hop: vooraan.
@@ -976,25 +919,19 @@ mod tests {
     }
 
     #[test]
-    fn a_cold_handoff_carries_its_flag_and_nothing_to_adopt() {
-        let cold = Handoff {
-            generation: 3,
-            bundle_sum: 0xfeed,
-            cold: true,
+    fn a_lease_of_zero_is_no_lease() {
+        let h = Handoff {
+            lease: Some(Lease {
+                ip: 0x0A00_020F,
+                ..Lease::default()
+            }),
             ..Handoff::default()
         };
-        let b = encode(&cold, HANDOFF_TAIL).unwrap();
-        let back = decode(&b).unwrap();
-        assert!(back.cold && back.slots.is_empty() && back.nat.flows.is_empty());
-        assert_eq!(back, cold);
-        // Een blob van vóór de vlag (nul op zijn plek) is warm.
-        let warm = encode(&Handoff::default(), HANDOFF_TAIL).unwrap();
-        assert_eq!(&warm[FLAGS_OFF..FLAGS_OFF + 8], &[0; 8]);
-        assert!(!decode(&warm).unwrap().cold);
-        // Een onbekende vlag is een blob van een latere kern: een fout.
-        let mut later = b.clone();
-        later[FLAGS_OFF] = 0x3;
-        assert!(decode(&later).is_err());
+        let b = encode(&h, HANDOFF_TAIL).unwrap();
+        assert_eq!(decode(&b).unwrap(), h);
+        let mut old = b.clone();
+        old[LEASE_OFF..HAND_HEAD].fill(0);
+        assert_eq!(decode(&old).unwrap().lease, None);
     }
 
     #[test]
@@ -1008,8 +945,8 @@ mod tests {
         let breaks: [fn(&mut [u8]); 4] = [
             |b| b[0] ^= 0xFF,
             |b| b[8..16].copy_from_slice(&99u64.to_le_bytes()),
-            |b| b[48..56].copy_from_slice(&(1u64 << 40).to_le_bytes()),
-            |b| b[48..56].copy_from_slice(&4u64.to_le_bytes()),
+            |b| b[16..24].copy_from_slice(&(1u64 << 40).to_le_bytes()),
+            |b| b[16..24].copy_from_slice(&4u64.to_le_bytes()),
         ];
         for brk in breaks {
             let mut b = good.clone();
@@ -1017,68 +954,6 @@ mod tests {
             assert!(decode(&b).is_err());
         }
         assert!(decode(&good[..32]).is_err());
-    }
-
-    #[test]
-    fn handoff_nat_round_trip() {
-        let h = Handoff {
-            generation: 1,
-            nat: NatState {
-                masq_next: 20345,
-                flows: vec![
-                    FlowState {
-                        proto: 6,
-                        slot: 3,
-                        fins: 2,
-                        slot_port: 49152,
-                        dst_port: 443,
-                        node_port: 20001,
-                        slot_ip: 0x0A64_0004,
-                        dst_ip: 0x0808_0808,
-                    },
-                    FlowState {
-                        proto: 17,
-                        slot: 1,
-                        fins: 0,
-                        slot_port: 5353,
-                        dst_port: 53,
-                        node_port: 20002,
-                        slot_ip: 0x0A64_0002,
-                        dst_ip: 0x0A00_0203,
-                    },
-                ],
-            },
-            ..Handoff::default()
-        };
-        assert_eq!(decode(&encode(&h, HANDOFF_TAIL).unwrap()).unwrap(), h);
-    }
-
-    #[test]
-    fn handoff_full_conntrack_fits() {
-        let mut h = Handoff {
-            generation: 1,
-            ..Handoff::default()
-        };
-        for i in 0..MAX_FLOWS {
-            h.nat.flows.push(FlowState {
-                proto: 6,
-                slot: (i % 64 + 1) as u8,
-                slot_port: (30000 + i % 1000) as u16,
-                dst_port: 443,
-                node_port: (20000 + i % 9000) as u16,
-                slot_ip: 0x0A64_0002,
-                dst_ip: 0x0808_0808,
-                fins: 0,
-            });
-        }
-        for s in 1..=16 {
-            let mut x = st(s, (s as u64) << 24, 64, s);
-            x.job = b"some-job-name".to_vec();
-            x.ports = vec![8080, 443];
-            h.slots.push(x);
-        }
-        let b = encode(&h, HANDOFF_TAIL).unwrap();
-        assert_eq!(decode(&b).unwrap().nat.flows.len(), MAX_FLOWS);
     }
 
     #[test]
@@ -1101,8 +976,14 @@ mod tests {
     }
 
     #[test]
-    fn handoff_rejects_truncated_services() {
-        let b = encode(&Handoff::default(), HANDOFF_TAIL).unwrap();
+    fn handoff_rejects_truncated_slots() {
+        let mut one = st(2, 0x9000_0000, 32, 2);
+        one.job = b"job".to_vec();
+        let h = Handoff {
+            slots: vec![one],
+            ..Handoff::default()
+        };
+        let b = encode(&h, HANDOFF_TAIL).unwrap();
         for n in [HAND_HEAD, HAND_HEAD + 24, b.len() - 8] {
             assert!(decode(&b[..n]).is_err(), "accepted truncation at {n}");
         }

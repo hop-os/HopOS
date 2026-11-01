@@ -64,8 +64,6 @@ const FLOW_LOG_EVERY: u64 = 30 * SEC;
 
 /// Het plafond van de publicatietabel.
 pub const MAX_PUBS: usize = 512;
-/// Het plafond van de adoptieclaims tijdens een kern-flip.
-pub const MAX_ADOPT: usize = 256;
 
 /// Een transportprotocol dat gepubliceerd kan worden. De Go-API nam een
 /// string en weigerde "icmp" bij runtime; hier kan het niet eens.
@@ -131,15 +129,6 @@ struct Pub {
     slot_port: u16,
 }
 
-/// Alles wat de NAT aan een volgende kern doorgeeft ([`NatState`]).
-///
-/// Wat BEWUST niet meegaat: de next-hops (die staan in de neighbour-tabel
-/// van de node-stack, en de nieuwe vraagt ze opnieuw op het eerste frame:
-/// een verkeerd overgenomen next-hop is erger dan één ARP-ronde), en `seen`
-/// per flow (de nieuwe kern zet hem op "nu"; de flip-duur telt zo niet als
-/// idle-tijd).
-pub use abi::{FlowState, NatState};
-
 /// De neighbour-tabel van de node-stack, waar de NAT zijn next-hops uit
 /// haalt (Linux: `neigh_resolve_output` uit dezelfde tabel als de eigen
 /// verbindingen). Tijd is de klok van de switch.
@@ -188,24 +177,31 @@ pub struct Nat {
     next_sweep: u64,
     next_full_log: u64,
     next_slot_full_log: [u64; SLOT_CAP + 1],
-    /// Tijdens een adoptie zijn deze node-poorten nog van de overgedragen
-    /// apps, ook als hun routering nog niet terug is. `Some` houdt ook
-    /// nieuwe uitgaande toewijzing tegen tot het herstel.
-    adoption: Option<BoundedVec<u16, MAX_ADOPT>>,
+}
+
+/// Waar de masquerade begint: een plek in het bereik die per boot verschilt
+/// (de klok bij de start), zoals Linux zijn bronpoorten spreidt (RFC 6056).
+/// Een kern na een flip geeft zo niet meteen de node-poorten van de vorige
+/// opnieuw uit aan een peer die het oude tupel nog open heeft: de slirp van
+/// QEMU antwoordde dan een nieuwe SYN met een RST (01-11).
+#[must_use]
+pub fn masq_start(seed: u64) -> u16 {
+    let span = u64::from(MASQ_END - MASQ_BASE);
+    MASQ_BASE + u16::try_from(seed % span).unwrap_or(0)
 }
 
 impl Nat {
-    /// Een lege NAT; alloceert zijn tabellen één keer (boot).
-    pub fn new() -> Result<Self, Error> {
+    /// Een lege NAT die zijn masquerade-poorten vanaf `first` uitdeelt;
+    /// alloceert zijn tabellen één keer (boot).
+    pub fn new(first: u16) -> Result<Self, Error> {
         Ok(Self {
             pubs: BoundedVec::new(),
             uplink: None,
             flows: FlowTable::new()?,
-            masq_next: MASQ_BASE,
+            masq_next: first,
             next_sweep: 0,
             next_full_log: 0,
             next_slot_full_log: [0; SLOT_CAP + 1],
-            adoption: None,
         })
     }
 
@@ -306,12 +302,6 @@ impl Nat {
         let Some(u) = self.uplink else { return false };
         if be32(f, ETH_LEN + 16) != u.ip {
             return false; // niet van ons: de node-stack mag hem hebben
-        }
-        let dport = be16(f, ip.l4 + 2);
-        if self.adoption.as_ref().is_some_and(|a| a.contains(&dport)) {
-            // Nog van de overgedragen app; nooit naar de node-stack, want een
-            // TCP-reset daar zou een levende appverbinding doden.
-            return true;
         }
         // Vóór het herschrijven: de bezorging zet de MAC's van het slot.
         let (src_ip, src_mac) = (be32(f, ETH_LEN + 12), mac_at(f, 6));
@@ -685,12 +675,6 @@ impl Nat {
         dst_port: u16,
         now: u64,
     ) -> Option<(Id, bool)> {
-        // Een aangesloten app kan zenden vóór zijn oude conntrack terug is.
-        // Een nieuwe mapping zou de oude tupel en poort voor het herstel
-        // verbergen; de retransmit na het einde van de adoptie volgt.
-        if self.adoption.is_some() {
-            return None;
-        }
         let k = FKey(proto, slot_ip, dst_ip, slot_port, dst_port);
         if let Some(id) = self.lookup_flow(&k, now) {
             return Some((id, false));
@@ -878,101 +862,6 @@ impl Nat {
     #[must_use]
     pub fn flow_count(&self) -> usize {
         self.flows.len()
-    }
-
-    // --- Kern-flip --------------------------------------------------------
-
-    /// Houdt `node_ports` vast voor de overgedragen apps, vóór de externe RX
-    /// start. Pakketten wachten niet in een nieuwe rij; TCP probeert opnieuw
-    /// zodra de gewone routering klaarstaat.
-    pub fn hold_adoption(&mut self, node_ports: &[u16]) -> Result<(), Error> {
-        let mut v = BoundedVec::new();
-        for &p in node_ports {
-            v.push(p)
-                .map_err(|_| Error::Full("adoption ports", MAX_ADOPT))?;
-        }
-        self.adoption = Some(v);
-        Ok(())
-    }
-
-    /// Geeft de tijdelijke claims vrij ná slot- en NAT-herstel.
-    pub fn finish_adoption(&mut self) {
-        self.adoption = None;
-    }
-
-    /// Beschrijft de levende conntrack in `out` voor het handoff-blob.
-    /// Verlopen flows gaan niet mee. Past niet alles, dan gaat het eerste
-    /// deel mee (de staart heeft plaats voor `MAX_FLOWS`).
-    pub fn snapshot<'o>(&self, now: u64, out: &'o mut [FlowState]) -> NatState<&'o [FlowState]> {
-        let mut n = 0;
-        for id in self.flows.ids() {
-            let Some(fl) = self.flows.get(id) else {
-                continue;
-            };
-            if flow_expired(fl, now) || fl.slot < 1 {
-                continue;
-            }
-            let Some(o) = out.get_mut(n) else { break };
-            *o = FlowState {
-                proto: fl.proto,
-                slot: fl.slot,
-                fins: u8::from(fl.fin_fwd) | (u8::from(fl.fin_rev) << 1),
-                slot_port: fl.slot_port,
-                dst_port: fl.dst_port,
-                node_port: fl.node_port,
-                slot_ip: fl.slot_ip,
-                dst_ip: fl.dst_ip,
-            };
-            n += 1;
-        }
-        NatState {
-            flows: out.get(..n).unwrap_or(&[]),
-            masq_next: self.masq_next,
-        }
-    }
-
-    /// Bouwt de conntrack terug en geeft het aantal herstelde flows. Na de
-    /// slot-adoptie aanroepen: een flow van een slot dat de flip niet
-    /// overleefde (`attached` zegt nee) hoort niet te blijven staan, en zijn
-    /// poort hoort vrij te komen.
-    pub fn restore(
-        &mut self,
-        s: &NatState<&[FlowState]>,
-        attached: impl Fn(usize) -> bool,
-        now: u64,
-    ) -> usize {
-        if (MASQ_BASE..MASQ_END).contains(&s.masq_next) {
-            self.masq_next = s.masq_next;
-        }
-        let mut n = 0;
-        for f in s.flows {
-            let slot = usize::from(f.slot);
-            if !(1..=SLOT_CAP).contains(&slot) || !attached(slot) {
-                continue; // het slot leeft niet meer: de flow ook niet
-            }
-            if self.flows.is_full() || self.flows.count(slot) >= MAX_FLOWS_PER_SLOT {
-                continue;
-            }
-            let fl = Flow {
-                proto: f.proto,
-                slot: f.slot,
-                fin_fwd: f.fins & 1 != 0,
-                fin_rev: f.fins & 2 != 0,
-                slot_ip: f.slot_ip,
-                dst_ip: f.dst_ip,
-                slot_port: f.slot_port,
-                dst_port: f.dst_port,
-                node_port: f.node_port,
-                seen: now,
-            };
-            if self.flows.by_fwd(&fl.fkey()).is_some() || self.flows.by_rev(&fl.rkey()).is_some() {
-                continue;
-            }
-            if self.flows.insert(fl).is_some() {
-                n += 1;
-            }
-        }
-        n
     }
 }
 

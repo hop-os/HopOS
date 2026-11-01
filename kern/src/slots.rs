@@ -298,10 +298,6 @@ pub enum Request {
         /// Voor wie.
         what: &'static str,
     },
-    /// Zet de poorten van elke bewoner opnieuw door
-    /// ([`Lifecycle::republish`]): na een adoptie waarvan de eerste poging
-    /// geen switch vond. Alleen de kern stuurt dit.
-    Republish,
 }
 
 /// Een verzameling slots: bit `i - 1` voor slot `i`.
@@ -935,10 +931,6 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             }
             Request::ReleaseDevice { region, what } => {
                 self.release_device(region, what).map(|()| Response::Done)
-            }
-            Request::Republish => {
-                self.republish().await;
-                Ok(Response::Done)
             }
         };
         r.unwrap_or_else(Response::Failed)
@@ -1666,19 +1658,16 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         Ok(states.len())
     }
 
-    /// Zet de poorten van elke geadopteerde bewoner opnieuw door: de NAT is
-    /// van de switch van déze kern en begon leeg (Go: de her-publicatie in
-    /// `adopt.go`). Na [`Lifecycle::adopt`], vóór het eerste verzoek. Een
-    /// weigering is één regel en laat de bewoner staan: hij draait, alleen
-    /// niet van buiten bereikbaar, en een stop van Hop ruimt op.
+    /// Zet de poorten van elke geadopteerde bewoner door: ze horen bij de
+    /// slots, en de NAT van deze kern begon leeg. Na [`Lifecycle::adopt`],
+    /// als het net luistert (de bootreeks: lease, uplink, stack, listener,
+    /// slots, Hop). Een weigering is een regel (`publish`), de bewoner
+    /// draait door.
     pub async fn republish(&mut self) {
         for i in 1..=SLOT_CAP {
             let Some(slot) = Slot::new(i) else { continue };
-            let ports = match self.resident(slot) {
-                Some(r) if !r.ports.is_empty() => match try_vec(&r.ports) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                },
+            let ports = match self.resident(slot).map(|r| try_vec(&r.ports)) {
+                Some(Ok(p)) => p,
                 _ => continue,
             };
             let _ = self.publish(slot, &ports).await;
@@ -2744,7 +2733,9 @@ pub(crate) mod tests {
         let mut states = [st(1, 3, 2, 0x8000_0000), st(2, 1, 1, 0x8200_0000)];
         states[1].ports = vec![80];
         assert_eq!(a.adopt(&states).unwrap(), 2);
-        // De NAT van de nieuwe kern is leeg: alleen slot 2 had poorten.
+        // De NAT van de nieuwe kern is leeg: de poorten gaan open als het
+        // net luistert, alleen slot 2 had er.
+        assert!(a.cage.published.is_empty());
         block_on(a.republish());
         assert_eq!(a.cage.published, [(2, vec![80])]);
         assert_eq!(

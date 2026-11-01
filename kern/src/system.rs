@@ -84,7 +84,7 @@ use core::future::Future;
 use core::sync::atomic::{AtomicBool, Ordering::AcqRel};
 use core::time::Duration;
 use sync::mpsc::Mailbox;
-use sync::{Either, LocalCell, Signal, select};
+use sync::{Either, LocalCell, select};
 
 // De framing, de kop van een call en het adresplan zijn van `abi`: de kern
 // codeert ze met dezelfde encoders als applib (review 01-10, "abi als
@@ -108,10 +108,6 @@ pub const MAX_STREAMS: usize = 8;
 /// enige heap die een streamende plaatsing per stroom kost (`maxHead` in
 /// `stream.go`).
 pub const MAX_HEAD: usize = 64 << 10;
-/// De logring per slot voor `NEXT_LOG`, in bytes (kop van 2 bytes per regel).
-pub const LOG_RING_BYTES: usize = 2048;
-/// De langste regel in die ring; langer wordt afgekapt.
-pub const LOG_LINE_MAX: usize = 256;
 /// Hoe vaak een wachtende verbinding kijkt of haar levensduur nog loopt.
 ///
 /// De stopbel van de servicer heeft één wachter (de servicer zelf), dus een
@@ -134,8 +130,6 @@ pub const LIFE_TICK: Duration = Duration::from_millis(100);
 /// verloren gaan); een app die minder dan eens per vijf minuten logt, betaalt
 /// dat hoogstens één keer per vijf minuten.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-
-const _: () = assert!(LOG_LINE_MAX + 2 <= LOG_RING_BYTES);
 
 /// De bevoegdheid van Hop: het enige token waarmee de lifecycle over de
 /// system-API bestuurd wordt.
@@ -342,193 +336,6 @@ fn refuse(out: &mut [u8], op: u8, seq: u32, status: u16, text: &[u8]) -> usize {
         data: text,
     };
     abi::hopabi::encode_resp(out, &r).unwrap_or(0)
-}
-
-// ---------------------------------------------------------------------------
-// De logring per slot (NEXT_LOG).
-// ---------------------------------------------------------------------------
-
-/// Eén ring van logregels: `[len u16][bytes]`, de oudste valt eruit; de
-/// schrijver wacht op niemand. De buffer komt pas bij de eerste regel: een
-/// slot dat nooit logt kost niets.
-#[derive(Debug, Default)]
-struct LineRing {
-    buf: Vec<u8>,
-    /// De leespositie.
-    head: usize,
-    /// Het aantal bezette bytes.
-    used: usize,
-}
-
-impl LineRing {
-    const fn new() -> LineRing {
-        LineRing {
-            buf: Vec::new(),
-            head: 0,
-            used: 0,
-        }
-    }
-
-    fn cap(&self) -> usize {
-        self.buf.len()
-    }
-
-    fn byte(&self, i: usize) -> u8 {
-        let cap = self.cap().max(1);
-        self.buf.get((self.head + i) % cap).copied().unwrap_or(0)
-    }
-
-    fn put(&mut self, at: usize, b: u8) {
-        let cap = self.cap().max(1);
-        if let Some(x) = self.buf.get_mut(at % cap) {
-            *x = b;
-        }
-    }
-
-    /// De lengte van de oudste regel, of `None` als de ring leeg is.
-    fn front_len(&self) -> Option<usize> {
-        (self.used >= 2).then(|| usize::from(u16::from_le_bytes([self.byte(0), self.byte(1)])))
-    }
-
-    /// Laat de oudste regel vallen.
-    fn drop_front(&mut self) {
-        let n = self
-            .front_len()
-            .map_or(self.used, |n| (n + 2).min(self.used));
-        self.head = (self.head + n) % self.cap().max(1);
-        self.used -= n;
-    }
-
-    /// Zet een regel erin, afgekapt op `max` bytes (en op wat de ring kan
-    /// dragen); vol is de oudste eruit.
-    fn push(&mut self, line: &[u8], max: usize) {
-        let cap = self.cap();
-        let max = max.min(cap.saturating_sub(2)).min(usize::from(u16::MAX));
-        if max == 0 {
-            return;
-        }
-        let line = line.get(..max).unwrap_or(line);
-        let need = line.len() + 2;
-        while cap - self.used < need {
-            self.drop_front();
-        }
-        let tail = self.head + self.used;
-        let len = (line.len() as u16).to_le_bytes();
-        for (i, b) in len.iter().chain(line).enumerate() {
-            self.put(tail + i, *b);
-        }
-        self.used += need;
-    }
-
-    fn pop(&mut self, dst: &mut [u8]) -> Option<usize> {
-        let n = self.front_len()?;
-        let k = n.min(dst.len());
-        for (i, d) in dst.iter_mut().take(k).enumerate() {
-            *d = self.byte(2 + i);
-        }
-        self.drop_front();
-        Some(k)
-    }
-
-    fn clear(&mut self) {
-        self.head = 0;
-        self.used = 0;
-    }
-
-    /// Een regel van een app: de buffer komt bij de eerste (faalbaar).
-    fn push_app(&mut self, line: &[u8]) {
-        if self.buf.is_empty() {
-            if self.buf.try_reserve_exact(LOG_RING_BYTES).is_err() {
-                return; // Geen heap: de regel gaat alleen naar de console.
-            }
-            self.buf.resize(LOG_RING_BYTES, 0);
-        }
-        self.push(line, LOG_LINE_MAX);
-    }
-}
-
-/// De korte logringen van alle slots, voor `NEXT_LOG`: Hop haalt er de
-/// regels van zijn apps uit.
-///
-/// Een leesbare tabel (handboek §1.1): de servicers schrijven via
-/// [`LogTee`], de system-API leest; elke lening duurt één regel, zonder
-/// `.await`. Vol is de oudste regel eruit; niets blokkeert.
-pub struct SlotLogs {
-    rings: LocalCell<[LineRing; SLOT_CAP + 1]>,
-    /// Een nieuwe regel voor Hop (`NEXT_STORE` met `NEXT_STORE_LOGS`).
-    news: Signal,
-}
-
-impl SlotLogs {
-    /// Een lege tabel, voor in een `static`.
-    #[must_use]
-    pub const fn new() -> SlotLogs {
-        SlotLogs {
-            rings: LocalCell::cell([const { LineRing::new() }; SLOT_CAP + 1]),
-            news: Signal::new(),
-        }
-    }
-
-    /// Zet een regel van `slot` in zijn ring.
-    pub fn push(&self, slot: Slot, line: &[u8]) {
-        if let Some(r) = self.rings.borrow_mut().get_mut(slot.get()) {
-            r.push_app(line);
-        }
-        self.news.set();
-    }
-
-    /// De bel voor Hop: er kwam een regel bij sinds hij hem nam.
-    pub fn news(&self) -> &Signal {
-        &self.news
-    }
-
-    /// Haalt de oudste regel van `slot` in `dst` (afgekapt op de lengte van
-    /// `dst`); `None` als er niets klaarstaat.
-    pub fn pop(&self, slot: Slot, dst: &mut [u8]) -> Option<usize> {
-        self.rings.borrow_mut().get_mut(slot.get())?.pop(dst)
-    }
-
-    /// Veegt de ring van `slot` (een nieuwe levensduur begint schoon).
-    pub fn clear(&self, slot: Slot) {
-        if let Some(r) = self.rings.borrow_mut().get_mut(slot.get()) {
-            r.clear();
-        }
-    }
-}
-
-impl Default for SlotLogs {
-    fn default() -> Self {
-        SlotLogs::new()
-    }
-}
-
-/// De haak die de logringen vult: een [`Console`] die elke app-regel ook in
-/// [`SlotLogs`] zet. Geef hem aan de servicer-taken en aan
-/// [`System::serve`] in plaats van de kale console.
-pub struct LogTee<'a, C> {
-    inner: C,
-    logs: &'a SlotLogs,
-}
-
-impl<'a, C: Console> LogTee<'a, C> {
-    /// Een tee over `inner` naar `logs`; `const`, zodat hij in een `static`
-    /// kan die alle verbindingstaken delen.
-    pub const fn new(inner: C, logs: &'a SlotLogs) -> Self {
-        LogTee { inner, logs }
-    }
-}
-
-impl<C: Console> Console for LogTee<'_, C> {
-    fn log(&self, args: fmt::Arguments<'_>) {
-        self.inner.log(args);
-    }
-    fn app_line(&self, slot: Slot, line: &[u8]) {
-        self.logs.push(slot, line);
-        self.inner.app_line(slot, line);
-    }
-    fn fatal(&self, args: fmt::Arguments<'_>) -> ! {
-        self.inner.fatal(args)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1440,7 +1247,6 @@ pub struct System<'i, 'r, const N: usize> {
     /// schrijf bouwt een nieuwe `Vec` en wisselt hem in één lening, dus een
     /// lezer ziet het oude of het nieuwe blob, nooit een mengsel.
     state: LocalCell<Vec<u8>>,
-    logs: Option<&'i SlotLogs>,
     console: Option<&'i crate::conport::Ring>,
     fs: Option<&'i FsInbox<'r>>,
     devices: Option<&'i crate::deviceabi::Inbox<'r>>,
@@ -1464,7 +1270,6 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             privilege,
             streams: LocalCell::cell([const { None }; MAX_STREAMS]),
             state: LocalCell::cell(Vec::new()),
-            logs: None,
             console: None,
             fs: None,
             devices: None,
@@ -1507,14 +1312,6 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         self
     }
 
-    /// Koppelt de logringen voor `NEXT_LOG` (gevuld door een [`LogTee`]).
-    /// Zonder ringen antwoordt `NEXT_LOG` altijd leeg.
-    #[must_use]
-    pub const fn with_logs(mut self, logs: &'i SlotLogs) -> Self {
-        self.logs = Some(logs);
-        self
-    }
-
     /// Laat een verbinding toe: het slot uit het bron-IP, een levende
     /// servicer, en hooguit [`MAX_SYSTEM_CONNS`] van die levensduur (Hop
     /// [`MAX_HOP_CONNS`]); de verbindingen van een vorige levensduur tellen
@@ -1551,8 +1348,8 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// (elk in een eigen taak): `buf` is de callbuffer van déze verbinding,
     /// `out` haar antwoordbuffer, `reply` haar antwoordplek bij de actor.
     /// `timer` draagt de tik van het toezicht. Een log-frame (`Kind::Log`) gaat
-    /// naar `log.app_line`: geef een [`LogTee`] mee om het ook in `NEXT_LOG`
-    /// te zien. Een Rust-app logt via de outbox; `Kind::Log` blijft voor de
+    /// naar `log.app_line`, dus op de console (en zo bij Hop, `NEXT_LOG` 0).
+    /// Een Rust-app logt via de outbox; `Kind::Log` blijft voor de
     /// Go-apps (`Logf` van de Go-SDK `metal/v2` schrijft elke regel zo,
     /// slot-ABI 10) en appspike toetst hem.
     #[expect(
@@ -1767,10 +1564,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             reply,
             timer,
             log,
-            news: [
-                self.console.map(crate::conport::Ring::news),
-                self.logs.map(SlotLogs::news),
-            ],
+            news: self.console.map(crate::conport::Ring::news),
         };
         crate::store::serve(&cx, h, buf, out).await
     }
@@ -1830,14 +1624,16 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             PrivOp::NextLog => {
                 let max = usize::try_from(c.n).unwrap_or(usize::MAX).min(data.len());
                 let dst = data.get_mut(..max).unwrap_or(&mut []);
-                // Slot 0 is de kern zelf, zoals bij SLOT_STATUS.
-                let line = if c.off == 0 {
-                    self.console.and_then(|k| k.hop_line(dst))
-                } else {
-                    let slot = target(c)?;
-                    self.logs.and_then(|l| l.pop(slot, dst))
-                };
-                match line {
+                // Alleen slot 0: de console, met de regels van de apps erin
+                // (`slot N: ...`); Hop splitst ze zelf op slot.
+                if c.off != 0 {
+                    return Err(Error::SlotRange {
+                        slot: usize::try_from(c.off).unwrap_or(usize::MAX),
+                        max: 0,
+                    }
+                    .into());
+                }
+                match self.console.and_then(|k| k.hop_line(dst)) {
                     Some(n) => Ok((1, n)),
                     None => Ok((0, 0)),
                 }
@@ -2101,9 +1897,6 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 return Err(e);
             }
         };
-        if let Some(e) = self.logs {
-            e.clear(slot);
-        }
         if let Some(s) = self.put_stream(Stream {
             grant,
             placer,
@@ -2811,12 +2604,12 @@ mod tests {
     /// onbevoegde lezer blijft onbevoegd.
     #[test]
     fn slot_zero_is_the_kern() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         let mut hop = Pipe::new(
             port_ip4(1),
@@ -3050,7 +2843,7 @@ mod tests {
         p: &mut Pipe,
         mem: &mut SparseMem,
         hooks: &NoHooks,
-        tee: &LogTee<'_, &FakeConsole>,
+        tee: &&FakeConsole,
         mut svc: Option<&mut Servicer<'_>>,
     ) -> End {
         let who = sys.admit(p.ip).unwrap();
@@ -3232,12 +3025,12 @@ mod tests {
     /// en slot 2 krijgt voor elke bevoegde op "denied".
     #[test]
     fn hop_drives_the_lifecycle_end_to_end() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
         let timer = FakeTimer::default();
         let mut sbuf = [0u8; 256];
         let mut servicer: Servicer<'_> = std::boxed::Box::pin(servicer_task(
@@ -3262,8 +3055,7 @@ mod tests {
                 enc(&stream_req(4, 3, c2 as u64, &img[c2..])),
                 op(PrivOp::SlotStatus, 5, 3, 128),
                 op(PrivOp::NextLog, 6, 3, 64),
-                op(PrivOp::NextLog, 7, 3, 64),
-                op(PrivOp::SetClock, 8, 0, 1_759_000_000),
+                op(PrivOp::SetClock, 7, 0, 1_759_000_000),
             ],
         );
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
@@ -3280,7 +3072,7 @@ mod tests {
         );
         assert_eq!(r, End::Peer, "stream should end at EOF");
         let res = results(&p.tx);
-        assert_eq!(res.len(), 8);
+        assert_eq!(res.len(), 7);
         assert_eq!(
             (res[0].1, res[0].3),
             (STATUS_OK, 3),
@@ -3294,8 +3086,11 @@ mod tests {
         let info = SlotInfo::decode(&res[4].4).unwrap();
         assert_eq!(info.slot_state(), Some(SlotState::Running));
         assert_eq!(info.partition, 8 * MIB);
-        assert_eq!((res[5].3, &res[5].4[..]), (1, &b"app says hi"[..]));
-        assert_eq!((res[6].3, res[6].4.len()), (0, 0), "log ring drained");
+        // De regel van de app gaat naar de console (daar leest Hop hem met
+        // NEXT_LOG 0); een ring per slot is er niet meer.
+        assert_ne!(res[5].1, STATUS_OK, "NEXT_LOG on slot 3");
+        assert_eq!(con.app.borrow().as_slice(), &[(3, b"app says hi".to_vec())]);
+        assert_eq!(res[6].1, STATUS_OK, "SET_CLOCK");
         assert_eq!(hooks.0.get(), 1_759_000_000);
 
         // De poorten gingen bij de plaatsing open, elk één keer.
@@ -3362,8 +3157,8 @@ mod tests {
     /// `..` wordt geweigerd vóór de claim: het slot blijft leeg.
     #[test]
     fn a_start_with_volumes_reaches_the_mount_table() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3427,8 +3222,8 @@ mod tests {
     /// ongedefinieerde en een te lange naam over, en patcht dezelfde plekken.
     #[test]
     fn a_large_symtab_is_searched_in_chunks() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3475,8 +3270,8 @@ mod tests {
     /// een stop halverwege: telkens ruimt de kern het slot zelf op.
     #[test]
     fn failed_streams_leave_nothing_behind() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3533,8 +3328,8 @@ mod tests {
 
     #[test]
     fn file_calls_travel_to_the_hopfs_actor_and_back() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3600,8 +3395,8 @@ mod tests {
 
     #[test]
     fn flip_without_a_bundle_never_reaches_the_hook() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3632,8 +3427,8 @@ mod tests {
 
     #[test]
     fn flip_bundle_streams_raw_and_reaches_the_hook_once() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3717,8 +3512,8 @@ mod tests {
 
     #[test]
     fn hop_state_round_trips_by_offset_and_is_wiped_by_zero_bytes() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3787,8 +3582,8 @@ mod tests {
 
     #[test]
     fn an_app_may_not_touch_the_state_or_restart_hop() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3813,8 +3608,8 @@ mod tests {
 
     #[test]
     fn hop_restart_checks_its_fields_before_the_hook() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3875,8 +3670,8 @@ mod tests {
 
     #[test]
     fn a_hop_image_streams_raw_like_a_flip_bundle_and_is_claimed_once() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3942,8 +3737,8 @@ mod tests {
 
     #[test]
     fn the_open_streams_of_an_old_hop_are_dropped() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -3990,47 +3785,15 @@ mod tests {
     }
 
     #[test]
-    fn log_ring_drops_the_oldest_and_truncates() {
-        let logs = SlotLogs::new();
-        let mut buf = [0u8; LOG_LINE_MAX + 8];
-        assert_eq!(logs.pop(s(4), &mut buf), None);
-        let long = [b'x'; LOG_LINE_MAX + 50];
-        logs.push(s(4), &long);
-        assert_eq!(logs.pop(s(4), &mut buf), Some(LOG_LINE_MAX));
-        for i in 0..100u8 {
-            logs.push(s(4), &[i; 40]);
-        }
-        // De ring houdt de nieuwste regels; de oudste zijn eruit.
-        let mut seen = Vec::new();
-        while let Some(n) = logs.pop(s(4), &mut buf) {
-            assert_eq!(n, 40);
-            seen.push(buf[0]);
-        }
-        assert_eq!(*seen.last().unwrap(), 99);
-        assert_eq!(seen.len(), LOG_RING_BYTES / 42);
-        assert!(seen.windows(2).all(|w| w[1] == w[0] + 1));
-        // Afkappen op de maat van de lezer.
-        logs.push(s(4), b"abcdef");
-        assert_eq!(logs.pop(s(4), &mut buf[..3]), Some(3));
-        assert_eq!(&buf[..3], b"abc");
-        logs.push(s(5), b"weg");
-        logs.clear(s(5));
-        assert_eq!(logs.pop(s(5), &mut buf), None);
-    }
-
-    #[test]
     fn next_log_zero_is_the_console_of_the_kern_and_privileged() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
         let kern = crate::conport::tests::ring(256);
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8)
-            .with_logs(&logs)
-            .with_console(&kern);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_console(&kern);
         kern.append(b"net: 10.0.2.15 HOPOS_NET_UP\n");
-        logs.push(s(2), b"an app line");
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         // Een app mag hem niet lezen.
         let mut app = Pipe::new(port_ip4(2), &[op(PrivOp::NextLog, 1, 0, 64)]);
@@ -4042,21 +3805,22 @@ mod tests {
             port_ip4(1),
             &[
                 op(PrivOp::NextLog, 1, 0, 64),
-                op(PrivOp::NextLog, 2, 0, 64),
-                op(PrivOp::NextLog, 3, 2, 64),
+                op(PrivOp::NextLog, 2, 2, 64),
+                op(PrivOp::NextLog, 3, 0, 64),
                 op(PrivOp::NextLog, 4, 0, 3),
             ],
         );
-        kern.append(b"second line\n");
+        kern.append(b"slot 2: an app line\n");
         let _ = drive(
             &sys, &mut a, &inbox, &reply, &mut hop, &mut mem, &hooks, &tee, None,
         );
         let res = results(&hop.tx);
         assert_eq!((res[0].1, res[0].3), (STATUS_OK, 1));
         assert_eq!(&res[0].4[..], b"net: 10.0.2.15 HOPOS_NET_UP");
-        assert_eq!(&res[1].4[..], b"second line");
-        // Slot 2 houdt zijn eigen ring.
-        assert_eq!(&res[2].4[..], b"an app line");
+        // Geen ring per slot meer: NEXT_LOG kent alleen slot 0.
+        assert_ne!(res[1].1, STATUS_OK, "NEXT_LOG on slot 2");
+        // De regel van de app staat op de console; Hop splitst op slot.
+        assert_eq!(&res[2].4[..], b"slot 2: an app line");
         assert_eq!((res[3].1, res[3].3), (STATUS_OK, 0), "drained");
     }
 
@@ -4206,13 +3970,13 @@ mod tests {
     /// slot 1 krijgt zijn antwoorden terwijl slot 2 zwijgt en openstaat.
     #[test]
     fn a_silent_connection_does_not_hold_up_another() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         // De antwoordplekken leven langer dan de inbox die ernaar wijst.
         let (mut s1, mut s2) = (Seat::new(), Seat::new());
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
         let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
         let mut quiet = Pipe::silent(port_ip4(2));
         let mut hop = Pipe::new(
@@ -4276,8 +4040,8 @@ mod tests {
     /// geeft hun plaatsen terug; daartussen houdt de cap de derde buiten.
     #[test]
     fn a_stop_closes_every_connection_of_the_slot() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let mut a = node(&svc, &con);
         let (mut s1, mut s2) = (Seat::new(), Seat::new());
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
@@ -4350,8 +4114,8 @@ mod tests {
     /// [`IDLE_TIMEOUT`], niet eerder.
     #[test]
     fn a_silent_connection_of_a_live_slot_times_out() {
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
         let _a = node(&svc, &con);
         let mut seat = Seat::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();

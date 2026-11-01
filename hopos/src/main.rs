@@ -64,7 +64,7 @@ use cpu::println;
 use executor::Executor;
 use glue::{DevMem, KernConsole};
 use kern::slots::{Envelope, Reply, Servicers};
-use kern::system::{Hooks, LogTee, Privilege, System};
+use kern::system::{Hooks, Privilege, System};
 use netdev::Device;
 use sync::mpsc::Mailbox;
 use sync::{Local, Signal};
@@ -550,7 +550,6 @@ static STORE: kern::store::StoreQueue = kern::store::StoreQueue::new();
 #[inline(never)] // eigen frame, niet in dat van `setup`
 fn system(privilege: Option<Privilege>, fs: bool, max_slots: usize) -> &'static KernSystem {
     let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, max_slots)
-        .with_logs(&slots::LOGS)
         .with_console(&conport::RING)
         .with_store(&STORE);
     if fs {
@@ -569,12 +568,13 @@ static SYSTEM_REPLIES: [Reply; net::SYSTEM_WORKERS] = [const { Reply::new() }; n
 
 /// De system-API van de kern: één, bij boot gebouwd ([`system`]).
 pub(crate) type KernSystem = System<'static, 'static, LIFECYCLE_DEPTH>;
-/// De console van de system-API: de kernconsole met de logrij van de slots.
-type SystemLog = LogTee<'static, KernConsole>;
+/// De console van de system-API: de kernconsole (een regel van een app gaat
+/// daar met `slot N:` ervoor in de ring, en zo naar Hop).
+type SystemLog = KernConsole;
 
 /// De haken en de console van de system-API, gedeeld door alle taken.
 static SYSTEM_HOOKS: BootHooks = BootHooks;
-static SYSTEM_LOG: SystemLog = LogTee::new(KernConsole, &slots::LOGS);
+static SYSTEM_LOG: SystemLog = KernConsole;
 
 /// De system-API voor de listener.
 fn system_api(system: &'static KernSystem) -> net::SystemApi {

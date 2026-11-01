@@ -211,7 +211,7 @@ use kern::slots::{
     Envelope, Lifecycle, Mount, Reply, Request, Response, Servicers, SlotStatus, StartSpec, call,
     servicer_task,
 };
-use kern::system::{Fail, LogTee, SlotLogs};
+use kern::system::Fail;
 use kern::{Region, Slot};
 use sync::mpsc::Mailbox;
 use sync::{Local, Signal, select};
@@ -225,10 +225,6 @@ static INBOX: &Mailbox<Envelope<'static>, { crate::LIFECYCLE_DEPTH }> = &crate::
 /// De servicer-tabel: de actor schrijft, de servicers en `admit` van de
 /// system-listener lezen.
 static SERVICERS: &Servicers = &crate::SERVICERS;
-
-/// De logringen per slot voor `NEXT_LOG` van de system-API: de servicers
-/// schrijven er elke app-regel in (via [`LogTee`]), de listener leest.
-pub(crate) static LOGS: SlotLogs = SlotLogs::new();
 
 /// De antwoordplek van de supervisor van Hop ([`HopNode::supervise`]):
 /// `ask`, `status`, `stop`, `place` en `drop_streams`. Eén aanroeper: de
@@ -563,7 +559,7 @@ async fn servicer(exec: &'static Executor, slot: Slot, ctx: dev::Pa) {
         SERVICERS,
         |part| SlotOutbox::open(slot, part, ctx),
         &timer,
-        &LogTee::new(KernConsole, &LOGS),
+        &KernConsole,
         INBOX,
         &mut buf,
     )

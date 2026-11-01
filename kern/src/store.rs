@@ -543,9 +543,9 @@ pub struct Ctx<'a, 'r, T, C> {
     pub timer: &'a T,
     /// De console.
     pub log: &'a C,
-    /// De bellen van nieuwe logregels voor Hop: de console van de kern en
-    /// de ringen van de apps.
-    pub news: [Option<&'a Signal>; 2],
+    /// De bel van nieuwe logregels voor Hop: de console, met de regels van
+    /// de apps erin.
+    pub news: Option<&'a Signal>,
 }
 
 /// Dient één store-call; geeft de lengte van het antwoord in `out`.
@@ -759,14 +759,14 @@ async fn next<T: Timer, C: Console>(
     let until = cx.timer.now().saturating_add(nanos(wait));
     let hop = cx.hop_slot.and_then(|s| cx.svc.current(s));
     let data = out.get_mut(HDR_LEN..).unwrap_or(&mut []);
-    let news = cx.news.map(|b| b.filter(|_| h.off & NEXT_STORE_LOGS != 0));
+    let news = cx.news.filter(|_| h.off & NEXT_STORE_LOGS != 0);
     let mut heard = false;
     loop {
         if let Some(n) = cx.queue.take(cx.svc, hop, data) {
             return Ok((1, n));
         }
-        // Een opdracht gaat voor; dan de bellen, die elk wekken één keer.
-        heard |= news.iter().flatten().fold(false, |any, b| b.take() | any);
+        // Een opdracht gaat voor; dan de bel, die één keer wekt.
+        heard |= news.is_some_and(Signal::take);
         if heard {
             return Ok((LOG_NEWS, 0));
         }
@@ -785,9 +785,12 @@ async fn next<T: Timer, C: Console>(
             return Ok((0, 0));
         }
         let left = Duration::from_nanos(until - now).min(LIFE_TICK);
-        let logs = select(rung(news[0]), rung(news[1]));
-        let woke = select(select(cx.queue.work.wait(), logs), cx.timer.sleep(left)).await;
-        heard = matches!(woke, Either::Left(Either::Right(_)));
+        let woke = select(
+            select(cx.queue.work.wait(), rung(news)),
+            cx.timer.sleep(left),
+        )
+        .await;
+        heard = matches!(woke, Either::Left(Either::Right(())));
     }
 }
 

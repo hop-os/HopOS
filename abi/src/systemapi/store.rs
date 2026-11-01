@@ -29,7 +29,8 @@ pub const MAX_STORE_LIST: usize = 8 << 10;
 /// timeout wordt.
 pub const MAX_WAIT_MS: u64 = 5_000;
 /// De vlag in `off` van [`super::PrivOp::NextStore`]: kom ook terug zodra
-/// er nieuwe logregels zijn, van de kern (`NEXT_LOG` 0) of van een app.
+/// er nieuwe regels op de console zijn (`NEXT_LOG`), van de kern of van een
+/// app.
 /// Het antwoord is dan `size` [`LOG_NEWS`] zonder data. Zo wacht Hop met
 /// één verbinding, zijn store-taak, op allebei (H8), en pollt hij
 /// `NEXT_LOG` niet per tik. Wie zo wacht, logt niet per wek: elke

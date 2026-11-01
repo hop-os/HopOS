@@ -26,7 +26,7 @@
 //! STREAM_IMAGE(slot, m, brok)  -> Placed      laatste byte: plaatsen + starten
 //!                              |  Failed(tekst)
 //! SLOT_STATUS(slot)            -> SlotInfo    staat, core, heartbeat, exit (slot 0: de kern)
-//! NEXT_LOG(slot, max)          -> regel | leeg (slot 0: de kern zelf)
+//! NEXT_LOG(0, max)             -> regel | leeg (de console, `slot N: ` per app)
 //! STOP_SLOT(slot, timeout_ms)  -> Ok (de kern geeft vrij) | fout (een stroom)
 //! ```
 //!
@@ -258,15 +258,12 @@ pub enum PrivOp {
     /// De status van een slot: `off` het slot. Het antwoord: `data` is een
     /// [`SlotInfo`].
     SlotStatus = 0x43,
-    /// De volgende logregel van een slot: `off` het slot, `n` de grootste
-    /// lengte. Het antwoord: `size` 1 en de regel in `data` (afgekapt op
-    /// `n`), of `size` 0 als er niets klaarstaat. De kern bewaart per slot
-    /// een korte ring.
-    ///
-    /// Slot 0 is de kern zelf, zoals bij [`PrivOp::SlotStatus`]: de
-    /// volgende regel van zijn console, dezelfde bytes als de UART en
-    /// tcp/5555, dus ook de regels van de apps (`slot N: ...`); een regel
-    /// langer dan `n` komt in stukken. Eén ring van 32 KiB
+    /// De volgende regel van de console: `off` moet 0 zijn (een ander slot
+    /// is een fout), `n` de grootste lengte. Het antwoord: `size` 1 en de
+    /// regel in `data`, of `size` 0 als er niets klaarstaat. Dezelfde bytes
+    /// als de UART en tcp/5555, dus ook de regels van de apps, elk met
+    /// `slot N: ` ervoor: Hop splitst ze zelf op slot (sinds 01-11 is er geen
+    /// ring per slot meer). Een regel langer dan `n` komt in stukken. Eén ring van 32 KiB
     /// (`kern::conport`) die een flip en een reset overleeft, met de
     /// positie van Hop erin: na een flip leest Hop verder, na een reset
     /// krijgt de nieuwe Hop eerst wat de vorige nog niet las.

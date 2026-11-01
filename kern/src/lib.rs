@@ -63,6 +63,9 @@ pub use error::{Error, Result};
 /// boot.
 pub use abi::layout::SLOT_CAP;
 
+mod slotvec;
+pub use slotvec::SlotVec;
+
 /// De hoogste logische core die de kern ooit kent.
 pub const CORE_CAP: usize = 256;
 
@@ -70,8 +73,9 @@ pub const CORE_CAP: usize = 256;
 /// 2 MiB zijn.
 pub const GRAIN: u64 = 2 << 20;
 
-/// Een slotnummer (= kooinummer), 1 tot en met [`SLOT_CAP`]: het type van
-/// het contract, want kern en app tellen dezelfde slots.
+/// Een slotnummer (= kooinummer), 1 tot en met [`abi::layout::SLOT_MAX`]
+/// (de zestien bits van het slot-LAN): het type van het contract, want kern
+/// en app tellen dezelfde slots.
 pub use abi::layout::Slot;
 
 /// Een logisch corenummer (1 tot en met [`CORE_CAP`]); het fysieke nummer

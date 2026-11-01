@@ -37,13 +37,10 @@
 //! De pool zelf is eigendom van de lifecycle-actor ([`crate::slots`]); er is
 //! geen `partMu` meer.
 
-use crate::{Error, GRAIN, Region, Result, SLOT_CAP, Slot, align_grain};
-use bounded::BoundedVec;
+use crate::slots::try_push;
+use crate::{Error, GRAIN, Region, Result, Slot, SlotVec, align_grain};
+use alloc::vec::Vec;
 use core::marker::PhantomData;
-
-/// Het maximale aantal vrije stukken. Elke levende partitie splitst hooguit
-/// één stuk in twee, plus de regio's van het board.
-pub const MAX_FREE_REGIONS: usize = 2 * SLOT_CAP + 64;
 
 /// De vertaalregels van de architectuur die de pool nodig heeft.
 ///
@@ -174,10 +171,14 @@ impl Partition<Owned> {
 /// geen claim uit het grootboek. Elke claim loopt door
 /// `carve`/`take_range`: dat is de dubbeluitgifte-invariant.
 pub struct PartitionPool {
-    free: BoundedVec<Region, MAX_FREE_REGIONS>,
+    /// De vrije stukken. Elke levende partitie splitst hooguit één stuk in
+    /// twee, dus er zijn er nooit meer dan bronnen plus claims plus één; een
+    /// claim reserveert de plaats voor zijn eigen terugvoeg vooraf
+    /// ([`PartitionPool::alloc`]), zodat een vrijgave nooit om geheugen
+    /// vraagt.
+    free: Vec<Region>,
     capacity: u64,
-    owners: [Option<Region>; SLOT_CAP + 1],
-    max_slots: usize,
+    owners: SlotVec<Region>,
     geo: Geometry,
 }
 
@@ -185,20 +186,14 @@ impl PartitionPool {
     /// Bouwt de eigendomskaart zoals elke boot hem bouwt: al het herbruikbare
     /// geheugen (`pool`) minus de actieve kern `own`. De vorige kern heeft
     /// na een overdracht geen claim.
-    pub fn new(
-        pool: &[Region],
-        own: Region,
-        geo: Geometry,
-        max_slots: usize,
-    ) -> Result<PartitionPool> {
+    pub fn new(pool: &[Region], own: Region, geo: Geometry) -> Result<PartitionPool> {
         let mut p = PartitionPool {
-            free: BoundedVec::new(),
+            free: Vec::new(),
             capacity: 0,
-            owners: [None; SLOT_CAP + 1],
-            max_slots: max_slots.min(SLOT_CAP),
+            owners: SlotVec::new(),
             geo,
         };
-        let mut sources: BoundedVec<Region, MAX_FREE_REGIONS> = BoundedVec::new();
+        let mut sources: Vec<Region> = Vec::new();
         for r in pool {
             if r.size == 0 {
                 continue;
@@ -209,14 +204,12 @@ impl PartitionPool {
                     size: r.size,
                 });
             }
-            sources.push(*r).map_err(|_| Error::Full {
-                cap: MAX_FREE_REGIONS,
-            })?;
+            try_push(&mut sources, *r)?;
         }
         for src in sources.iter() {
             p.carve_source(*src, own)?;
         }
-        p.free.as_mut_slice().sort_unstable_by_key(|r| r.base);
+        p.free.sort_unstable_by_key(|r| r.base);
         Ok(p)
     }
 
@@ -242,23 +235,9 @@ impl PartitionPool {
             let base = r.base + pad;
             let end = r.end().unwrap_or(u64::MAX) & !(GRAIN - 1);
             if end > base {
-                self.free
-                    .push(Region::new(base, end - base))
-                    .map_err(|_| Error::Full {
-                        cap: MAX_FREE_REGIONS,
-                    })?;
+                try_push(&mut self.free, Region::new(base, end - base))?;
                 self.capacity += end - base;
             }
-        }
-        Ok(())
-    }
-
-    fn check_slot(&self, slot: Slot) -> Result {
-        if slot.get() > self.max_slots {
-            return Err(Error::SlotRange {
-                slot: slot.get(),
-                max: self.max_slots,
-            });
         }
         Ok(())
     }
@@ -286,18 +265,19 @@ impl PartitionPool {
     /// een mislukte allocatie raakt de bestaande reservering niet aan (Derek,
     /// 19-08: anders ligt het geheugen van een draaiende bewoner vrij).
     pub fn alloc(&mut self, slot: Slot, size: u64) -> Result<Partition<Free>> {
-        self.check_slot(slot)?;
         let size = align_grain(size)
             .filter(|s| *s != 0)
             .ok_or(Error::PartitionSize { size })?;
         let claim = self.claim_size(size)?;
-        if self.owners.get(slot.get()).copied().flatten().is_some() {
+        if self.owners.get(slot).is_some() {
             return Err(Error::StillOwned { slot: slot.get() });
         }
+        self.room_for_claim()?;
         let base = self.carve(claim).ok_or(Error::NoPartition { size })?;
         let region = Region::new(base, size);
-        if let Some(o) = self.owners.get_mut(slot.get()) {
-            *o = Some(region);
+        if let Err(e) = self.owners.insert(slot, region) {
+            let _ = self.insert_free(Region::new(base, claim));
+            return Err(e);
         }
         Ok(Partition {
             slot,
@@ -335,8 +315,17 @@ impl PartitionPool {
         best
     }
 
+    /// Maakt vóór een claim de plaats in de vrije lijst die hij nodig heeft:
+    /// de splitsing nu en de terugvoeg straks. Daarna kan zijn vrijgave niet
+    /// meer op geheugen falen; lukt dit niet, dan past het slot niet.
+    fn room_for_claim(&mut self) -> Result {
+        self.free.try_reserve(2).map_err(|_| Error::OutOfMemory {
+            bytes: 2 * core::mem::size_of::<Region>(),
+        })
+    }
+
     fn release_ledger(&mut self, slot: Slot) {
-        let Some(l) = self.owners.get_mut(slot.get()).and_then(Option::take) else {
+        let Some(l) = self.owners.remove(slot) else {
             return;
         };
         let extra = (self.geo.reserve)(l.size);
@@ -349,7 +338,6 @@ impl PartitionPool {
     /// (E8). Een blob dat een bezette partitie beschrijft, wordt geweigerd.
     /// De voortgezette eigenaar houdt zijn geheugen ongewist (E3).
     pub fn adopt(&mut self, slot: Slot, base: u64, size: u64) -> Result<Partition<Owned>> {
-        self.check_slot(slot)?;
         if size == 0
             || !base.is_multiple_of(GRAIN)
             || !size.is_multiple_of(GRAIN)
@@ -359,16 +347,18 @@ impl PartitionPool {
         }
         let claim = self.claim_size(size)?;
         let end = base.checked_add(claim).ok_or(Error::Range { base, size })?;
-        if self.owners.get(slot.get()).copied().flatten().is_some() {
+        if self.owners.get(slot).is_some() {
             return Err(Error::StillOwned { slot: slot.get() });
         }
         if !self.free_span(base, end) {
             return Err(Error::NotFree { base, size });
         }
+        self.room_for_claim()?;
         self.take_range(base, end)?;
         let region = Region::new(base, size);
-        if let Some(o) = self.owners.get_mut(slot.get()) {
-            *o = Some(region);
+        if let Err(e) = self.owners.insert(slot, region) {
+            let _ = self.insert_free(Region::new(base, claim));
+            return Err(e);
         }
         Ok(Partition {
             slot,
@@ -385,6 +375,7 @@ impl PartitionPool {
         let size = align_grain(size)
             .filter(|s| *s != 0)
             .ok_or(Error::PartitionSize { size })?;
+        self.room_for_claim()?;
         let base = self.carve(size).ok_or(Error::NoPartition { size })?;
         self.capacity = self.capacity.saturating_sub(size);
         Ok(base)
@@ -403,7 +394,7 @@ impl PartitionPool {
     /// Het zichtbare bereik van `slot`, als het er een heeft.
     #[must_use]
     pub fn partition_of(&self, slot: Slot) -> Option<Region> {
-        self.owners.get(slot.get()).copied().flatten()
+        self.owners.get(slot).copied()
     }
 
     /// De totale grootte van de pool: het plafond dat HOP krijgt.
@@ -453,23 +444,23 @@ impl PartitionPool {
         if end <= base {
             return Ok(0);
         }
-        let mut next: BoundedVec<Region, MAX_FREE_REGIONS> = BoundedVec::new();
-        let full = |_| Error::Full {
-            cap: MAX_FREE_REGIONS,
-        };
+        let mut next: Vec<Region> = Vec::new();
+        next.try_reserve_exact(self.free.capacity().max(self.free.len() + 1))
+            .map_err(|_| Error::OutOfMemory {
+                bytes: (self.free.len() + 1) * core::mem::size_of::<Region>(),
+            })?;
         let mut took = 0;
         for r in self.free.iter() {
             let r_end = r.base + r.size;
             if end <= r.base || base >= r_end {
-                next.push(*r).map_err(full)?;
+                next.push(*r);
                 continue;
             }
             if base > r.base {
-                next.push(Region::new(r.base, base - r.base))
-                    .map_err(full)?;
+                next.push(Region::new(r.base, base - r.base));
             }
             if end < r_end {
-                next.push(Region::new(end, r_end - end)).map_err(full)?;
+                next.push(Region::new(end, r_end - end));
             }
             took += end.min(r_end) - base.max(r.base);
         }
@@ -484,10 +475,8 @@ impl PartitionPool {
             .iter()
             .position(|f| f.base >= r.base)
             .unwrap_or(self.free.len());
-        self.free.push(r).map_err(|_| Error::Full {
-            cap: MAX_FREE_REGIONS,
-        })?;
-        if let Some(tail) = self.free.as_mut_slice().get_mut(pos..) {
+        try_push(&mut self.free, r)?;
+        if let Some(tail) = self.free.get_mut(pos..) {
             tail.rotate_right(1);
         }
         let s = self.free.as_mut_slice();
@@ -514,22 +503,13 @@ impl PartitionPool {
 
     /// De slots met een partitie (voor de flip-snapshot en de status).
     pub fn owners(&self) -> impl Iterator<Item = (Slot, Region)> + '_ {
-        self.owners
-            .iter()
-            .enumerate()
-            .filter_map(|(i, o)| Some((Slot::new(i)?, (*o)?)))
+        self.owners.iter().map(|(s, r)| (s, *r))
     }
 
     /// De vertaalopslag achter een partitie van `size` (voor de adoptie).
     #[must_use]
     pub fn reserve_of(&self, size: u64) -> u64 {
         (self.geo.reserve)(size)
-    }
-
-    /// Het hoogste slotnummer dat dit board kent.
-    #[must_use]
-    pub fn max_slots(&self) -> usize {
-        self.max_slots
     }
 }
 
@@ -544,7 +524,7 @@ mod tests {
     }
 
     fn pool(regs: &[Region]) -> PartitionPool {
-        PartitionPool::new(regs, Region::default(), Geometry::FLAT, SLOT_CAP).unwrap()
+        PartitionPool::new(regs, Region::default(), Geometry::FLAT).unwrap()
     }
 
     fn release(pool: &mut PartitionPool, p: Partition<Free>) {
@@ -698,7 +678,7 @@ mod tests {
     #[test]
     fn own_kernel_is_carved_out() {
         let own = Region::new(0x8c00_0000, 32 * MIB);
-        let p = PartitionPool::new(&oud(), own, Geometry::FLAT, SLOT_CAP).unwrap();
+        let p = PartitionPool::new(&oud(), own, Geometry::FLAT).unwrap();
         assert_eq!(p.capacity(), (222 - 32) * MIB);
         assert_eq!(p.largest(), 64 * MIB);
         assert!(!p.free_span(own.base, own.base + own.size));
@@ -799,7 +779,6 @@ mod tests {
             &[Region::new(0x8000_0000, 16 * MIB)],
             Region::default(),
             geo,
-            SLOT_CAP,
         )
         .unwrap();
         let a = p.alloc(s(1), 14 * MIB).unwrap();

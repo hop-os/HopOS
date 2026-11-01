@@ -188,7 +188,6 @@ pub(crate) fn start(
     disk: Option<Disk>,
     keep: bool,
 ) -> Option<&'static DiskQueue> {
-    let board = &crate::BOARD;
     let disk = disk?;
     let sectors = blkdev::Disk::sectors(&disk);
     // De maat van het blokcontract, niet een eigen methode van de driver
@@ -244,7 +243,6 @@ pub(crate) fn start(
         "hopfs: mounted {} MiB ({what}) HOPOS_FS_UP fresh={fresh} generation={generation}",
         (sectors * LBA_SIZE) >> 20
     );
-    let max_slots = crate::slot_count(board);
     let actor = async move {
         let mut a = FsActor::new(fs, &crate::SERVICERS, crate::KernConsole);
         a.run(&FS_INBOX).await;
@@ -257,13 +255,7 @@ pub(crate) fn start(
         println!("disk: stats task not spawned HOPOS_DISK_STATS_FAIL");
     }
     let commit = async move {
-        committer(
-            &crate::SERVICERS,
-            &FS_INBOX,
-            &crate::clock::ExecTimer(exec),
-            max_slots,
-        )
-        .await;
+        committer(&crate::SERVICERS, &FS_INBOX, &crate::clock::ExecTimer(exec)).await;
     };
     if exec.spawn(commit).is_err() {
         cpu::fatal!("hopfs: committer not spawned, the tree would not be kept");

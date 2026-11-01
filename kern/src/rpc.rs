@@ -65,7 +65,7 @@ use crate::cage::{Console, Timer};
 use crate::hopfs::{self, BLOCK_SIZE, BatchRead, BlockIo, Fs, ReadStep, Tree};
 use crate::slots::{Mount, Reply, Servicers, try_push};
 use crate::system::MAX_IO_CHUNK;
-use crate::{Error, Result, SLOT_CAP, Slot};
+use crate::{Error, Result, Slot, SlotVec};
 use abi::hopabi::{
     HDR_LEN, OP_LIST, OP_READ, OP_READ_MANY, OP_REMOVE, OP_STAT, OP_SYNC, OP_TRUNCATE, OP_WRITE,
     STATUS_ERROR, STATUS_OK, many,
@@ -502,11 +502,8 @@ pub struct FsActor<'s, D, L> {
 struct Desk<'s, L> {
     svc: &'s Servicers,
     log: L,
-    /// Per slot de levensduur waarvoor root en volumes klaarstaan.
-    prepared: [Option<u32>; SLOT_CAP + 1],
-    /// Per slot de levensduur waarvan de eerste schrijf in een volume al
-    /// een regel kreeg.
-    saved: [Option<u32>; SLOT_CAP + 1],
+    /// Per slot wat de actor van hem weet ([`Seen`]), op slotnummer.
+    seen: SlotVec<Seen>,
     /// Bevroren voor de kern-flip ([`FsMsg::Freeze`]): calls worden
     /// geweigerd, commits overgeslagen. De boom op de schijf is dan die
     /// van de nieuwe kern.
@@ -514,8 +511,6 @@ struct Desk<'s, L> {
     /// Geweigerde calls tijdens de bevriezing.
     frozen_calls: u64,
     path: PathBuf,
-    /// Per slot: wat hij in de lucht heeft.
-    busy: [Busy; SLOT_CAP + 1],
     /// De nodes met een schrijf in de lucht.
     writing: [Option<usize>; FS_DEPTH],
     /// Een vastlegging (commit, sync, freeze) is in de lucht.
@@ -527,10 +522,23 @@ struct Desk<'s, L> {
 /// Hoeveel geweigerde calls tijdens de bevriezing een eigen regel krijgen.
 const LOUD_FROZEN_CALLS: u64 = 3;
 
+/// Wat de actor van één slot weet.
+#[derive(Clone, Copy, Debug, Default)]
+struct Seen {
+    /// De levensduur waarvoor root en volumes klaarstaan.
+    prepared: Option<u32>,
+    /// De levensduur waarvan de eerste schrijf in een volume al een regel
+    /// kreeg.
+    saved: Option<u32>,
+    /// Wat hij in de lucht heeft.
+    busy: Busy,
+}
+
 /// Wat een slot in de lucht heeft: de volgorde per app ([`FsActor`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Busy {
     /// Niets.
+    #[default]
     Idle,
     /// Alleen lezingen, zoveel.
     Reads(usize),
@@ -763,12 +771,10 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
             desk: Desk {
                 svc,
                 log,
-                prepared: [None; SLOT_CAP + 1],
-                saved: [None; SLOT_CAP + 1],
+                seen: SlotVec::new(),
                 frozen: false,
                 frozen_calls: 0,
                 path: PathBuf::new(),
-                busy: [Busy::Idle; SLOT_CAP + 1],
                 writing: [None; FS_DEPTH],
                 committing: false,
                 alone: false,
@@ -936,10 +942,10 @@ impl<L: Console> Desk<'_, L> {
             answer(reply, c, Err(Error::Busy));
             return Admit::Done;
         }
-        let i = c.slot.get();
+        let seen = self.seen.get(c.slot).copied().unwrap_or_default();
         let live = self.svc.current(c.slot) == Some(c.generation);
         let reads = matches!(c.op, OP_READ | OP_READ_MANY);
-        let busy = match self.busy.get(i).copied().unwrap_or(Busy::Idle) {
+        let busy = match seen.busy {
             Busy::Idle => false,
             Busy::Reads(_) => !reads,
             Busy::Other => true,
@@ -948,7 +954,7 @@ impl<L: Console> Desk<'_, L> {
         // blokken vrij: dat wacht op een lege pool. Een geadopteerde (de
         // warme flip) houdt zijn root en geeft niets vrij.
         let fresh = live
-            && self.prepared.get(i).copied().flatten() != Some(c.generation)
+            && seen.prepared != Some(c.generation)
             && !self.svc.root_kept(c.slot, c.generation);
         let wait = busy
             || ((fresh || matches!(c.op, OP_REMOVE | OP_TRUNCATE)) && !idle)
@@ -958,6 +964,12 @@ impl<L: Console> Desk<'_, L> {
                 msg: FsMsg::Call(c),
                 reply,
             });
+        }
+        // Een slot dat de actor nog niet kende, krijgt zijn regel vóór het
+        // plannen: zonder kan hij niet bijhouden wat er in de lucht is.
+        if let Err(e) = self.seen_mut(c.slot) {
+            answer(reply, c, Err(e));
+            return Admit::Done;
         }
         let (work, volume) = match self.plan(t, &mut c) {
             Ok(p) => p,
@@ -989,7 +1001,7 @@ impl<L: Console> Desk<'_, L> {
             Work::Sync => self.committing = true,
             Work::Read(_) | Work::ReadMany(_) => {}
         }
-        if let Some(b) = self.busy.get_mut(i) {
+        if let Some(b) = self.seen.get_mut(c.slot).map(|e| &mut e.busy) {
             *b = match (*b, work) {
                 (Busy::Reads(k), Work::Read(_) | Work::ReadMany(_)) => Busy::Reads(k + 1),
                 (_, Work::Read(_) | Work::ReadMany(_)) => Busy::Reads(1),
@@ -1053,7 +1065,7 @@ impl<L: Console> Desk<'_, L> {
                 volume,
                 reply,
             } => {
-                if let Some(b) = self.busy.get_mut(c.slot.get()) {
+                if let Some(b) = self.seen.get_mut(c.slot).map(|e| &mut e.busy) {
                     *b = match *b {
                         Busy::Reads(k) if k > 1 => Busy::Reads(k - 1),
                         _ => Busy::Idle,
@@ -1155,9 +1167,18 @@ impl<L: Console> Desk<'_, L> {
     /// root blijft zoals hij was, alleen het bestaan van root en volumes
     /// wordt verzekerd. De lifecycle-actor schreef dat gegeven bij de
     /// adoptie in de servicer-tabel; hier wordt het alleen gelezen.
+    /// De regel van `slot`, gemaakt als hij er nog niet was.
+    fn seen_mut(&mut self, slot: Slot) -> Result<&mut Seen> {
+        if self.seen.get(slot).is_none() {
+            self.seen.insert(slot, Seen::default())?;
+        }
+        self.seen
+            .get_mut(slot)
+            .ok_or(Error::OutOfMemory { bytes: 0 })
+    }
+
     fn prepare<D: BlockIo>(&mut self, t: &Tree<D>, slot: Slot, generation: u32) -> Result {
-        let i = slot.get();
-        if self.prepared.get(i).copied().flatten() == Some(generation) {
+        if self.seen.get(slot).and_then(|e| e.prepared) == Some(generation) {
             return Ok(());
         }
         let kept = self.svc.root_kept(slot, generation);
@@ -1181,9 +1202,8 @@ impl<L: Console> Desk<'_, L> {
                 Ok::<(), Error>(())
             })
             .ok_or(Error::Denied)??;
-        if let Some(p) = self.prepared.get_mut(i) {
-            *p = Some(generation);
-        }
+        // Zonder regel zou de volgende call de root opnieuw wissen.
+        self.seen_mut(slot)?.prepared = Some(generation);
         if kept {
             self.log.log(format_args!(
                 "hopfs: slot {slot} keeps its root over the kernel flip HOPOS_FS_ROOT_KEPT"
@@ -1327,12 +1347,9 @@ impl<L: Console> Desk<'_, L> {
     /// volume: het bewijs dat een bewoner zijn staat buiten zijn eigen root
     /// bewaart (Hop: `/hop/agent-state.json`).
     fn first_save(&mut self, c: &FsCall) {
-        let i = c.slot.get();
-        if self.saved.get(i).copied().flatten() == Some(c.generation) {
-            return;
-        }
-        if let Some(s) = self.saved.get_mut(i) {
-            *s = Some(c.generation);
+        match self.seen_mut(c.slot) {
+            Ok(e) if e.saved != Some(c.generation) => e.saved = Some(c.generation),
+            _ => return,
         }
         // Het pad van deze call opnieuw: intussen planden anderen.
         if self.resolve_call(c).is_err() {
@@ -1362,33 +1379,17 @@ fn answer(reply: Option<&Reply>, c: FsCall, result: Result<(u64, usize)>) {
 }
 
 /// Legt de boom vast: elke [`COMMIT_EVERY`], en meteen als een slot stopte
-/// (de servicer-tabel verliest zijn generatie en luidt
-/// [`Servicers::changed`]). Vuur-en-vergeet: een volle brievenbus is de
-/// volgende ronde opnieuw.
-pub async fn committer<T: Timer>(
-    svc: &Servicers,
-    inbox: &FsInbox<'_>,
-    timer: &T,
-    max_slots: usize,
-) {
-    let mut live = [false; SLOT_CAP + 1];
+/// (de servicer-tabel meldt de stop zelf, [`Servicers::take_stopped`], en
+/// luidt [`Servicers::changed`]). Vuur-en-vergeet: een volle brievenbus is
+/// de volgende ronde opnieuw.
+pub async fn committer<T: Timer>(svc: &Servicers, inbox: &FsInbox<'_>, timer: &T) {
     let every = u64::try_from(COMMIT_EVERY.as_nanos()).unwrap_or(u64::MAX);
     let mut next = timer.now().saturating_add(every);
     loop {
         let left = Duration::from_nanos(next.saturating_sub(timer.now()));
         let _ = select(svc.changed(), timer.sleep(left)).await;
         let at = timer.now();
-        let mut why = None;
-        for i in 1..=max_slots.min(SLOT_CAP) {
-            let Some(slot) = Slot::new(i) else { continue };
-            let now = svc.current(slot).is_some();
-            if let Some(was) = live.get_mut(i) {
-                if *was && !now {
-                    why = Some(CommitWhy::Stopped(slot));
-                }
-                *was = now;
-            }
-        }
+        let mut why = svc.take_stopped().map(CommitWhy::Stopped);
         if why.is_none() && at >= next {
             why = Some(CommitWhy::Periodic);
         }

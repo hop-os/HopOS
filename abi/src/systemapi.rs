@@ -363,7 +363,19 @@ pub enum PrivOp {
     /// ervóór (velden, een onvolledige stroom), dan staat de stroom nog en
     /// breekt STOP_SLOT hem af.
     HopRestart = 0x4D,
+    /// De bezette slots (een bewoner of een stroom), oplopend, zoals
+    /// `getdents`: `off` het slot waarna de lijst begint (0 = vanaf het
+    /// begin), `n` de grootste lengte in bytes. Het antwoord: `size` het
+    /// aantal, `data` de slotnummers, elk [`SLOT_LEN`] bytes little-endian;
+    /// `size` 0 = er zijn er na `off` geen meer. Er is geen maximum aantal
+    /// slots (de kern deelt het laagste vrije nummer uit, zoals een fd), dus
+    /// wie ze allemaal wil, vraagt verder na het laatste dat hij kreeg.
+    Slots = 0x4E,
 }
+
+/// De maat van één slotnummer in het antwoord van [`PrivOp::Slots`]: de
+/// zestien bits van het slot-LAN (`layout::SLOT_MAX`).
+pub const SLOT_LEN: usize = 2;
 
 /// De grootste staat van Hop ([`PrivOp::StatePut`]): één hap, dus één call.
 pub const HOP_STATE_MAX: usize = MAX_IO_CHUNK;
@@ -395,13 +407,13 @@ pub const HOP_IMAGE_JOB: &[u8] = b"hopos.hop-image";
 /// Het laagste bevoegde opnummer.
 pub const PRIV_OP_FIRST: u8 = PrivOp::StartSlot as u8;
 /// Het hoogste bevoegde opnummer.
-pub const PRIV_OP_LAST: u8 = PrivOp::HopRestart as u8;
+pub const PRIV_OP_LAST: u8 = PrivOp::Slots as u8;
 
 const _: () = assert!(PRIV_OP_FIRST > crate::hopabi::OP_MAX);
 
 impl PrivOp {
     /// Alle bevoegde operaties, in opnummer-volgorde.
-    pub const ALL: [PrivOp; 14] = [
+    pub const ALL: [PrivOp; 15] = [
         Self::StartSlot,
         Self::StreamImage,
         Self::StopSlot,
@@ -416,6 +428,7 @@ impl PrivOp {
         Self::StatePut,
         Self::StateGet,
         Self::HopRestart,
+        Self::Slots,
     ];
 
     /// De bevoegde operatie van een opnummer, of `None` voor een gewone of
@@ -437,6 +450,7 @@ impl PrivOp {
             0x4B => Self::StatePut,
             0x4C => Self::StateGet,
             0x4D => Self::HopRestart,
+            0x4E => Self::Slots,
             _ => return None,
         })
     }

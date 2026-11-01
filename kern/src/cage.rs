@@ -19,7 +19,9 @@
 //! hoe HOP een slot stopt stage-2 intrekken, parkeert    reset, of de kill-tick
 //! ```
 
+use crate::slots::ServicerCtl;
 use crate::{Core, Region, Slot};
+use alloc::rc::Rc;
 use core::future::Future;
 use core::time::Duration;
 
@@ -199,6 +201,14 @@ pub trait Cage {
         first: Core,
         cores: usize,
     ) -> Result<(), CageError>;
+    /// Geef de levensduur van `slot` zijn servicer-taak
+    /// ([`crate::slots::servicer_task`] met `ctl`), na de bouw en vóór het
+    /// startschot. Een `Err` (de taak kan er niet bij) is een weigering: er
+    /// draait nog niets. Zonder executor (de toetsen) geen taak.
+    fn serve(&mut self, slot: Slot, ctl: Rc<ServicerCtl>) -> Result<(), CageError> {
+        let _ = (slot, ctl);
+        Ok(())
+    }
     /// Het startschot van de primaire context op `core`. Een `Err` is een
     /// ONBEKENDE uitkomst: de core kan alsnog aangaan (de lifecycle maakt er
     /// `fatal` van).

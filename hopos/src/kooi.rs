@@ -37,6 +37,7 @@ use abi::layout::{
     CtxState, LINK_BASE, NET_RING_DATA_CAP, Plan, RING_DATA_CAP, SCHED_CURRENT, Tail,
 };
 use abi::ring;
+use alloc::rc::Rc;
 use core::future::Future;
 use core::marker::PhantomData;
 use core::time::Duration;
@@ -44,7 +45,8 @@ use cpu::el2::{self, CoreState, roster};
 use cpu::println;
 use dev::Pa;
 use kern::cage::{Cage, CageError, CoreClass, Cores, PortError, Power, Status};
-use kern::{Core, Region, SLOT_CAP, Slot};
+use kern::slots::ServicerCtl;
+use kern::{Core, Region, SLOT_CAP, Slot, SlotVec};
 use net::ring::AbiTx;
 use net::switch::{Ack, Command};
 
@@ -117,6 +119,9 @@ pub(crate) mod code {
     pub(crate) const SPAN: u32 = 7;
     /// De bewonerslijst van een core weigerde de kooi.
     pub(crate) const ROSTER: u32 = 8;
+    /// Een tabel of taak van het slot kon er niet bij (de heap): het slot
+    /// past niet.
+    pub(crate) const FULL: u32 = 9;
 }
 
 /// Een [`CageError`] met `code`.
@@ -153,15 +158,11 @@ pub(crate) struct Built {
     pub(crate) cores: usize,
 }
 
-/// Hoeveel bewoners van één gedeelde core [`Kooi::refresh_shared`]
-/// hoogstens bijwerkt.
-const SHARE_SCAN: usize = SLOT_CAP;
-
 /// De kooi van deze node over architectuur `I`.
 pub(crate) struct Kooi<I: Isa> {
     plan: Plan,
     isa: I,
-    built: [Option<Built>; SLOT_CAP + 1],
+    built: SlotVec<Built>,
 }
 
 impl<I: Isa> Kooi<I> {
@@ -170,7 +171,7 @@ impl<I: Isa> Kooi<I> {
         Kooi {
             plan,
             isa,
-            built: [None; SLOT_CAP + 1],
+            built: SlotVec::new(),
         }
     }
 
@@ -188,7 +189,7 @@ impl<I: Isa> Kooi<I> {
     }
 
     fn built(&self, slot: Slot) -> Option<Built> {
-        self.built.get(slot.get()).copied().flatten()
+        self.built.get(slot).copied()
     }
 
     /// De ctx-staat van `slot`, vers uit het geheugen.
@@ -266,27 +267,19 @@ impl<I: Isa> Kooi<I> {
         if c.get() == 0 {
             return;
         }
-        let mut live = [0u8; SHARE_SCAN];
+        // Twee rondes over de lijst, geen kopie: eerst tellen, dan zetten.
+        let resident = |id: u8| {
+            Slot::new(usize::from(id))
+                .filter(|s| s.get() <= SLOT_CAP && Some(*s) != leaving && self.live(*s))
+        };
         let mut n = 0;
-        let _ = roster::residents(&self.plan, c, |id| {
-            let Some(slot) =
-                Slot::new(usize::from(id)).filter(|s| s.get() <= SLOT_CAP && Some(*s) != leaving)
-            else {
-                return;
-            };
-            if self.live(slot)
-                && let Some(x) = live.get_mut(n)
-            {
-                *x = id;
-                n += 1;
-            }
-        });
+        let _ = roster::residents(&self.plan, c, |id| n += usize::from(resident(id).is_some()));
         let shared = u64::from(n >= 2);
-        for id in live.iter().take(n) {
-            if let Some(slot) = Slot::new(usize::from(*id)) {
+        let _ = roster::residents(&self.plan, c, |id| {
+            if let Some(slot) = resident(id) {
                 self.ctrl_write(slot, CTRL_SHARED, shared);
             }
-        }
+        });
     }
 
     /// Maakt `slot` bewoner van de OS-core (fysiek `cpu`): de rotatie van de
@@ -327,17 +320,16 @@ impl<I: Isa> Kooi<I> {
         let ctx = self.plan.ctx_pa(s).map_err(|_| err(code::PLAN))?;
         dev::pull(ctrl.add(CTRL_ENTRY), 8);
         let entry = dev::read64(ctrl.add(CTRL_ENTRY));
-        if let Some(b) = self.built.get_mut(slot.get()) {
-            *b = Some(Built {
-                s,
-                ctx,
-                ctrl,
-                core: c,
-                entry,
-                part,
-                cores: cores.max(1),
-            });
-        }
+        let b = Built {
+            s,
+            ctx,
+            ctrl,
+            core: c,
+            entry,
+            part,
+            cores: cores.max(1),
+        };
+        self.built.insert(slot, b).map_err(|_| err(code::FULL))?;
         // De OS-core: de nieuwe kern geeft Hop de core weer in zijn idle.
         // Het plan (en dus de bewonerslijst van sched-blok 0) overleefde de
         // flip ongeschreven; staat hij er toch niet meer in, dan terug, met
@@ -356,7 +348,7 @@ impl<I: Isa> Kooi<I> {
             }
         }
         attach(s, tail, core == 0);
-        crate::clock::attach(slot, ctrl);
+        crate::clock::attach(slot, ctrl).map_err(|_| err(code::FULL))?;
         // Vers zaad van déze kern; de generatie telt door vanaf die van de
         // vorige, dus de bewoner ziet hem als nieuw (seed.rs).
         crate::seed::plant(ctrl);
@@ -419,6 +411,10 @@ impl<I: Isa> Cage for Kooi<I> {
             part,
             cores,
         };
+        // De tabellen van het slot eerst: wat daar niet past, weigert vóór
+        // er iets gebouwd is.
+        self.built.insert(slot, b).map_err(|_| err(code::FULL))?;
+        crate::clock::attach(slot, b.ctrl).map_err(|_| err(code::FULL))?;
         let root = self.isa.build(&self.plan, &b)?;
         self.arm_page(&b, tail)?;
         for (off, v) in [
@@ -431,10 +427,6 @@ impl<I: Isa> Cage for Kooi<I> {
         dev::push(ctx, CTX_LEN as usize);
         dev::mb();
         attach(s, tail, b.core.get() == 0);
-        if let Some(x) = self.built.get_mut(slot.get()) {
-            *x = Some(b);
-        }
-        crate::clock::attach(slot, b.ctrl);
         println!(
             "cage: slot {slot} built: part {:#x}+{:#x} -> {LINK_BASE:#x}, root {root:#x}, ctrl {:#x}, core {core}",
             part.base, part.size, b.ctrl.0
@@ -636,7 +628,13 @@ impl<I: Isa> Cage for Kooi<I> {
         // telemetrie (temperatuur, zaad) en `clock::set` elke seconde in een
         // vrijgegeven partitie, ook als die al van een ander was (F1).
         crate::clock::detach(slot);
+        self.built.remove(slot);
         detach(slot)
+    }
+
+    fn serve(&mut self, slot: Slot, ctl: Rc<ServicerCtl>) -> Result<(), CageError> {
+        let b = self.built(slot).ok_or(err(code::NOT_BUILT))?;
+        crate::slots::spawn_servicer(slot, b.ctx, ctl).map_err(|()| err(code::FULL))
     }
 }
 

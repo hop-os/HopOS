@@ -959,7 +959,7 @@ fn udp_readable(exec: &'static Executor, h: UdpHandle) -> impl Future<Output = (
 struct Job {
     h: TcpHandle,
     remote: u32,
-    who: Admitted<'static>,
+    who: Admitted,
 }
 
 /// De deuren van de pool, één per verbindingstaak: de listener geeft een

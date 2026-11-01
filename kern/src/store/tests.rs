@@ -169,7 +169,7 @@ fn a_store_call_travels_from_the_app_through_hop_and_back() {
     let inbox: Mailbox<crate::slots::Envelope<'_>, 8> = Mailbox::new();
     let fsin: FsInbox<'_> = Mailbox::new();
     let queue = StoreQueue::new();
-    let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8)
+    let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))))
         .with_fs(&fsin)
         .with_store(&queue);
     let file = b"/data/state.json";
@@ -285,7 +285,7 @@ fn a_stop_cancels_the_waiting_call_and_hop_drops_it() {
     let r = crate::slots::Reply::new();
     let inbox: Mailbox<crate::slots::Envelope<'_>, 8> = Mailbox::new();
     let queue = StoreQueue::new();
-    let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_store(&queue);
+    let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1)))).with_store(&queue);
     let mut app = Pipe::new(port_ip4(2), &[call(OP_STORE_PUSH, 1, 0, 0, b"x", b"")]);
     let timer = FakeTimer::default();
     let who = sys.admit(app.ip).unwrap();

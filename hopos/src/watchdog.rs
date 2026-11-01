@@ -56,6 +56,7 @@ use core::net::Ipv4Addr;
 use core::time::Duration;
 use cpu::println;
 use executor::Executor;
+use kern::Slot;
 use kern::watchdog::{Event, Phase, Policy};
 use sync::Local;
 
@@ -155,7 +156,8 @@ impl Beat {
     /// was de herstart een hapering binnen [`STALE_NS`], geen gemiste aai.
     /// Vóór de eerste slag is er geen beweging, dus geen bewijs.
     fn fresh(&mut self, now: u64) -> bool {
-        let v = crate::clock::ctrl_page(crate::slots::HOP_SLOT).map_or(0, |page| {
+        let hop = Slot::new(crate::slots::HOP_SLOT);
+        let v = hop.and_then(crate::clock::ctrl_page).map_or(0, |page| {
             let at = page.add(abi::hopabi::CTRL_HEARTBEAT);
             dev::pull(at, 8);
             dev::read64(at)

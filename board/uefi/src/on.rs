@@ -188,8 +188,7 @@ impl<P: Platform> Board for On<P> {
         self.p.usb_hosts(&self.uefi)
     }
 
-    /// Pas na een gelukte probe geclaimd: een mislukte (geen link) liet
-    /// niets achter en mag opnieuw (hopos `nic_retry`).
+    /// Pas na een gelukte probe geclaimd (één per boot).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
         if crate::NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));

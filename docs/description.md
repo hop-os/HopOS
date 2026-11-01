@@ -415,7 +415,7 @@ of anders deze tabel in:
 | De TCP-lezers van de console | `kern/src/conport.rs` (`POLL`) | 100 ms | B (§14.5) |
 | De UART-pomp zolang de UART achterloopt | `hopos/src/conport.rs` (`UART_STEP`) | 1 ms | B (§14.5) |
 | De input-listener op de stack | `hopos/src/net.rs` (`STACK_RETRY`) | 100 ms | A/C (§13.3) |
-| De lease-lus, `nic_retry` | `hopos/src/net.rs`, `main.rs` | 5 s | A (§13.3) |
+| De lease-lus | `hopos/src/net.rs` | 5 s | A (§13.3); `nic_retry` is weg (01-11): geen link is geen net, de guard reset |
 | De slaap van een app-core in de yield | de switcher (`SCHED_SLEEP_CAP`, 10 ms op QEMU riscv), §8.12 | 10 ms | open: de kern zet bij een stop de wek-latch van de keten |
 | De beurt van een bewoner van de OS-core | `cpu::el2::TURN_CAP_NS` | 10 ms | open: het kwantum van de gedeelde OS-core, zie het rapport van E |
 

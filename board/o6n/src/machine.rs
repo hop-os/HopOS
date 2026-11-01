@@ -23,7 +23,6 @@ const _: () = assert!(
 );
 use bounded::BoundedVec;
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
 use driver_nvme::{Nvme, pci::Pci};
 use driver_rtl8126::Rtl8126;
@@ -31,20 +30,6 @@ use driver_scmi::{Channel, Sensor};
 use fw::aml::cpc::{self, Cpc, MAX_CPCS};
 use netdev::AckSlot;
 use sync::{Local, Signal};
-
-/// Hoe lang de Realtek op een link wacht: NBASE-T-autonegotiatie kan
-/// seconden duren (het Go-board gaf 12 s, ruimer dan de igb).
-pub const LINK_TIMEOUT_NS: u64 = 12_000_000_000;
-
-/// De linkwacht van een tweede probe (hopos `nic_retry`). Die draait met de
-/// SBSA-watchdog gewapend, en die valt op de 1 GHz-teller van de O6N op
-/// 8,6 s (`board_uefi::watchdog`); de wacht spint de executor stil, dus
-/// moet hij eronder blijven. Een autonegotiatie die langer duurt, haalt
-/// de retry niet (elke poging herstart hem); de koude boot wacht 12 s.
-const RETRY_LINK_NS: u64 = 7_000_000_000;
-
-/// Is `probe_nic` al eens gelopen? Dan is dit de retry ([`RETRY_LINK_NS`]).
-static NIC_TRIED: AtomicBool = AtomicBool::new(false);
 
 /// De thermometer: `None` tot de eerste vraag, daarna het kanaal of niets.
 /// Alleen de executor van core 0 raakt hem aan (de heartbeat en de
@@ -265,14 +250,14 @@ impl Platform for Cix {
                     cpu::println!("net: {e} at {} bar2 {:#x}", hit.f.bdf, hit.bar);
                     Error::Nic("rtl8126 init failed")
                 })?;
-        let wait = if NIC_TRIED.swap(true, Relaxed) {
-            RETRY_LINK_NS
-        } else {
-            LINK_TIMEOUT_NS
-        };
-        let link = nic.link_up(wait).map_err(|e| {
+        // De autonegotiatie start hier, maar de boot wacht er niet op: NBASE-T
+        // duurt tot 12 s (het Go-board), langer dan de SBSA-watchdog van 8,6 s
+        // die al gewapend is en pas met de executor geaaid wordt. De lease is
+        // de wacht (DHCP op zijn rondes, in de taak); geen link binnen de
+        // guard van 120 s is een reset, en de koude boot probeert opnieuw.
+        nic.start_link().map_err(|e| {
             cpu::println!("net: {} {e}", nic_name(&nic));
-            Error::Nic("rtl8126 has no link")
+            Error::Nic("rtl8126 PHY did not start")
         })?;
         let wired = match segs.as_slice().iter().find(|(_, s)| *s == hit.root_bus) {
             Some((e, _)) => {
@@ -294,7 +279,7 @@ impl Platform for Cix {
         })?;
         nic.set_irq(&NIC_BELL);
         cpu::println!(
-            "net: {} {:04x}:{:04x} at {} xid {:#x} link {link}, {wired} (the DT table said INTID {}) HOPOS_NIC_IRQ",
+            "net: {} {:04x}:{:04x} at {} xid {:#x} link pending (autoneg), {wired} (the DT table said INTID {}) HOPOS_NIC_IRQ",
             nic_name(&nic),
             hit.f.vendor,
             hit.f.device,

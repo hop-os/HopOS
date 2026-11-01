@@ -270,8 +270,8 @@ static NIC_BELL: Signal = Signal::new();
 /// De bel van de schijflijn (MSI-X), zie [`Uefi::probe_disk`].
 static DISK_BELL: Signal = Signal::new();
 
-/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
-/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
+/// Leeft er een NIC uit `probe_nic`? Gezet na een gelukte probe (één per
+/// boot).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// Is de schijf al geprobed? `probe_disk` mag één keer.
 static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);

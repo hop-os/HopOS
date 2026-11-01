@@ -143,8 +143,8 @@ const _: () = {
 /// De kooi-lijm van de binary moet déze smaak installeren, niet Nvhe.
 pub const FLAVOR: Flavor = Flavor::AppleVhe;
 
-/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
-/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
+/// Leeft er een NIC uit `probe_nic`? Gezet na een gelukte probe (één per
+/// boot).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// De Mac mini M4.

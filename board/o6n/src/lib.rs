@@ -46,7 +46,7 @@ pub mod thermal;
 #[cfg(feature = "usb")]
 mod usb;
 
-pub use machine::{Cix, LINK_TIMEOUT_NS, O6n, is_cix};
+pub use machine::{Cix, O6n, is_cix};
 
 /// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
 pub type Machine = O6n;

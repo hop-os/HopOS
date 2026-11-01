@@ -131,8 +131,8 @@ static DTB: board::dtb::Dtb = board::dtb::Dtb::new();
 static MEM_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Het aantal cores uit de DTB (of `hopos.cores`), 0 = onbekend.
 static CORES: AtomicUsize = AtomicUsize::new(0);
-/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
-/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
+/// Leeft er een NIC uit `probe_nic`? Gezet na een gelukte probe (één per
+/// boot).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// De mailbox: één eigenaar, de executor van core 0.
 static MBOX: LocalCell<Option<Mbox>> = LocalCell::cell(None);

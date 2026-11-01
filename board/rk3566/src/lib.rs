@@ -226,8 +226,8 @@ static FW_HOLES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static MEM_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Het aantal cores uit de FDT, 0 = onbekend.
 static CORES: AtomicUsize = AtomicUsize::new(0);
-/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
-/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
+/// Leeft er een NIC uit `probe_nic`? Gezet na een gelukte probe (één per
+/// boot).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 fn console_write(b: &[u8]) {

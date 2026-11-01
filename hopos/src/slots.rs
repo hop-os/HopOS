@@ -214,7 +214,7 @@ use kern::slots::{
 use kern::system::{Fail, LogTee, SlotLogs};
 use kern::{Region, Slot};
 use sync::mpsc::Mailbox;
-use sync::{Either, Local, Signal, select};
+use sync::{Local, Signal, select};
 use vboard::slots as vslots;
 
 /// De brievenbus van de lifecycle-actor. Hij staat in `main` naast de
@@ -266,11 +266,6 @@ pub(crate) const HOP_PORT: u16 = 8080;
 /// switch van de nieuwe kern ze overneemt (`net::Carried`). Tot 04-10 zette de kern ze
 /// buiten de lifecycle door, alleen tcp, met twee eigen lussen.
 const HOP_PORTS: [u16; 2] = [HOP_PORT, HOP_PORT + 1000];
-
-/// Hoe lang de plaatsing van Hop op de DHCP-lease wacht voor
-/// `HOPOS_NODE_IP`. QEMU's user-net antwoordt binnen een milliseconde; zonder
-/// lease start Hop toch, met zijn slot-adres als endpoint (luid).
-const UPLINK_WAIT: Duration = Duration::from_secs(10);
 
 /// Het ritme van de bewaking van Hop: een regel per wissel, en om de
 /// [`HOP_BEAT_EVERY`] rondes een hartslagregel.
@@ -644,7 +639,7 @@ impl HopNode {
         } else if staged_hop().is_none() {
             cpu::fatal!("slots: role hop but no staged image, Hop not started");
         }
-        let node_ip = wait_uplink(self.exec).await;
+        let node_ip = wait_uplink().await;
         let spec = self.spec(node_ip, resumed.is_some());
         let sup = Supervisor {
             exec: self.exec,
@@ -1156,25 +1151,19 @@ pub(crate) fn staged_hop() -> Option<&'static [u8]> {
 }
 
 /// Wacht tot het net luistert (`net::NET_READY`: de lease, de uplink, de
-/// stack en de system-listener), hooguit [`UPLINK_WAIT`]; `None` na de
-/// termijn. Zo is de plaatsing van Hop de stap na het net in de bootreeks:
-/// zijn eerste call vindt de listener. Zolang de NIC opnieuw geprobeerd
-/// wordt (`NIC_RETRY`), telt de termijn niet: Hop heeft een adres nodig (Go
-/// wachtte er net zo op, 19-09).
-async fn wait_uplink(exec: &'static Executor) -> Option<core::net::Ipv4Addr> {
-    loop {
-        let ready = crate::net::NET_READY.wait();
-        if let Either::Left(()) = select(ready, exec.after(UPLINK_WAIT)).await {
-            return crate::net::uplink_ip();
-        }
-        if !crate::NIC_RETRY.load(Relaxed) {
-            println!(
-                "slots: no listening net after {} s, Hop announces its slot address HOPOS_HOP_NO_UPLINK",
-                UPLINK_WAIT.as_secs()
-            );
-            return None;
-        }
+/// stack en de system-listener). Zo is de plaatsing van Hop de stap na het
+/// net in de bootreeks: zijn eerste call vindt de listener. Zonder termijn:
+/// komt het net niet (geen kabel, geen DHCP), dan reset de ene guard van de
+/// watchdog de node (docs/sequence-hopos.md §14.1 O1), en de koude boot is
+/// de nieuwe poging. Zonder net (geen NIC, of een NIC die niet opkwam)
+/// start Hop meteen, met zijn slot-adres als endpoint (luid).
+async fn wait_uplink() -> Option<core::net::Ipv4Addr> {
+    if !crate::net::switch_up() {
+        println!("slots: no net on this boot, Hop announces its slot address HOPOS_HOP_NO_UPLINK");
+        return None;
     }
+    crate::net::NET_READY.wait().await;
+    crate::net::uplink_ip()
 }
 
 /// `Placement::hop`: de sharegroup van Hop, op de OS-core met de kern als

@@ -78,9 +78,7 @@ static RESET: Local<Cell<Option<&'static str>>> = Local::new(Cell::new(None));
 
 /// Een aai buiten de watchdog-taak om: vlak vóór de sprong van een flip en
 /// meteen na een landing, zodat de teller van de vertrekkende kern (12 s op
-/// de Pi) niet afloopt terwijl de nieuwe kern nog boot (30-09). En vóór
-/// elke tweede probe van de NIC (main.rs `nic_retry`): die spint tot de
-/// linktermijn van het board.
+/// de Pi) niet afloopt terwijl de nieuwe kern nog boot (30-09).
 pub(crate) fn pet_now() {
     BOARD.pet_now();
 }

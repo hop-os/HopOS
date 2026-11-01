@@ -225,9 +225,10 @@ b6-image) staat in `image/firmware/radxa/donor-boot.bin` (herkomst in de
 
 ## De eerste boot met Hop
 
-Hop woont op de OS-core naast de kern (slot 1, core 0) en wacht eerst op de
-DHCP-lease (hooguit 10 s, `UPLINK_WAIT`; zonder lease
-`HOPOS_HOP_NO_UPLINK` en meldt Hop zijn slot-adres). Daarna, in deze volgorde:
+Hop woont op de OS-core naast de kern (slot 1, core 0) en wacht eerst op een
+luisterend net (de DHCP-lease, zonder termijn: komt hij niet, dan reset de
+guard van 120 s de node; zonder NIC `HOPOS_HOP_NO_UPLINK` en meldt Hop zijn
+slot-adres). Daarna, in deze volgorde:
 
 17. **`HOPOS_HOP_START slot=1 core=0 cpu=0 entry=0x... part=0x...+0x4000000
     image=N env=M`.** N is de maat van `hop.elf` uit het script (`wc -c

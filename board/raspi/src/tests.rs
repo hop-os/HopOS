@@ -219,5 +219,4 @@ fn the_board_plan_matches_the_map() {
     let mut buf = [0u8; 16];
     assert!(cpu::drbg::read(&mut buf).is_ok());
     assert_eq!(watchdog::arm(12_000), Err("no PM watchdog on this board"));
-    assert!(!watchdog::off());
 }

@@ -526,10 +526,6 @@ impl board::Watchdog for Uefi {
     fn pet(&self) {
         watchdog::pet();
     }
-
-    fn disarm(&self) -> bool {
-        watchdog::off()
-    }
 }
 
 /// Geen thermometer op het generieke board.

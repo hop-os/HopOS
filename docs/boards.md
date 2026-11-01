@@ -131,8 +131,9 @@ bewijs. Het levensteken is de canary van Go: elke ronde een nieuwe
 TCP-verbinding over de node-stack (3 s geduld, hooguit 15 s oud), naar
 Hop's agent op 10.100.0.2:8080 als Hop op de node woont (door de switch en
 Hop's accept-laag, plus zijn heartbeat), anders naar de eigen system-poort
-op het uplink-adres. `hopos.wd=off` zet hem uit (ook een die de vorige kern
-wapende). Regels: `HOPOS_WD_ARMED`, `HOPOS_CANARY_LIVE`,
+op het uplink-adres. Er is geen knop om hem uit te zetten (O2 van 01-11):
+de post-mortem staat in de console-ring, die de reset overleeft (`nc NODE
+5555`). Regels: `HOPOS_WD_ARMED`, `HOPOS_CANARY_LIVE`,
 `HOPOS_CANARY_MISS`, `HOPOS_BOOT_GUARD_EXPIRED` (geen levensteken binnen de
 guard van 120 s, voor elke boot),
 `HOPOS_RESET_REQUESTED`, en per wissel van de dial `HOPOS_WD_CANARY_OK` of

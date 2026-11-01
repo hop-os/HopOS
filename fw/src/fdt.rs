@@ -783,7 +783,7 @@ mod tests {
         b.begin("chosen")
             .prop(
                 "bootargs",
-                b"console=serial0,115200 hopos.node=hop-1 hopos.wd=off\0",
+                b"console=serial0,115200 hopos.node=hop-1 hopos.tick=1\0",
             )
             .prop("linux,initrd-start", &u32s(&[0x200_0000]))
             .prop("linux,initrd-end", &u32s(&[0x200_0100]));
@@ -827,7 +827,7 @@ mod tests {
         let f = Fdt::new(&blob).unwrap();
         assert_eq!(
             f.bootargs(),
-            Some("console=serial0,115200 hopos.node=hop-1 hopos.wd=off")
+            Some("console=serial0,115200 hopos.node=hop-1 hopos.tick=1")
         );
         assert_eq!(f.root_string("serial-number"), Some("100000001a2b3c4d"));
         // bootargs is een /chosen-property, niet van de root.

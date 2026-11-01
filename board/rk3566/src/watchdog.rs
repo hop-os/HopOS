@@ -40,10 +40,6 @@ pub const WDT: Pa = Pa(0xFE60_0000);
 const CLKGATE26: u64 = 0x300 + 26 * 4;
 const GATE_PCLK: u32 = 13;
 const GATE_TCLK: u32 = 14;
-/// `SOFTRST_CON(26)`: SRST_P_WDT_NS = 421 (bit 5), SRST_T_WDT_NS = 422 (bit 6).
-const SOFTRST26: u64 = 0x400 + 26 * 4;
-const SRST_P: u32 = 5;
-const SRST_T: u32 = 6;
 
 /// De tclk: xin24m zonder deler (clk-rk3568.c, en gemeten 06-08).
 pub const TCLK_HZ: u64 = 24_000_000;
@@ -187,50 +183,6 @@ fn pet_at(wdt: Pa, cru: Pa) {
     }
 }
 
-/// Zet een gewapende watchdog uit (`hopos.wd=off`, ook na een flip): de twee
-/// reset-lijnen pulsen, zoals Linux' `dw_wdt_stop`, en dan nakijken dat
-/// ENABLE nul leest. `false` = er was niets gewapend, of hij bleef aan (dan
-/// staat er een regel met de timeout).
-pub fn off() -> bool {
-    off_at(WDT, CRU, &ARMED, crate::soc::delay_us)
-}
-
-/// [`off`] op het blok `wdt` met de CRU `cru`; `delay` wacht microseconden
-/// (op de host staat de klok stil, dus daar een lege).
-fn off_at(wdt: Pa, cru: Pa, armed: &AtomicBool, delay: fn(u64)) -> bool {
-    if dev::read32(cru.add(CLKGATE26)) & (1 << GATE_PCLK) != 0 {
-        // De pclk dicht: dan heeft niemand hem gewapend (arm opent hem).
-        return false;
-    }
-    let w = DwWdt::new(wdt);
-    if !w.enabled() {
-        return false;
-    }
-    clocks_on(cru);
-    dev::write32(
-        cru.add(SOFTRST26),
-        hiword(1, 1, SRST_P) | hiword(1, 1, SRST_T),
-    );
-    dev::mb();
-    delay(10);
-    dev::write32(
-        cru.add(SOFTRST26),
-        hiword(0, 1, SRST_P) | hiword(0, 1, SRST_T),
-    );
-    dev::mb();
-    if w.enabled() {
-        let top = w.top();
-        cpu::println!(
-            "watchdog: DW-WDT at {:#x} still enabled after pulsing SRST_P/T_WDT_NS: it cannot be stopped, and without pets the node resets within {} ms (TOP {top})",
-            wdt.0,
-            top_ms(top)
-        );
-        return false;
-    }
-    armed.store(false, Relaxed);
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,21 +261,5 @@ mod tests {
         c[(CLKGATE26 / 4) as usize] = 0;
         pet_at(wp, cp);
         assert_eq!(w[(CRR / 4) as usize], KICK);
-    }
-
-    #[test]
-    fn off_pulses_both_reset_lines_and_checks_enable() {
-        // Uit: niets te doen.
-        let (_w, c, wp, cp) = blocks(0, 0, 0);
-        assert!(!off_at(wp, cp, &AtomicBool::new(true), |_| {}));
-        assert_eq!(c[(SOFTRST26 / 4) as usize], 0);
-        // Aan, maar het nep-blok onthoudt ENABLE over de reset: niet uit, en
-        // de reset-lijnen staan weer los.
-        let (_w, mut c, wp, cp) = blocks(ENABLE, 0, 0);
-        c[(CLKGATE26 / 4) as usize] = 0;
-        let armed = AtomicBool::new(true);
-        assert!(!off_at(wp, cp, &armed, |_| {}));
-        assert_eq!(c[(SOFTRST26 / 4) as usize], (1 << 21) | (1 << 22));
-        assert!(armed.load(Relaxed));
     }
 }

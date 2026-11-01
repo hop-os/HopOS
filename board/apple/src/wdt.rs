@@ -176,20 +176,6 @@ pub fn pet() {
     }
 }
 
-/// Zet de primaire watchdog uit (`hopos.wd=off`, ook als een vorige kern
-/// hem wapende). `true` als hij gewapend stond.
-pub fn off() -> bool {
-    let Some((base, _)) = fwinfo::reg("/arm-io/wdt", 0) else {
-        return false;
-    };
-    let b = Pa(base);
-    let was = dev::read32(b.add(WDT_CTL)) & WDT_CTL_RESET != 0;
-    dev::write32(b.add(WDT_CTL), 0);
-    dev::mb();
-    ARMED.store(0, Relaxed);
-    was
-}
-
 // ---------------------------------------------------------------------------
 // De kloksnelheid.
 // ---------------------------------------------------------------------------
@@ -471,7 +457,6 @@ mod tests {
     fn without_a_tree() {
         assert!(quiet().as_str().contains("NOT silenced"));
         assert!(arm(30_000).is_err());
-        assert!(!off());
         pet();
         pstate_tune(PS_DEFAULT, false, &|_| false);
         let mut w = PStateWatch::new();

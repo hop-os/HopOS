@@ -340,10 +340,6 @@ impl<S: Soc> board::Watchdog for Raspi<S> {
         watchdog::pet();
         watchdog::reload_if_armed(Self::WD_TIMEOUT_MS);
     }
-
-    fn disarm(&self) -> bool {
-        watchdog::off()
-    }
 }
 
 /// De SoC-temperatuur via de VideoCore-mailbox (dezelfde tag als de

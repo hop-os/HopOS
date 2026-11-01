@@ -264,7 +264,7 @@ fn moved(core: usize) -> ! {
 /// zolang de kern leeft. Een plaatsing piekte daarop tot 186 van de 256 KB
 /// stack. [`setup`] bouwt alles in een eigen frame dat weg is vóór de
 /// executor draait; hier blijft alleen de slaper over.
-fn boot(board: &'static Machine, dtb: u64, el: u8, wd: Option<watchdog::Armed>) -> ! {
+fn boot(board: &'static Machine, dtb: u64, el: u8, wd: watchdog::Armed) -> ! {
     let exec: &'static Executor = EXEC.get();
     // De deur van de switch om de slaper heen (`net::doorbell`): zonder
     // hem wachtte elk frame van een app op de failsafe van 1 ms.
@@ -289,7 +289,7 @@ fn setup(
     board: &'static Machine,
     dtb: u64,
     el: u8,
-    wd: Option<watchdog::Armed>,
+    wd: watchdog::Armed,
 ) -> <Machine as Board>::Sleeper {
     // FLIP: de landing. Daarvóór gingen in `kmain` alleen de heap,
     // `discover` (het board), de watchdog (`wd`, gewapend) en de verhuizing

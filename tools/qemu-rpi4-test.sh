@@ -8,43 +8,29 @@
 #   fdt:            de DTB uit x0 (QEMU legt hem achter het -initrd-venster);
 #   mem:            de kaart uit de DTB: RAM erbij gemapt, een pool;
 #   vcmail:         de VideoCore-mailbox (QEMU emuleert de property-tags);
-#   HOPOS_BOOT      de executor, met het board;
-#   irq: GIC-400    de GIC-400 als cpu::irq::Controller;
-#   HOPOS_CAGE_UP   de kooi-regio in het Device-venster van de Pi-kaart;
-#   stage:          een -initrd in het laadvenster (appspike), gelezen maar
-#                   met `hopos.stage=none` niet geplaatst (zie hieronder);
-#   HOPOS_TICK 3    drie seconden executor en slaap (WFE + event-stream);
-#   HOPOS_OS_SELFTEST ok
-#                   de overgang van de OS-core: de CNTHP (PPI 26) haalt een
-#                   spinnende bewoner terug, een HVC #1 komt terug als yield,
-#                   en de kick-SGI via GICD_SGIR naar de core zelf komt terug
-#                   als IPI (board_raspi::KICK_SGI; geen tweede core nodig);
-#   kicks=1         de dispatch claimde die kick als bekende lijn en telde
-#                   hem, in plaats van hem als onbekend uit te zetten;
+#   stage:          een -initrd in het laadvenster (appspike), gelezen;
 #   HOPOS_RNG_INSECURE
 #                   de RNG200 wordt NIET aangeraakt: QEMU haalt zijn node uit
 #                   de DTB en een lees op 0xFE10_4000 is een external abort
 #                   (board_raspi::rng); de DRBG zaait op jitter, luid;
-#   HOPOS_WD_OFF    de PM-watchdog staat uit (hopos.wd=off in de append):
-#                   QEMU modelleert het PM-blok alleen als reset-knop, een
-#                   FULL_RESET reset de machine meteen, en op ijzer telt de
-#                   teller pas ná FULL_RESET (Pi 5, 30-09), dus er is geen
-#                   proef zonder wapenen (board_raspi::watchdog).
+#   de reset        dan wapent de kern de PM-watchdog, als eerste stap na
+#                   `discover` (docs/sequence-hopos.md §13.2, O2: de watchdog
+#                   is verplicht, er is geen knop om hem uit te zetten). QEMU
+#                   modelleert het PM-blok alleen als reset-knop: de schrijf
+#                   van FULL_RESET reset de machine METEEN
+#                   (hw/misc/bcm2835_powermgt.c), en op ijzer telt de teller
+#                   pas ná FULL_RESET (Pi 5, 30-09), dus er is geen proef
+#                   zonder wapenen en geen weg eromheen zonder testpad in de
+#                   kern. Met -no-reboot is die reset het einde van QEMU: de
+#                   ring eist dat QEMU vanzelf stopt, met precies één P2 en
+#                   geen HOPOS_BOOT. Alles na het wapenen (de GIC-400, de
+#                   kooi, de zelftest van de OS-core, de tikken) bewijst
+#                   QEMU raspi4b dus niet meer; dat is ijzerwerk
+#                   (docs/boards-pi.md).
 #
-# Wat QEMU raspi4b NIET kan en dit script dus niet bewijst: de GENET (QEMU
-# haalt de node uit de DTB; de kern ziet dat en zegt HOPOS_NIC_NONE), en een
-# app-core: QEMU zet de andere cores in een spin-table zonder PSCI, dus de
-# eerste CPU_ON van een plaatsing hangt: een SMC zonder EL3-firmware
-# (gemeten 29-09: na "cage: slot 1 built" niets meer). Daarom leest de kern
-# de staging wel maar plaatst hij niets (HOPOS_SLOT_NONE). App-cores zijn
-# ijzerwerk: docs/boards-pi.md.
-#
-# GUI=1 bouwt de gui-smaak (docs/gui.md) en toetst daarbovenop dat de
-# VL805-keten (board/rpi4/src/usb.rs) de PCIe-RC niet aanraakt als de DTB
-# hem niet aanzet: QEMU raspi4b modelleert geen RC en haalt de node weg, en
-# de eerste schrijf op 0xFD50_9210 was daar een synchrone abort (30-09).
-# Markers: "no enabled brcm,bcm2711-pcie in the DTB, PCIe not touched" en
-# HOPOS_USB_NONE, zonder HOPOS_EXCEPTION.
+# Wat QEMU raspi4b verder NIET kan: de GENET (QEMU haalt de node uit de
+# DTB) en een app-core (de andere cores staan in een spin-table zonder
+# PSCI). GUI=1 bouwt de gui-smaak en toetst dezelfde boot tot de reset.
 #
 # De DTB: DTB=pad, standaard image/firmware/rpi4/bcm2711-rpi-4-b.dtb
 # (herkomst in de LEESMIJ.txt daar). Zonder DTB boot de kern ook, maar
@@ -75,14 +61,11 @@ need_objcopy qemu-rpi4-test
 "$OBJCOPY" -O binary "$DIR/target/$TARGET/release/hopos" "$TMP/kernel8.img"
 strip_elf "$DIR/target/$TARGET/release/appspike" "$TMP/app.elf"
 
-MARKERS="P2|HopOS|HOPOS_BOOT|irq: GIC-400|HOPOS_TICK 3|HOPOS_OS_SELFTEST ok|kicks=1)"
-set -- -kernel "$TMP/kernel8.img" -append "hopos.stage=none hopos.wd=off"
+MARKERS="P2|HopOS"
+set -- -kernel "$TMP/kernel8.img" -append "hopos.stage=none" -no-reboot
 if [ -f "$DTB" ]; then
 	set -- "$@" -dtb "$DTB" -initrd "$TMP/app.elf"
-	MARKERS="$MARKERS|fdt: |mem: |vcmail: |HOPOS_CAGE_UP|KB at 0x8000000, role unknown|HOPOS_SLOT_NONE|no such node in the DTB (QEMU models none), not touched|HOPOS_RNG_INSECURE|HOPOS_WD_OFF"
-	if [ "$GUI" = 1 ]; then
-		MARKERS="$MARKERS|no enabled brcm,bcm2711-pcie in the DTB, PCIe not touched|HOPOS_USB_NONE"
-	fi
+	MARKERS="$MARKERS|fdt: |mem: |vcmail: |KB at 0x8000000, role unknown|no such node in the DTB (QEMU models none), not touched|HOPOS_RNG_INSECURE"
 else
 	echo "qemu-rpi4-test: no DTB at $DTB, boot markers only" >&2
 fi
@@ -90,11 +73,26 @@ fi
 qemu-system-aarch64 -M raspi4b -display none -monitor none \
 	-serial "file:$TMP/console.log" "$@" 2>"$TMP/qemu.err" &
 QPID=$!
-sleep "$SECS"
-kill "$QPID" 2>/dev/null || true
+# De reset van het wapenen stopt QEMU (-no-reboot); wie na SECS nog
+# draait, wapende niet.
+t=0
+while kill -0 "$QPID" 2>/dev/null && [ "$t" -lt "$((SECS * 10))" ]; do
+	sleep 0.1
+	t=$((t + 1))
+done
+reset=0
+if kill -0 "$QPID" 2>/dev/null; then
+	kill "$QPID" 2>/dev/null || true
+else
+	reset=1
+fi
 wait "$QPID" 2>/dev/null || true
 
 fail=0
+if [ "$reset" != 1 ] || [ "$(grep -c '^P2' "$TMP/console.log")" != 1 ] || grep -q "HOPOS_BOOT" "$TMP/console.log"; then
+	echo "qemu-rpi4-test: expected the reset of the PM watchdog right after discover (QEMU stops, one P2, no HOPOS_BOOT)" >&2
+	fail=1
+fi
 if grep -q "HOPOS_PANIC\|HOPOS_FATAL\|HOPOS_EXCEPTION" "$TMP/console.log"; then
 	echo "qemu-rpi4-test: panic or exception" >&2
 	fail=1
@@ -112,6 +110,5 @@ if [ "$fail" -ne 0 ]; then
 	cat "$TMP/console.log" >&2
 	exit 1
 fi
-grep -v "HOPOS_TICK" "$TMP/console.log" | head -40
-grep "HOPOS_TICK 3 " "$TMP/console.log" | head -1
-echo "qemu-rpi4-test: groen"
+head -40 "$TMP/console.log"
+echo "qemu-rpi4-test: groen (tot de reset van de PM-watchdog)"

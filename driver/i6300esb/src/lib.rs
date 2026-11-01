@@ -204,14 +204,6 @@ impl Esb {
         self.unlock();
         dev::write16(self.regs.add(RELOAD), WDT_RELOAD);
     }
-
-    /// Zet hem uit (Linux `esb_timer_stop`): eerst herladen, dan LOCK op
-    /// nul. `true` als ENABLE daarna echt nul leest; op slot blijft hij aan.
-    pub fn stop(&self) -> bool {
-        self.ping();
-        dev::write8(self.cfg.add(LOCK), 0);
-        !self.enabled()
-    }
 }
 
 #[cfg(test)]
@@ -265,7 +257,6 @@ mod tests {
         assert!(e.enabled());
         // De laatste schrijf in RELOAD is de aai, niet de ontsluiting.
         assert_eq!(regs[(RELOAD / 4) as usize] & 0xffff, u32::from(WDT_RELOAD));
-        assert!(e.stop());
         e.start(true);
         assert_eq!(e.lock(), WDT_ENABLE | WDT_LOCK);
     }

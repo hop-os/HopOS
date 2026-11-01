@@ -279,12 +279,6 @@ pub trait Watchdog {
     fn pet_now(&self) {
         self.pet();
     }
-
-    /// Zet een gewapende watchdog uit (`hopos.wd=off`, ook een die de
-    /// vorige kern wapende). `false` = er was niets uit te zetten.
-    fn disarm(&self) -> bool {
-        false
-    }
 }
 
 /// De thermometer van een board, voor de tik en de heartbeat van Hop. Een

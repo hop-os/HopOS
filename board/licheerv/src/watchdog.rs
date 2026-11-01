@@ -93,12 +93,6 @@ pub fn pet() {
     }
 }
 
-/// De DW-WDT gaat na het wapenen niet meer uit: `false`.
-#[must_use]
-pub fn off() -> bool {
-    false
-}
-
 /// Wat er gewapend is, voor de consoleregel.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Desc {

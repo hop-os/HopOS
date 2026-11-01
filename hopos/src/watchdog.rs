@@ -34,8 +34,8 @@
 //! elke guard ([`kern::watchdog::GUARD_SECS`]) nog een: luid, en de node
 //! komt vanzelf terug zodra het net er weer is.
 //!
-//! `hopos.wd=off` zet alles uit, op elk board dezelfde knop: voor een
-//! UART-postmortem moet een bevroren node blijven staan.
+//! Er is geen knop om hem uit te zetten (O2 van 01-11): de post-mortem
+//! staat in de console-ring, die een reset overleeft (`nc NODE 5555`).
 //!
 //! De hardware is van het board (`board::Watchdog`): de SBSA-watchdog uit
 //! de GTDT op de UEFI-boards (`board_uefi::watchdog`; QEMU heeft er geen),
@@ -49,7 +49,7 @@
 //! QEMU, zodat een `fatal` daar net zo reset als op ijzer).
 
 use crate::{BOARD, Machine};
-use board::{Board, Watchdog};
+use board::Watchdog;
 use core::cell::Cell;
 use core::fmt;
 use core::net::Ipv4Addr;
@@ -112,27 +112,17 @@ pub(crate) struct Armed {
 /// pas met de executor. Tot 01-11 wapende de taak pas in de eerste ronde
 /// van de executor, en parkeerde een fout in de mount voorgoed.
 ///
-/// `hopos.wd=off` zet hem uit (ook een die de vorige kern wapende) en geeft
-/// `None`. Op een board zonder hardware weigert `arm` en zegt het beleid dat
-/// de node onbewaakt is; de taak draait de canary dan toch, voor de console.
+/// Op een board zonder hardware weigert `arm` en zegt het beleid dat de
+/// node onbewaakt is; de taak draait de canary dan toch, voor de console.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
-pub(crate) fn arm() -> Option<Armed> {
-    if BOARD.boot_param("hopos.wd") == "off" {
-        if BOARD.disarm() {
-            println!("watchdog: disabled for a post-mortem (the previous kernel armed it)");
-        }
-        println!(
-            "watchdog: not armed (hopos.wd=off) - node liveness is UNGUARDED, a frozen node stays up for a post-mortem HOPOS_WD_OFF"
-        );
-        return None;
-    }
+pub(crate) fn arm() -> Armed {
     let mut hw = Hw {
         armed: None,
         why: "not armed",
     };
     let (p, e) = Policy::start(&mut hw, cpu::idle::counter(), cpu::idle::freq());
     say(&e, &hw);
-    Some(Armed { p, hw })
+    Armed { p, hw }
 }
 
 /// Spawnt de watchdog-taak op wat [`arm`] wapende.
@@ -142,11 +132,8 @@ pub(crate) fn arm() -> Option<Armed> {
 /// keek dit zelf naar `staged_role`, en na een flip met Hop ingebakken in
 /// de kaart-kern (de M4 van 03-10) werd zijn hartslag dan niet bewaakt (F6).
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
-pub(crate) fn start(exec: &'static Executor, armed: Option<Armed>, hop: bool) {
-    let Some(a) = armed else {
-        return;
-    };
-    if exec.spawn(run(exec, a, hop)).is_err() {
+pub(crate) fn start(exec: &'static Executor, armed: Armed, hop: bool) {
+    if exec.spawn(run(exec, armed, hop)).is_err() {
         cpu::fatal!("watchdog: task not spawned, nobody would pet");
     }
 }

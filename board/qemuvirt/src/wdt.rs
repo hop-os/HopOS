@@ -87,7 +87,7 @@ fn find() -> Option<Esb> {
 }
 
 /// Wapent de watchdog op minstens `timeout_ms` (in hele seconden, beide
-/// trappen samen), zonder slot: `hopos.wd=off` moet hem uit kunnen zetten.
+/// trappen samen), zonder slot: een flip-kern wapent hem opnieuw.
 /// De volgorde van Linux `esb_probe`: init, de timeout, dan start.
 pub fn arm(timeout_ms: u64) -> Result<Desc, &'static str> {
     let e = find().ok_or("no watchdog on this board (no -device i6300esb on the PCIe host)")?;
@@ -110,12 +110,6 @@ pub fn pet() {
     if let Some(e) = found() {
         e.ping();
     }
-}
-
-/// Zet hem uit, ook een die de vorige kern wapende (daarom zoekt dit wel);
-/// `false` als er niets was (of hij op slot stond).
-pub fn off() -> bool {
-    find().is_some_and(|e| e.stop())
 }
 
 /// De watchdog als hij al gevonden is; zoekt niet (een aai doet geen

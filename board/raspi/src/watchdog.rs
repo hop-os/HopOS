@@ -22,7 +22,8 @@
 //! QEMU `raspi4b` modelleert het PM-blok alleen als reset-knop: een schrijf
 //! van FULL_RESET reset de machine METEEN (hw/misc/bcm2835_powermgt.c), dus
 //! daar valt niets te wapenen en niets te proeven. De proef
-//! (tools/qemu-rpi4-test.sh) zet hem uit met `hopos.wd=off`.
+//! (tools/qemu-rpi4-test.sh) ziet die reset als verwacht, meteen na
+//! `discover` (er is geen knop om de watchdog uit te zetten, O2).
 //!
 //! Dit bezit de drie statics van de gewapende watchdog; het beleid (wanneer
 //! aaien) is `kern::watchdog`.
@@ -150,23 +151,6 @@ pub fn pet() {
     if base != 0 && ticks != 0 {
         dev::write32(Pa(base).add(WDOG), PASSWORD | ticks);
     }
-}
-
-/// Zet een gewapende watchdog uit (`hopos.wd=off` na een flip): WRCFG naar
-/// clear, zoals Linux' `bcm2835_wdt_stop`. `false` = er was niets gewapend.
-pub fn off() -> bool {
-    let base = BASE.load(Relaxed);
-    if base == 0 {
-        return false;
-    }
-    let pm = Pa(base);
-    if dev::read32(pm.add(RSTC)) & WRCFG_MASK != WRCFG_FULL_RESET {
-        return false;
-    }
-    dev::write32(pm.add(RSTC), PASSWORD | RSTC_STOP);
-    dev::mb();
-    TICKS.store(0, Relaxed);
-    true
 }
 
 /// Wat er gewapend is, voor de consoleregel.

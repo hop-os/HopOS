@@ -10,7 +10,7 @@ wat de console moet tonen en wat een afwijking betekent.
 | Deel | Waar | Getest |
 | --- | --- | --- |
 | Board: DTB uit x0 naar de heap, geheugen en cores uit de DTB, UART2 (ns16550, stap 4), GIC-600, de klok, het plan, de NIC-probe | `board/rk3566` | 28 host-tests (31 met `gui`): plan, pool uit de banken min de gaten, CRU-, GRF- en iomux-woorden, aff1-nummering, de map-tellingen, de zes van de initrd hieronder, en die van de vier stukken hieronder |
-| Watchdog: de DW-WDT gewapend op TOP 15 (89,5 s), geaaid door de watchdog-taak van de kern, de erfenis over een flip (staat ENABLE al, dan alleen TORR en een kick), `hopos.wd=off` pulst SRST_P/T_WDT_NS (zoals Linux' `dw_wdt_stop`) en kijkt of ENABLE valt | `board/rk3566/src/watchdog.rs`, `hopos/src/watchdog.rs` | host-tests op een nep-WDT en nep-CRU in RAM: de TOP-tabel, wapenen (timeout, kick, enable, response mode 0), de erfenis één keer, geen kick zonder pclk, de reset-woorden van `off` |
+| Watchdog: de DW-WDT gewapend op TOP 15 (89,5 s), geaaid door de watchdog-taak van de kern, de erfenis over een flip (staat ENABLE al, dan alleen TORR en een kick); geen knop om hem uit te zetten (O2) | `board/rk3566/src/watchdog.rs`, `hopos/src/watchdog.rs` | host-tests op een nep-WDT en nep-CRU in RAM: de TOP-tabel, wapenen (timeout, kick, enable, response mode 0), de erfenis één keer, geen kick zonder pclk |
 | TRNG: `rockchip,rk3568-rng` op 0xFE38_8000 als bron van de DRBG van de kern, gezaaid in `discover` | `driver/rkrng`, `board/rk3566/src/rng.rs`, de klokken en de reset in `soc.rs` | 9 host-tests op een nep-blok met hiword-masker: hele rondes, START maskeert alleen zichzelf, een dood blok is nul en geen entropie, de continue toets, de timeout zet de ring uit |
 | Klok: de cores tussen 816 MHz (850 mV) en 1800 MHz (1150 mV) onder het klokbeleid van de kern. De klok is `SCMI_CLK_CPU` van de TF-A (SMC 0x82000010, shmem 0x0010_f000), zoals in mainline Linux; vdd_cpu is de rk860x op i2c0 0x40 (niet de RK817), via een gepolde rk3x-I2C. Omhoog eerst de spanning, omlaag eerst de klok, nooit een klok boven de teruggelezen spanning | `board/rk3566/src/clock.rs`, `i2c.rs`, `hopos/src/telemetry.rs` | host-tests: de werkpunten van rk3566.dtsi en hun VSEL-codes, welke klok een spanning draagt, het plafond, de ramp, de volgorde, een buck die stopt, een stand of klok zonder antwoord, de I2C-woorden |
 | TSADC: temperatuur (warmste van CPU en GPU) op de tik en de heartbeat | `board/rk3566/src/tsadc.rs`, `hopos/src/telemetry.rs` | host-tests: de rk3568-codetabel met interpolatie, nul is geen meting, het delerwoord is het teruggelezen `0x1715` |
@@ -148,12 +148,8 @@ b6-image) staat in `image/firmware/radxa/donor-boot.bin` (herkomst in de
    Zodra het net op is en Hop slaat: `watchdog: liveness proven ...
    HOPOS_CANARY_LIVE`. Na een warme flip vanaf een kern die hem al
    wapende zegt de `HOPOS_WD_ARMED`-regel `already armed by the previous
-   kernel`. Met `hopos.wd=off`:
-   `HOPOS_WD_OFF`, en na een flip vanaf een gewapende kern eerst
-   `watchdog: disabled for a post-mortem`; zegt de regel ervoor `still
-   enabled after pulsing SRST_P/T_WDT_NS`, dan houdt de reset hem niet
-   tegen en reset de node binnen de 89 s (dat pad is nooit op ijzer
-   gemeten). Daarna de sensor: `hwmon: TSADC at 0xfe710000 cpu 41.5C gpu
+   kernel`. Er is geen knop om hem uit te zetten (O2 van 01-11). Daarna
+   de sensor: `hwmon: TSADC at 0xfe710000 cpu 41.5C gpu
    40.2C (raw N/M) ... HOPOS_TSADC_UP`, en `temp=41.5C` in de tik. Op v2
    converteerde deze sensor op dit bord nooit (06-08, drie hypothesen
    weggestreept); gebeurt dat hier ook, dan: `hwmon: TSADC at 0xfe710000

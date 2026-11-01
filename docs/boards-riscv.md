@@ -313,8 +313,8 @@ zet hem; HopOS doet geen init). Bouw met
    01-08-klasse); de vangrail van 2 ms houdt de node dan wel levend.
 8. **De watchdog**: `watchdog: hardware reset armed (DW-WDT at 0x3010000, TOP
    13 (21474 ms), reset on expiry) ... HOPOS_WD_ARMED`, dan na de lease
-   `HOPOS_CANARY_LIVE`. Onomkeerbaar tot de reset: voor een
-   UART-postmortem `hopos.wd=off` in de config. Een node die na ~21 s
+   `HOPOS_CANARY_LIVE`. Onomkeerbaar tot de reset, en er is geen knop om
+   hem uit te zetten (O2 van 01-11). Een node die na ~21 s
    herstart zonder `HOPOS_CANARY_MISS` ervoor: de pets komen niet aan (de
    restart-schrijf naar CRR).
 9. **Het net**: `net: dwmac version 0x1037, PHY 0 id 0043:5649, link 100 Mbps

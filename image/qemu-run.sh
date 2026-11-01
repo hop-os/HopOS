@@ -150,8 +150,7 @@ case "${WIRE:-}" in
 esac
 # De watchdog is verplicht, ook op QEMU (O2 van 01-11): altijd de i6300esb,
 # en een reset (geen exit, geen pauze) als hij afloopt. Zo reset een
-# HOPOS_FATAL hier net als op ijzer; `hopos.wd=off` in BOOTARGS zet hem
-# uit voor een postmortem.
+# HOPOS_FATAL hier net als op ijzer. Er is geen knop om hem uit te zetten.
 QWDT="-device i6300esb -action watchdog=reset"
 # FEATURES=gui (of een andere lijst) komt achter de board-feature, zoals
 # in uefi-run.sh.

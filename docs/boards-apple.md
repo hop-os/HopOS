@@ -65,7 +65,7 @@ overdracht als na `kmutil configure-boot --raw --entry-point 2048`.
 `hopos.cfg`-sleutels van dit board: `hopos.oscore=small|big|N`,
 `hopos.pstate=off|E,P` (het plafond per cluster, standaard 5,6),
 `hopos.disk=off`, `hopos.smc=1`, `hopos.cages=on|off` (zonder waarde:
-kooien als de voorproef slaagt), `hopos.wd=off`.
+kooien als de voorproef slaagt).
 
 De config reist in het image, in het venster van elke kern
 ([boards.md](boards.md), "Het config-venster"): `CFG=hopos-m4.cfg sh

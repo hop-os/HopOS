@@ -267,10 +267,6 @@ impl board::Watchdog for Apple {
     fn pet(&self) {
         wdt::pet();
     }
-
-    fn disarm(&self) -> bool {
-        wdt::off()
-    }
 }
 
 /// De thermometer is de SMC; die praat bij elke meting een

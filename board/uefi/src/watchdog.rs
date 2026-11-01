@@ -90,21 +90,6 @@ pub fn pet() {
     dev::write32(Pa(c).add(WOR), TICKS.load(Relaxed));
 }
 
-/// Zet de watchdog uit (WCS = 0), voor `hopos.wd=off` na een flip: de
-/// vorige kern wapende hem, en zonder pets reset hij de node, terwijl een
-/// post-mortem juist wil dat een hangende node blijft staan (de Ampere-hang
-/// van 19-09, L83). `false` = er was niets uit te zetten.
-pub fn off() -> bool {
-    let Ok(w) = frames() else {
-        return false;
-    };
-    dev::write32(Pa(w.control).add(WCS), 0);
-    dev::mb();
-    REFRESH.store(0, Relaxed);
-    CONTROL.store(0, Relaxed);
-    true
-}
-
 /// Wat er gewapend is, voor de consoleregel.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Desc {

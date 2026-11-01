@@ -192,14 +192,16 @@ open(out, "wb").write(b)
 open(out + ".park", "wb").write(struct.pack("<II", 0xd503205f, 0x17ffffff))
 STUB
 	}
-	# hopos.wd=off zoals tools/qemu-rpi4-test.sh: QEMU raspi4b modelleert het
+	# -no-reboot zoals tools/qemu-rpi4-test.sh: QEMU raspi4b modelleert het
 	# PM-blok alleen als reset-knop (een FULL_RESET reset meteen), en de
-	# watchdog wapent sinds 01-11 als eerste in setup, vóór HOPOS_BOOT.
+	# watchdog wapent sinds 01-11 meteen na `discover`, vóór HOPOS_BOOT; er
+	# is geen knop om hem uit te zetten (O2). Een kern die zo ver komt, stopt
+	# QEMU dus met die reset; de ingang, de bunny en de DTB staan ervoor.
 	boot() { # $1 = de console, daarna extra QEMU-argumenten
 		con="$1"
 		shift
 		qemu-system-aarch64 -M raspi4b -display none -monitor none -serial "file:$con" \
-			-kernel "$W/kernel8.img" -append "hopos.stage=none hopos.wd=off" "$@" 2>"$W/qemu.err" &
+			-kernel "$W/kernel8.img" -append "hopos.stage=none" -no-reboot "$@" 2>"$W/qemu.err" &
 		qp=$!
 		sleep "${SECS:-7}"
 		kill "$qp" 2>/dev/null || true
@@ -210,7 +212,7 @@ STUB
 	[ -f "$DTB" ] && set -- -dtb "$DTB" -initrd "$W/app.elf"
 	boot "$W/cold.log" "$@"
 	AT="$(sed -n 's/^fdt: .* bytes at \(0x[0-9a-f]*\).*/\1/p' "$W/cold.log.txt" | head -1)"
-	echo "== koud op core 0: $(grep -m1 'HOPOS_BOOT' "$W/cold.log.txt" || echo 'geen HOPOS_BOOT'), DTB op ${AT:-geen}"
+	echo "== koud op core 0: DTB op ${AT:-geen}, $(grep -c '^P2' "$W/cold.log.txt") keer P2 (de reset van de PM-watchdog stopt QEMU)"
 	FLIP=0x4550494C46504F48
 	stub "$W/flip.bin" "${AT:-0}" "$FLIP"
 	stub "$W/none.bin" "${AT:-0}" 0
@@ -221,8 +223,8 @@ STUB
 			-device loader,addr=0x0F800000,cpu-num=1 -device loader,addr=0x0F801000,cpu-num=0
 	done
 	fail=0
-	if grep -q "HOPOS_BOOT gen=1" "$W/cold.log.txt"; then :; else
-		echo "   ROOD de koude boot kwam niet op"
+	if [ -n "$AT" ] && [ "$(grep -c '^P2' "$W/cold.log.txt")" = 1 ]; then :; else
+		echo "   ROOD de koude boot kwam niet tot discover, of niet tot de reset van de PM-watchdog"
 		fail=1
 	fi
 	# Met merkteken: P2 (de ingang op EL2), de bunny (kmain), en dezelfde DTB.

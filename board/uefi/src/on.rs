@@ -84,10 +84,6 @@ impl<P: Platform> Watchdog for On<P> {
     fn pet(&self) {
         self.uefi.pet();
     }
-
-    fn disarm(&self) -> bool {
-        self.uefi.disarm()
-    }
 }
 
 impl<P: Platform> Thermal for On<P> {

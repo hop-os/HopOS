@@ -250,10 +250,6 @@ impl board::Watchdog for QemuVirt {
     fn pet(&self) {
         wdt::pet();
     }
-
-    fn disarm(&self) -> bool {
-        wdt::off()
-    }
 }
 
 /// Geen thermometer.

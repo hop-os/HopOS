@@ -509,10 +509,6 @@ impl board::Watchdog for Rk3566 {
     fn pet(&self) {
         watchdog::pet();
     }
-
-    fn disarm(&self) -> bool {
-        watchdog::off()
-    }
 }
 
 /// De TSADC van de SoC (`tsadc`): het warmste van de twee kanalen (CPU en

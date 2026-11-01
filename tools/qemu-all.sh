@@ -26,6 +26,7 @@ RINGS='
 virt          sh tools/qemu-test.sh
 virt-gui      GUI=1 sh tools/qemu-test.sh
 virt-display  GUI=display sh tools/qemu-test.sh
+media         sh tools/qemu-test-media.sh
 fault         sh tools/qemu-test-fault.sh
 hop           sh tools/qemu-test-hop.sh
 hop-smp2      SMP=2 sh tools/qemu-test-hop.sh

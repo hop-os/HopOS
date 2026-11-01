@@ -35,6 +35,10 @@
 #                                    job van docs/gui.md naar Hop).
 #                                    QDISPLAY=cocoa|gtk|sdl kiest de
 #                                    weergave (standaard die van QEMU)
+#   MEDIA=1 APP= image/qemu-run.sh   de media-kern (`--features media`)
+#                                    met `-device qemu-xhci`: de USB-bus
+#                                    zonder HID en de codec-dienst zonder
+#                                    VPU (tools/qemu-test-media.sh)
 #   WIRE=1 image/qemu-run.sh         een trage draad met vertraging, zoals
 #                                    een link van 1 Gbit met een paar ms RTT
 #                                    (de ORION naar een Mac over wifi): de
@@ -129,6 +133,24 @@ display)
 	;;
 *)
 	echo "qemu-run: GUI=$GUI: only GUI=display" >&2
+	exit 2
+	;;
+esac
+# MEDIA=1: de media-kern (`--features media`, zonder gui) met een kale
+# qemu-xhci: de bouwsteen usb zonder HID, de codec-dienst zonder VPU
+# (tools/qemu-test-media.sh).
+case "${MEDIA:-}" in
+"" | 0) ;;
+1)
+	[ -z "${GUI:-}" ] || {
+		echo "qemu-run: MEDIA=1 and GUI= are separate builds (docs/sequence-hopos.md §14.3)" >&2
+		exit 2
+	}
+	FEATURES=board-qemuvirt,media
+	QUSB="-device qemu-xhci,id=xhci"
+	;;
+*)
+	echo "qemu-run: MEDIA=$MEDIA: only MEDIA=1" >&2
 	exit 2
 	;;
 esac

@@ -1,6 +1,5 @@
 //! De slot-kant van de kern-binary: de kooi-lijm ([`cage`]), de
-//! lifecycle-actor en de servicers, en het eerste bewijs: appspike in een
-//! slot op QEMU.
+//! lifecycle-actor en de servicers, en Hop.
 //!
 //! Wat hier gebeurt, is de board-glue van `kern::slots`: het plan van het
 //! board wordt een `PartitionPool` en een `Places`, de kooi en de cores
@@ -8,20 +7,10 @@
 //! een vaste pool die de outbox leegtrekt naar de console (`slot N:
 //! <regel>`). Er wordt nooit per start gespawnd.
 //!
-//! De eerste plaatsing leest het image dat QEMU vóór de boot neerlegde
-//! (`vboard::slots::staged_image`, image/qemu-run.sh) en loopt de weg van
-//! elke start (`kern::system::place`, de `Placer` van de system-API):
-//! Claim, het image door de plaatsing, Arm met de entry uit de ELF,
-//! de status pollen tot de app exit meldt, en Stop. Dat twee keer: slot 1
-//! op een koude core (PSCI CPU_ON), slot 2 op dezelfde core nu hij
-//! geparkeerd staat (mailbox plus SEV). Markers: `HOPOS_SLOT_START`, de
-//! regels van de app via de servicer, `HOPOS_SLOT_DONE` bij exit 0 en
-//! `HOPOS_SLOT_STOPPED` na de bevestigde stop.
-//!
-//! Gemeten 29-09 op QEMU 11 (`-cpu cortex-a53 -smp 4`): de switcher, de
-//! trampoline en de parkeerlus van `cpu::el2` werkten zonder één fix; van
-//! CPU_ON tot READY minder dan de 20 ms van de eerste poll, en van de
-//! exit-HVC tot de geparkeerde mailbox (1) binnen één poll.
+//! De kern plaatst alleen Hop. Elke andere app plaatst Hop via de
+//! system-API; de QEMU-rol `app` (een gestaged image dat de kern zelf
+//! plaatste) is weg sinds 01-11 (docs/sequence-hopos.md §14.1 O7): een
+//! productiebinary zonder testpad, en de toetsen lopen de echte weg.
 //!
 //! # Hop
 //!
@@ -32,8 +21,7 @@
 //! idle van de kern, `cpu::el2::OsCore`), 64 MiB, de env met de `HOPOS_*`-keuzes,
 //! en het `Privilege`-token hoort bij slot 1 vanaf de boot (`main`). Zijn
 //! start draagt de uplink-poorten (8080 agent, 9080 leader), die de
-//! lifecycle doorzet zoals die van een jobspec. Appspike plaatst de kern dan
-//! niet meer: dat doet Hop zelf, via de system-API.
+//! lifecycle doorzet zoals die van een jobspec.
 //!
 //! Eén taak is de supervisor van Hop ([`Supervisor`]): plaatsen, bewaken
 //! (elke wissel één regel), en herstarten alleen als Hop erom vraagt:
@@ -204,7 +192,6 @@ pub(crate) use cage::{Off, is_off, park_for_flip, unpark_after_flip};
 
 use crate::clock::ExecTimer;
 use crate::glue::{DevMem, KernConsole, SlotOutbox};
-use abi::hopabi::CTRL_ENV_MAX;
 use abi::layout::{CtxState, RING_DATA_CAP};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -244,11 +231,10 @@ static SERVICERS: &Servicers = &crate::SERVICERS;
 /// schrijven er elke app-regel in (via [`LogTee`]), de listener leest.
 pub(crate) static LOGS: SlotLogs = SlotLogs::new();
 
-/// De antwoordplek van de supervisor van Hop ([`HopNode::supervise`]) en
-/// van de boot-plaatsing ([`place_first`]): `ask`, `status`, `stop`,
-/// `place` en `drop_streams`. Eén aanroeper tegelijk: de twee sluiten
-/// elkaar uit (de rol, of een meegekomen Hop), en elk van beide is één taak
-/// die op zijn antwoord wacht vóór de volgende vraag. Een andere taak die
+/// De antwoordplek van de supervisor van Hop ([`HopNode::supervise`]):
+/// `ask`, `status`, `stop`, `place` en `drop_streams`. Eén aanroeper: de
+/// supervisor is één taak die op zijn antwoord wacht vóór de volgende
+/// vraag. Een andere taak die
 /// de actor iets vraagt, krijgt een eigen plek ([`REPUBLISH_REPLY`]): een
 /// [`Reply`] kent één wachter, en een tweede `recv` verdringt de waker van
 /// de eerste, die dan voorgoed wacht.
@@ -261,16 +247,6 @@ static BOOT_REPLY: Reply = Reply::new();
 /// kon die voorgoed hangen, en daarmee elke volgende HOP_RESTART. Eén
 /// aanroeper: [`REPUBLISH`] laat hem hoogstens één keer los.
 static REPUBLISH_REPLY: Reply = Reply::new();
-
-/// De partitie van de eerste plaatsing: 32 MB, staart inbegrepen. Ruim voor
-/// appspike (een half MB image, 256 KB stack, een kleine heap).
-const FIRST_MEM: u64 = 32 << 20;
-
-/// Hoe lang de boot-plaatsing op een exit wacht.
-const FIRST_DEADLINE: Duration = Duration::from_secs(20);
-
-/// Het poll-ritme van de boot-plaatsing.
-const FIRST_POLL: Duration = Duration::from_millis(20);
 
 /// Het slot van Hop: de plaatsing bij boot, en het slot dat de bevoegdheid
 /// draagt (`main` slaat het token vóór de system-listener start).
@@ -327,8 +303,7 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 /// zonder dat er één byte van zijn wereld verandert, en plaatst de kern
 /// Hop niet opnieuw: Hop draait door (`HOPOS_FLIP_ADOPT`).
 ///
-/// `app_env` is de env van een gestagede app (`hopos.appenv`, [`app_env`]);
-/// Hop krijgt de zijne uit `hopos.cfg`. `system` is de system-API van deze
+/// Hop krijgt zijn env uit `hopos.cfg`. `system` is de system-API van deze
 /// boot: de supervisor van Hop leest er de maat van Hop's staat uit en
 /// ruimt er de stromen van een gestopte Hop op.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
@@ -336,7 +311,6 @@ pub(crate) fn start(
     exec: &'static Executor,
     role: Result<StagedRole, u64>,
     adopt: Option<Vec<kern::slots::SlotState>>,
-    app_env: Vec<u8>,
     cfg: NodeCfg<'static>,
     system: &'static crate::KernSystem,
 ) {
@@ -517,8 +491,14 @@ pub(crate) fn start(
         return;
     }
     let spawned = match role {
-        Ok(StagedRole::App) => exec.spawn(place_first(exec, hop.plan, app_env)),
         Ok(StagedRole::Hop) => exec.spawn(hop.supervise(None)),
+        // O7: de kern plaatst alleen Hop.
+        Ok(StagedRole::App) => {
+            println!(
+                "slots: the staging is no Hop, nothing placed (the kern places only Hop) HOPOS_SLOT_NONE"
+            );
+            return;
+        }
         Err(word) => {
             println!(
                 "slots: staged role word {word:#x} is neither app (0) nor hop (1), nothing placed HOPOS_SLOT_NONE"
@@ -668,47 +648,6 @@ async fn status(slot: Slot) -> Option<SlotStatus> {
         Ok(Response::Status(s)) => Some(s),
         _ => None,
     }
-}
-
-/// De eerste plaatsing: het gestagede image in slot 1, wachten op zijn
-/// exit en stoppen; daarna hetzelfde image in slot 2. De plaatsing kiest de
-/// eerste vrije core, en dat is core 1, die nu in de parkeerlus staat: de
-/// tweede ronde bewijst het warme pad (mailbox plus SEV) waar de eerste het
-/// koude pad (PSCI CPU_ON) bewees, met een andere kooi, VMID en partitie.
-async fn place_first(exec: &'static Executor, plan: abi::layout::Plan, env: Vec<u8>) {
-    let Some(img) = vslots::staged_image() else {
-        println!("slots: no staged image, nothing placed HOPOS_SLOT_NONE");
-        return;
-    };
-    for i in 1..=plan.max_slots().min(2) {
-        let Some(slot) = Slot::new(i) else { return };
-        if !run_once(exec, &plan, slot, img, &env).await {
-            return;
-        }
-    }
-}
-
-/// De env van een gestagede app uit de bootparameter `hopos.appenv`:
-/// `KEY=val`, meer sleutels met komma's (`GUI=display,MODE=x`), want een
-/// bootarg kent geen spaties of regels. Zo krijgt appspike op QEMU de env
-/// die een jobspec hem zou geven, bijvoorbeeld het glas
-/// (tools/qemu-test.sh met `GUI=display`). Te lang voor de control-page
-/// is één regel en een lege env: de app draait dan zoals zonder.
-pub(crate) fn app_env(param: &str) -> Vec<u8> {
-    let mut env = Vec::new();
-    if param.is_empty() {
-        return env;
-    }
-    if param.len() >= CTRL_ENV_MAX as usize || env.try_reserve_exact(param.len() + 1).is_err() {
-        println!(
-            "slots: hopos.appenv of {} bytes refused, the control page holds {CTRL_ENV_MAX} HOPOS_SLOT_ENV",
-            param.len()
-        );
-        return env;
-    }
-    env.extend(param.bytes().map(|b| if b == b',' { b'\n' } else { b }));
-    env.push(b'\n');
-    env
 }
 
 /// De naam van deze node zonder NIC als `hopos.cfg` geen `hopos.node` zet
@@ -1456,37 +1395,6 @@ fn el1_fault(st: &kern::cage::Status) -> Option<alloc::string::String> {
     Some(line)
 }
 
-/// Eén levensduur van `img` in `slot`: plaatsen, volgen tot de exit, en
-/// stoppen. Geeft `true` als de stop bevestigd is (core en partitie vrij).
-async fn run_once(
-    exec: &'static Executor,
-    plan: &abi::layout::Plan,
-    slot: Slot,
-    img: &[u8],
-    env: &[u8],
-) -> bool {
-    let at = Placement {
-        cores: 1,
-        ..Placement::default()
-    };
-    let entry = match place(slot, img, FIRST_MEM, at, env, Vec::new(), Vec::new()).await {
-        Ok(e) => e,
-        Err(e) => {
-            println!("slot {slot}: not started: {e} HOPOS_SLOT_FAIL");
-            return false;
-        }
-    };
-    let st = status(slot).await;
-    let core = st.and_then(|s| s.core).map_or(0, |(c, _)| c.get());
-    // De startregel (`HOPOS_SLOT_START`) zette de kooi-lijm al bij de
-    // dispatch; hier alleen wat alleen de boot-plaatsing weet.
-    println!(
-        "slot {slot}: placed by the kern, image {} bytes, entry {entry:#x}",
-        img.len()
-    );
-    watch_first(exec, plan, slot, core).await
-}
-
 /// De volumes als `kern::slots::Mount`, faalbaar gealloceerd.
 fn kern_mounts(list: &[(&[u8], &[u8])]) -> kern::Result<Vec<Mount>> {
     let copy = |b: &[u8]| -> kern::Result<Vec<u8>> {
@@ -1526,74 +1434,6 @@ async fn place(
     spec.mounts = mounts;
     spec.ports = ports;
     kern::system::place(INBOX, &BOOT_REPLY, &mut DevMem, spec, img, env).await
-}
-
-/// Volgt een bewoner tot zijn exit: elke statuswissel één regel met de
-/// ctx-staat en de mailbox erbij (de meting als het ergens blijft hangen),
-/// dan `HOPOS_SLOT_DONE` en de stop die partitie en core teruggeeft. Geeft
-/// `true` als die stop bevestigd is.
-async fn watch_first(
-    exec: &'static Executor,
-    plan: &abi::layout::Plan,
-    slot: Slot,
-    core: usize,
-) -> bool {
-    let t0 = exec.now();
-    let deadline = t0.saturating_add(FIRST_DEADLINE.as_nanos() as u64);
-    let mut last: Option<(u64, u64)> = None;
-    let mut next_probe = t0;
-    loop {
-        let Some(st) = status(slot).await else {
-            println!("slot {slot}: status unavailable HOPOS_SLOT_FAIL");
-            return false;
-        };
-        let now = exec.now();
-        let seen = (st.cage.app, st.cage.fault_vec);
-        if last != Some(seen) || now >= next_probe {
-            probe(plan, slot, core, &st, now.saturating_sub(t0));
-            last = Some(seen);
-            next_probe = now.saturating_add(1_000_000_000);
-        }
-        if st.cage.fault_vec != 0 {
-            println!(
-                "slot {slot}: fault vec={} esr={:#x} ({}) far={:#x} HOPOS_SLOT_FAULT",
-                st.cage.fault_vec - 1,
-                st.cage.fault_esr,
-                kern::cage::esr_class(st.cage.fault_esr),
-                st.cage.fault_far
-            );
-            // De switcher meldde hem dood en parkeerde de core: de stop
-            // geeft partitie en core terug, maar een tweede ronde niet.
-            stop(slot, DEAD_STOP).await;
-            return false;
-        }
-        if let Some(line) = el1_fault(&st.cage) {
-            println!("slot {slot}: fault at EL1 {line} HOPOS_SLOT_FAULT");
-            stop(slot, DEAD_STOP).await;
-            return false;
-        }
-        if st.cage.app == abi::hopabi::AppStatus::Exited as u64 {
-            // De servicer trekt de laatste regels nog leeg: even laten.
-            exec.after(Duration::from_millis(100)).await;
-            if st.cage.exit_code == 0 {
-                println!("HOPOS_SLOT_DONE slot={slot} exit=0");
-            } else {
-                println!(
-                    "slot {slot}: exited with {} HOPOS_SLOT_EXIT_FAIL",
-                    st.cage.exit_code
-                );
-            }
-            return stop(slot, DEAD_STOP).await;
-        }
-        if now >= deadline {
-            println!(
-                "slot {slot}: no exit after {} s HOPOS_SLOT_TIMEOUT",
-                FIRST_DEADLINE.as_secs()
-            );
-            return false;
-        }
-        exec.after(FIRST_POLL).await;
-    }
 }
 
 /// Eén meetregel: app-status, ctx-staat, mailbox en heartbeat.

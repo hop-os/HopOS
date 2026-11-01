@@ -787,6 +787,31 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
     }
 }
 
+/// Eén regel over de val van een app, als hij viel: de fault die EL2 ving
+/// (een stage-2-fault, een getrapte SMC), of de exception die de
+/// vectortabel van applib op EL1 ving (exitcode `EXIT_APP_FAULT`).
+fn report_fault<L: Console>(log: &L, slot: Slot, st: &crate::cage::Status) {
+    use crate::cage::esr_class;
+    if st.fault_vec != 0 {
+        log.log(format_args!(
+            "slot {slot}: fault vec={} esr={:#x} ({}) far={:#x} HOPOS_SLOT_FAULT",
+            st.fault_vec - 1,
+            st.fault_esr,
+            esr_class(st.fault_esr),
+            st.fault_far
+        ));
+    } else if st.app_fault_vec != 0 && st.exit_code == abi::hopabi::EXIT_APP_FAULT {
+        log.log(format_args!(
+            "slot {slot}: fault at EL1 vec={} esr={:#x} ({}) elr={:#x} far={:#x} HOPOS_SLOT_FAULT",
+            st.app_fault_vec - 1,
+            st.app_fault_esr,
+            esr_class(st.app_fault_esr),
+            st.app_fault_elr,
+            st.app_fault_far
+        ));
+    }
+}
+
 enum Held {
     Streaming,
     Running(Partition<Owned>),
@@ -1431,6 +1456,12 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             ));
         }
         let mut quiet = self.wait_quiet(slot, core, span, timeout).await;
+        // De val van de app, één regel, wie de stop ook vroeg: tot 01-11
+        // drukte alleen de plaatsing van de boot hem (O7), en een fout van
+        // een app van Hop stond nergens op de console.
+        if quiet {
+            report_fault(&self.log, slot, &self.cage.status(slot));
+        }
         if !quiet {
             // Eén intrekking velt alle cores van het slot (gedeelde tabel en
             // VMID); de kick laat ook slapers de intrekking zien.

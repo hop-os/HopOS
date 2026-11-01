@@ -1,8 +1,9 @@
 #!/bin/sh
 # Het NVMe-pad op QEMU: het Altra-image (de NVMe-kern van de O6N en de
 # Altra, driver/nvme achter de wachtrij van blkdev) op QEMU virt met EDK2,
-# de data-schijf als `-device nvme`, de NIC als igb, en appspike gestaged
-# in slot 1 en daarna slot 2. De FS-toets van appspike schrijft, leest
+# de data-schijf als `-device nvme`, de NIC als igb, Hop gestaged in slot 1,
+# en appspike door Hop geplaatst in slot 2 (de echte weg, 01-11 O7), twee
+# keer: Hop herstart de service. De FS-toets van appspike schrijft, leest
 # terug, leest een bundel (OP_READ_MANY: drie lezingen in één call, de
 # laatste voorbij het einde) en ruimt op, allemaal door de NVMe-kern.
 #
@@ -12,31 +13,36 @@
 #             HOPOS_FS_UP fresh=1 (een verse schijf) en HOPOS_NVME_IRQ op
 #             MSI-X via de ITS (de wachtrij slaapt op de lijn; de zelftest
 #             kwam aan);
-#   per slot  HOPOS_APPSPIKE_FS ok en HOPOS_APPSPIKE_DONE ... fail=0.
+#   per ronde HOPOS_APPSPIKE_FS ok en HOPOS_APPSPIKE_DONE ... fail=0.
 #
 # Rood is ook: HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_NVME_FAIL, HOPOS_FS_FAIL
 # en HOPOS_FS_IO. Rood bewaart de console (en drukt hem af).
 #
-#   tools/qemu-test-nvme.sh                TIMEOUT=120 standaard, in seconden
+#   tools/qemu-test-nvme.sh                TIMEOUT=180 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-nvme.sh   bewaart ook een groene console
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 . "$(dirname "$0")/lib.sh"
-TIMEOUT="${TIMEOUT:-120}"
+TIMEOUT="${TIMEOUT:-180}"
+TARGET=aarch64-unknown-none-softfloat
 scratch nvme
 VARS="$ART/vars.fd"
 ESP="$ART/esp"
 CFG="$ART/hopos.cfg"
-# Een verse, ijle schijf van 64 MiB: hopfs begint leeg. Een lege config:
-# geen Hop, alleen de rol van het gestagede image (uefi-run.sh zet hem).
+# Een verse, ijle schijf van 64 MiB: hopfs begint leeg. De config: alleen
+# de insecure-regel voor Hop (uefi-run.sh zet de rol erbij).
 dd if=/dev/zero of="$DISK" bs=1048576 count=0 seek=64 2>/dev/null
 dd if=/dev/zero of="$VARS" bs=1048576 count=64 2>/dev/null
-printf '# qemu-test-nvme: geen sleutels\n' >"$CFG"
+printf 'hopos.insecure=1\n' >"$CFG"
+ports SYS AGENT LEADER ART
 
 cd "$DIR"
-echo "== bouwen: BOOTAA64.EFI (board-altra) en appspike op de ESP"
-BUILD_ONLY=1 BOARD=altra APP=appspike ESP="$ESP" CFG="$CFG" sh image/uefi-run.sh 2>&1 | sed 's/^/   /'
+echo "== bouwen: BOOTAA64.EFI (board-altra) met Hop, en appspike"
+apps appspike
+hop_elf
+serve
+BUILD_ONLY=1 BOARD=altra APP="$HOP_ELF" ROLE=hop ESP="$ESP" CFG="$CFG" sh image/uefi-run.sh 2>&1 | sed 's/^/   /'
 [ -e "$ESP/EFI/BOOT/BOOTAA64.EFI" ] || {
 	echo "ROOD: geen BOOTAA64.EFI"
 	exit 1
@@ -44,19 +50,26 @@ BUILD_ONLY=1 BOARD=altra APP=appspike ESP="$ESP" CFG="$CFG" sh image/uefi-run.sh
 
 MARKS="HOPOS_NVME_UP|HOPOS_DISK_UP model=QEMU NVMe Ctrl blocks=131072|HOPOS_FS_UP fresh=1"
 MARKS="$MARKS|MSI-X via the ITS, LPI [0-9]+.*HOPOS_NVME_IRQ"
-MARKS="$MARKS|slot 1: HOPOS_APPSPIKE_FS ok|slot 1: HOPOS_APPSPIKE_DONE pass=[0-9]+ fail=0"
-MARKS="$MARKS|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=[0-9]+ fail=0"
+BOOT_MARKS="HOPOS_SYSTEM_UP|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
+MARKS="$MARKS|$BOOT_MARKS|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=[0-9]+ fail=0"
+JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432}'
+POSTED=""
+# Twee rondes: Hop herstart de service.
+twice() { [ "$(count 'slot 2: HOPOS_APPSPIKE_DONE pass=[0-9]+ fail=0')" -ge 2 ]; }
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_NVME_FAIL|HOPOS_FS_FAIL|HOPOS_FS_IO|HOPOS_APPSPIKE_FS FAIL"
 
 echo "== booten op QEMU virt met EDK2 en een NVMe (tot ${TIMEOUT}s)"
 qemu_edk2 neoverse-n1 "$VARS" "$ESP" \
-	-device igb,netdev=n0,romfile= -netdev user,id=n0 \
+	-device igb,netdev=n0,romfile= -netdev "user,id=n0,$QFWD" \
 	-drive "if=none,format=raw,file=$DISK,id=nv0" -device nvme,drive=nv0,serial=hopnvme \
 	</dev/null >"$LOG" 2>&1 &
 QPID=$!
 
 elapsed=0
-while ! all "$MARKS" && ! has "$RED" && kill -0 "$QPID" 2>/dev/null && [ "$elapsed" -lt "$((TIMEOUT * 5))" ]; do
+while ! { all "$MARKS" && twice; } && ! has "$RED" && kill -0 "$QPID" 2>/dev/null && [ "$elapsed" -lt "$((TIMEOUT * 5))" ]; do
+	if [ -z "$POSTED" ] && all "$BOOT_MARKS"; then
+		post_job "$JOB" || break
+	fi
 	sleep 0.2
 	elapsed=$((elapsed + 1))
 done
@@ -64,6 +77,12 @@ qemu_stop
 
 fail=0
 marks "$MARKS"
+if twice; then
+	echo "   ok  de tweede ronde (de herstart door Hop)"
+else
+	echo "   ROOD de tweede ronde ontbreekt"
+	fail=1
+fi
 if has "$RED"; then
 	echo "   ROOD: $(first "$RED")"
 	fail=1

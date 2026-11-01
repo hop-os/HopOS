@@ -25,25 +25,17 @@
 #   extern          een TCP-verbinding van de host via hostfwd naar
 #                   10.0.2.15:10100 die de kern accepteert en weigert (geen
 #                   slot achter 10.0.2.2): de host ziet EOF en de kern meldt
-#                   een NIEUWE regel HOPOS_SYSTEM_REFUSED. Drie keer, op de
-#                   momenten van tools/qemu-test.sh: meteen na
-#                   HOPOS_SYSTEM_UP, zodra de app van slot 1 zijn netwerk
-#                   heeft, en na de stop van slot 2;
-#   appspike        het ABI-bewijs op riscv64 (standaard aan; APP= slaat het
-#                   over): appspike, door QEMU gestaged, in slot 1 op hart 1
-#                   door de lifecycle van de kern (PMP plus Sv39, de
-#                   M-mode-switcher), al zijn toetsen groen via de servicer op
-#                   de console (HOPOS_APPSPIKE_DONE pass=9 fail=0: control-page,
-#                   env, log, frame, klok, heartbeat, net met de system-API,
-#                   hopfs en heap), exit 0 (HOPOS_SLOT_DONE) en de bevestigde
-#                   stop (HOPOS_SLOT_STOPPED); daarna hetzelfde in slot 2 op
-#                   hetzelfde hart, nu warm (de switcher draait al).
+#                   een NIEUWE regel HOPOS_SYSTEM_REFUSED, meteen na
+#                   HOPOS_SYSTEM_UP.
+#
+# Het ABI-bewijs met appspike loopt de echte weg: Hop plaatst hem
+# (tools/qemu-riscv-test-hop.sh). De kern plaatst sinds 01-11 alleen Hop
+# (docs/sequence-hopos.md §14.1 O7).
 #
 # Rood is rood: een ontbrekende marker, een HOPOS_PANIC of een
 # HOPOS_EXCEPTION drukt de hele console af en faalt.
 #
 #   tools/qemu-riscv-test.sh            TIMEOUT=40 standaard, in seconden
-#   APP= tools/qemu-riscv-test.sh       alleen de boot-poort (geen slots)
 #   KEEP_LOG=pad tools/qemu-riscv-test.sh   bewaart ook een groene console
 #   SYSPORT=poort                       de host-kant van de hostfwd;
 #                                       standaard een vrije van het OS
@@ -53,7 +45,6 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 . "$(dirname "$0")/lib.sh"
 TIMEOUT="${TIMEOUT:-40}"
 TARGET=riscv64gc-unknown-none-elf
-APP="${APP-appspike}"
 scratch rv
 ports SYS
 
@@ -90,27 +81,13 @@ if command -v riscv64-elf-objdump >/dev/null 2>&1; then
 	fi
 fi
 
-# De staging: het image zonder debug-info, rol 0 (app).
-STAGED=""
-if [ -n "$APP" ]; then
-	cargo build --quiet --release --target "$TARGET" -p "$APP"
-	STAGED="$ART/stage.elf"
-	strip_elf "$DIR/target/$TARGET/release/$APP" "$STAGED"
-	fits "$STAGED" "$APP"
-fi
-qemu_rv "$STAGED" 0 </dev/null >"$LOG" 2>&1 &
+# Geen staging: de boot-poort zonder bewoner.
+qemu_rv "" 0 </dev/null >"$LOG" 2>&1 &
 QPID=$!
 
-# De vaste markers, en die van de appspike-keten (grep -E, per slot).
-NEED="HOPOS_BOOT|HOPOS_TICK 3 |HOPOS_NIC_UP|HOPOS_DISK_UP|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_RV_CAGE_UP|HOPOS_SYSTEM_UP"
-PROBE_AT=""
-if [ -n "$APP" ]; then
-	NEED="$NEED|HOPOS_RV_HART_UP|HOPOS_SYSTEM_REFUSED"
-	for i in 1 2; do
-		NEED="$NEED|HOPOS_SLOT_START slot=$i|slot $i: HOPOS_APPSPIKE_NETLOG|slot $i: HOPOS_APPSPIKE_FS ok|slot $i: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=$i exit=0|slot $i: stopped.*HOPOS_SLOT_STOPPED"
-	done
-	PROBE_AT="HOPOS_SYSTEM_UP|slot 1: .*HOPOS_APPNET_UP|slot 2: stopped.*HOPOS_SLOT_STOPPED"
-fi
+# De vaste markers (grep -E), en de schijf op zijn PLIC-bron (01-11, O3).
+NEED="HOPOS_BOOT|HOPOS_TICK 3 |HOPOS_NIC_UP|disk: virtio-blk at 0x[0-9a-f]+, plic source [0-9]+|HOPOS_DISK_UP|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_RV_CAGE_UP|HOPOS_RV_HART_UP|HOPOS_SYSTEM_UP|HOPOS_SYSTEM_REFUSED"
+PROBE_AT="HOPOS_SYSTEM_UP"
 
 # De toetsen van buiten op hun momenten (tools/lib.sh probe_at).
 elapsed=0

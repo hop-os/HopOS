@@ -10,9 +10,9 @@
 #   BOARD=o6n|altra image/uefi-run.sh de fysieke borden (feature board-o6n of
 #                                     board-altra van hopos): alleen bouwen,
 #                                     want QEMU heeft er geen model van
-#   APP=appspike image/uefi-run.sh    een app uit deze werkruimte als
-#                                     hopos-stage.elf op de ESP, rol app
-#   APP=/pad/elf ROLE=app|hop ...     een kant-en-klare ELF
+#   APP=/pad/elf image/uefi-run.sh    een kant-en-klare Hop als
+#                                     hopos-stage.elf op de ESP (de kern
+#                                     plaatst alleen Hop, 01-11 O7)
 #   CFG="a.cfg b.cfg" image/uefi-run.sh
 #                                     hopos.cfg in lagen in het venster van
 #                                     BOOTAA64.EFI, de laatste waarde wint

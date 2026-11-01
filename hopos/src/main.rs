@@ -440,19 +440,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // FLIP: na een landing adopteren de slots de bewoners in plaats van
     // Hop opnieuw te plaatsen; de flip-taak en de guard spawnen hier.
     flip::start(exec, landing.is_some());
-    // De env van een gestagede app (appspike op QEMU): `hopos.appenv`.
-    let app_env = match role {
-        Ok(StagedRole::App) => slots::app_env(board.boot_param("hopos.appenv")),
-        _ => alloc::vec::Vec::new(),
-    };
-    slots::start(
-        exec,
-        role,
-        landing.map(|h| h.slots),
-        app_env,
-        node_cfg,
-        system,
-    );
+    slots::start(exec, role, landing.map(|h| h.slots), node_cfg, system);
 
     // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
     // over zijn bewoners (Hop). Lukt dat niet, dan houdt de kern zijn core

@@ -5,7 +5,10 @@
 # het IPA ligt buiten de map van de app zelf), en die moet de vectortabel
 # van applib vangen en melden, niet een sprong naar een lege VBAR_EL1 (de
 # eerste Pi 5-boot: `esr=0x82000005 far=0x200`, de tweede fault in plaats
-# van de eerste). Groen als de kern de échte fault drukt:
+# van de eerste). Hop plaatst appspike (een job met `"env":{"FAULT":"1"}`,
+# sinds 01-11 de echte weg, docs/sequence-hopos.md §14.1 O7) in slot 2,
+# en de kern drukt de fault bij de stop die Hop vraagt. Groen als de kern
+# de échte fault drukt:
 #
 #   HOPOS_APP_MMU          de stage-1 staat aan (anders is er geen
 #                          vertaalfout op EL1 te maken);
@@ -28,21 +31,29 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${TIMEOUT:-60}"
 TARGET=aarch64-unknown-none-softfloat
 scratch qemu-fault
-ports SYS AGENT LEADER
+ports SYS AGENT LEADER ART
 
 cd "$DIR"
-echo "== bouwen: hopos (qemuvirt) en appspike"
+echo "== bouwen: hopos (qemuvirt), appspike en agentd-hopos"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
-cargo build --quiet --release --target "$TARGET" -p appspike
-echo "== booten op QEMU virt met appspike FAULT=1 (tot ${TIMEOUT}s)"
-hop_virt APP=appspike ROLE=0 APPENV=FAULT=1
+apps appspike
+hop_elf
+serve
+echo "== booten op QEMU virt met Hop; Hop plaatst appspike FAULT=1 (tot ${TIMEOUT}s)"
+hop_virt
 
-MARKS="slot 1: applib: stage-1 on.*HOPOS_APP_MMU|slot 1: HOPOS_APPSPIKE_FAULT reading 0x4ffff000|slot 1: fault at EL1 vec=4 esr=0x96[0-9a-f]{6} \(data abort, translation fault\) elr=0x5[0-9a-f]+ far=0x4ffff000 HOPOS_SLOT_FAULT"
+BOOT_MARKS="HOPOS_SYSTEM_UP|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
+JOB='{"name":"fault","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"env":{"FAULT":"1"}}'
+MARKS="slot 2: applib: stage-1 on.*HOPOS_APP_MMU|slot 2: HOPOS_APPSPIKE_FAULT reading 0x4ffff000|slot 2: fault at EL1 vec=4 esr=0x96[0-9a-f]{6} \(data abort, translation fault\) elr=0x5[0-9a-f]+ far=0x4ffff000 HOPOS_SLOT_FAULT"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APPSPIKE_FAULT FAIL|HOPOS_APP_NO_MMU"
+POSTED=""
 t=0
 while [ "$t" -lt "$TIMEOUT" ]; do
 	if has "$RED"; then
 		break
+	fi
+	if [ -z "$POSTED" ] && all "$BOOT_MARKS"; then
+		post_job "$JOB" || break
 	fi
 	ok=1
 	IFS='|'

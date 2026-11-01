@@ -5,8 +5,8 @@
 # kaart-image. image/rpi4.sh en image/rpi5.sh roepen dit aan.
 #
 #   image/rpi4.sh                    Hop als bewoner (standaard); zo ook rpi5
-#   APP=appspike image/rpi4.sh       appspike, twee keer door de kern geplaatst
-#   APP=/pad/naar/elf image/rpi4.sh  een kant-en-klare ELF (rol app)
+#   APP=/pad/naar/elf image/rpi4.sh  een kant-en-klare Hop (de kern plaatst
+#                                    alleen Hop, 01-11 O7)
 #   APP= image/rpi4.sh               zonder image
 #   GUI=1 image/rpi4.sh              de gui-smaak (`--features gui`, docs/gui.md):
 #                                    de console op het glas via de VideoCore-

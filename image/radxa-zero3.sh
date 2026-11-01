@@ -6,9 +6,8 @@
 # bouwt tools/mkcard (de port van Go's mkcard).
 #
 #   image/radxa-zero3.sh                 de kaart met Hop als bewoner
-#   APP=appspike image/...               appspike, twee keer door de kern
-#                                        geplaatst (de kale app-rol)
-#   APP=/pad/naar/elf image/...          een kant-en-klare ELF (rol app)
+#   APP=/pad/naar/elf image/...          een kant-en-klare Hop (de kern
+#                                        plaatst alleen Hop, 01-11 O7)
 #   APP= image/...                       zonder image (HOPOS_SLOT_NONE)
 #   HOP_DIR=pad image/...                de hop-repo (standaard ../hop/hop)
 #   ROLE=hop|app image/...               de rol van het image (hopos.stage)

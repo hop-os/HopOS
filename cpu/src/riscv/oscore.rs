@@ -46,11 +46,13 @@ use super::clint::{Clint, NEVER};
 use super::csr;
 use super::pmp;
 use crate::el2::oscore::{begin, end, home, round};
-use crate::el2::{self, Back, OS_STATS as STATS, Turn, ctx_read, ctx_write, os_ctx_write};
+use crate::el2::{
+    self, Back, OS_STATS as STATS, Turn, ctx_read, ctx_write, os_ctx_read, os_ctx_write,
+};
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
 use abi::layout::{
-    CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_LEN, CTX_REGIME, CTX_RESUME, CTX_STATE,
-    CTX_WAKE, Core, CtxState, Plan,
+    CTX_ASID, CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_LEN, CTX_REGIME, CTX_RESUME,
+    CTX_STATE, CTX_WAKE, Core, CtxState, Plan,
 };
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use dev::Pa;
@@ -90,16 +92,15 @@ const SAVE_MTVAL: u64 = 152;
 /// dat hart (`RvSleeper::host`).
 pub struct OsCore {
     sched: Pa,
-    cage: Pa,
     clint: Clint,
     hart: usize,
     pmp: pmp::Profile,
     /// De ASID-breedte van dit hart ([`asid_bits`]).
     asid_bits: u32,
-    /// Elke bewoner zijn eigen ASID (zijn kooi-context-id), dus geen
-    /// TLB-flush per wissel: het hart heeft er genoeg (minstens
-    /// [`ASID_BITS_NEEDED`]) en de kern wil ze. Anders een volle
-    /// `sfence.vma` bij elke beurt, zoals tot 03-10.
+    /// Elke bewoner zijn eigen ASID (de kooi deelt hem uit en zet hem in
+    /// `CTX_ASID`), dus geen TLB-flush per wissel: het hart heeft ze en de
+    /// kern wil ze. Anders een volle `sfence.vma` bij elke beurt, zoals tot
+    /// 03-10.
     asids: bool,
 }
 
@@ -107,14 +108,13 @@ pub struct OsCore {
 const SATP_ASID_SHIFT: u64 = 44;
 const SATP_ASID: u64 = 0xffff << SATP_ASID_SHIFT;
 
-/// Zoveel ASID-bits zijn er minstens nodig: één per kooi-context-id
-/// (1..=`SLOT_CAP`), 0 blijft van de zelftest (Bare).
-const ASID_BITS_NEEDED: u32 = u64::BITS - (abi::layout::SLOT_CAP as u64).leading_zeros();
-
 /// Hoeveel ASID-bits dit hart heeft: alle enen in het veld schrijven en
-/// teruglezen (de spec, en Linux' `asids_init`). `satp` raakt de kern in
-/// machine mode niet (geen MPRV), dus de proef kan hier.
-fn asid_bits() -> u32 {
+/// teruglezen (de spec, en Linux' `asids_init`, een WARL-proef). `satp`
+/// raakt de kern in machine mode niet (geen MPRV), dus de proef kan hier.
+/// De kooi deelt er de ASID's van de bewoners van dit hart mee uit
+/// (`hopos/src/cage_riscv.rs`); ASID 0 blijft van de zelftest (Bare).
+#[must_use]
+pub fn asid_bits() -> u32 {
     let field =
         (arch::satp_probe(SATP_ASID | super::sv39::SATP_SV39) & SATP_ASID) >> SATP_ASID_SHIFT;
     field.trailing_ones()
@@ -132,7 +132,7 @@ impl OsCore {
         pmp: pmp::Profile,
         asids: bool,
     ) -> Result<OsCore, el2::Error> {
-        let core0 = Core::new(0).ok_or(el2::Error::BadContextId { id: 0 })?;
+        let core0 = Core::new(0).ok_or(el2::Error::BadContext { pa: 0 })?;
         let sched = plan.park_mbox_pa(core0).map_err(el2::Error::Plan)?;
         // ASID's in plaats van een flush per wissel, de VMID van arm64. Op
         // riscv schrijft een bewoner in S-mode `satp` zelf, ASID inbegrepen;
@@ -142,13 +142,12 @@ impl OsCore {
         // Geen app doet het (applib, Hop); een kooi op een app-hart mag het
         // nog steeds.
         let asid_bits = asid_bits();
-        let asids = asids && asid_bits >= ASID_BITS_NEEDED;
+        let asids = asids && asid_bits > 0;
         if asids {
             arch::trap_vm();
         }
         Ok(OsCore {
             sched,
-            cage: plan.vec_base_pa(),
             clint,
             hart,
             pmp,
@@ -169,24 +168,30 @@ impl OsCore {
     /// `deadline` (TIME-tikken). Aanroepen met `mstatus.MIE` uit, ná de
     /// laatste `ready()`-toets van de executor.
     pub fn run(&mut self, deadline: u64) -> Turn {
-        let (sched, cage) = (self.sched, self.cage);
-        round(sched, cage, csr::rdtime(), |i, id, ctx, fresh| {
-            self.turn(i, id, ctx, deadline, fresh)
+        let sched = self.sched;
+        round(sched, csr::rdtime(), |i, ctx, fresh| {
+            self.turn(i, ctx, deadline, fresh)
         })
     }
 
-    /// De beurt van bewoner `id` op lijstplek `i`.
-    fn turn(&mut self, i: usize, id: u8, ctx: Pa, deadline: u64, fresh: bool) -> Back {
-        begin(self.sched, i, id, ctx);
-        // De ASID van de bewoner is zijn id: de kern zet hem, elke beurt
-        // (TVM houdt de bewoner er vanaf). Een flush alleen bij een koude
-        // start: de vertalingen van een vorige huurder met dit id weg, zoals
-        // de TLBI bij een verse bewoner op arm64.
-        let flush = fresh || !self.asids;
-        if self.asids {
+    /// De beurt van de bewoner met ctx-blok `ctx` op lijstplek `i`.
+    fn turn(&mut self, i: usize, ctx: Pa, deadline: u64, fresh: bool) -> Back {
+        begin(self.sched, i, ctx);
+        // De ASID van de bewoner (`CTX_ASID`, de kooi deelde hem uit): de
+        // kern zet hem, elke beurt (TVM houdt de bewoner er vanaf). Een flush
+        // alleen bij een koude start: de vertalingen van een vorige huurder
+        // met deze ASID weg, zoals de TLBI bij een verse bewoner op arm64.
+        // Een bewoner zonder ASID (0) flusht elke beurt.
+        let asid = if self.asids {
+            os_ctx_read(ctx, CTX_ASID)
+        } else {
+            0
+        };
+        let flush = fresh || asid == 0;
+        if asid != 0 {
             let at = ctx.add(CTX_REGIME + super::switch::REGIME_SATP);
             let satp = dev::read64(at);
-            let want = (satp & !SATP_ASID) | u64::from(id) << SATP_ASID_SHIFT;
+            let want = (satp & !SATP_ASID) | (asid << SATP_ASID_SHIFT & SATP_ASID);
             if satp >> 60 != 0 && satp != want {
                 dev::write64(at, want);
             }
@@ -194,7 +199,7 @@ impl OsCore {
         let t0 = csr::rdtime();
         let (cause, mtval) = self.enter(ctx, fresh, flush, deadline);
         home(self.sched, csr::rdtime().wrapping_sub(t0));
-        end(id, settle(ctx, cause, mtval, true))
+        end(ctx, settle(ctx, cause, mtval, true))
     }
 
     /// De overgang zelf: de wekker op `deadline`, de drie bronnen aan die de

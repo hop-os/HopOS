@@ -218,9 +218,25 @@ impl fmt::Display for Error {
     }
 }
 
+/// Hoeveel VMID-bits dit ijzer heeft (ID_AA64MMFR1_EL1.VMIDBits): zestien
+/// vanaf v8.1, anders acht (de A72 van de Pi 4). De trampoline en de OS-core
+/// zetten VTCR_EL2.VS mee; de kooi deelt er de VMID's mee uit, één per
+/// kooi zolang hij leeft (Linux `get_vmid_bits`, `arch/arm64/kvm/vmid.c`).
+#[must_use]
+pub fn vmid_bits() -> u32 {
+    arch::vmid_bits()
+}
+
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
 mod arch {
     use core::arch::asm;
+
+    pub(super) fn vmid_bits() -> u32 {
+        let r: u64;
+        // SAFETY: een ID-register lezen, zonder bijwerkingen.
+        unsafe { asm!("mrs {}, id_aa64mmfr1_el1", out(reg) r, options(nomem, nostack)) };
+        if (r >> 4) & 0xf == 2 { 16 } else { 8 }
+    }
 
     /// De intrekking van een kooi in de TLB's. In de Go-generatie was dit
     /// HVC #0 vanuit EL1 naar de revoke-vector op EL2 (vandaar de naam); de
@@ -247,6 +263,10 @@ mod arch {
     //! Host-kant: er is geen EL2 en geen TLB. De tests bewijzen de inhoud
     //! van de tabellen, niet de intrekking zelf (zoals stage2_host.go).
     pub(super) fn hvc_revoke() {}
+
+    pub(super) fn vmid_bits() -> u32 {
+        8
+    }
 }
 
 /// Het testharnas van de switcher en de OS-core: buffers met een adres, en
@@ -254,10 +274,9 @@ mod arch {
 #[cfg(test)]
 mod harness {
     use abi::Region;
-    use abi::layout::{CAGE_STRIDE, Plan, PlanSpec, Pool};
+    use abi::layout::{CAGE_STRIDE, CTX_OFF, Core, Plan, PlanSpec, Pool, cage_len, node_ctrl_len};
     use dev::Pa;
 
-    /// Een buffer met een gegarandeerde uitlijning; het adres is de `Pa`.
     pub(super) struct Buf {
         pub(super) mem: Vec<u64>,
         pub(super) base: u64,
@@ -275,13 +294,9 @@ mod harness {
         }
     }
 
-    /// Een plan over een host-buffer: drie slots en `app_cores` app-cores.
-    /// De kooi-regio, de node-pages en de boot-scratch liggen in dezelfde
-    /// buffer, de pool er ver voorbij (hij wordt nooit aangeraakt).
     pub(super) fn plan(app_cores: usize) -> (Buf, Plan) {
-        let slots = 3u64;
-        let cage = (slots + 1) * CAGE_STRIDE;
-        let ctrl = (slots + 1) * 0x1000;
+        let cage = cage_len(app_cores);
+        let ctrl = node_ctrl_len(app_cores);
         let buf = Buf::new((cage + ctrl + 0x1000) as usize, CAGE_STRIDE);
         let end = buf.base + cage + ctrl + 0x1000;
         let mut pool = Pool::new();
@@ -293,10 +308,42 @@ mod harness {
             cage_pa: buf.base,
             boot_scratch_pa: buf.base + cage + ctrl,
             pool,
-            max_slots: slots as usize,
             app_cores,
             ..PlanSpec::default()
         };
         (buf, Plan::new(spec).unwrap())
+    }
+
+    /// Kooi-geheugen voor de toetsen: `n` kooi-blokken (het blok van een
+    /// slot), en een bewonerslijst van één blok per core van `plan`.
+    pub(super) struct Kit {
+        blocks: Buf,
+        _lists: Buf,
+    }
+
+    impl Kit {
+        pub(super) fn new(plan: &Plan, n: usize) -> Kit {
+            let blocks = Buf::new(n * CAGE_STRIDE as usize, CAGE_STRIDE);
+            let cores = plan.app_cores() + 1;
+            let lists = Buf::new(cores * CAGE_STRIDE as usize, CAGE_STRIDE);
+            for c in 0..cores {
+                let sched = super::roster::sched(plan, Core::new(c).unwrap()).unwrap();
+                super::roster::grow(sched, lists.pa().add(c as u64 * CAGE_STRIDE), 1);
+            }
+            Kit {
+                blocks,
+                _lists: lists,
+            }
+        }
+
+        /// Het kooi-blok van slot `i` (1-based).
+        pub(super) fn block(&self, i: usize) -> Pa {
+            self.blocks.pa().add((i as u64 - 1) * CAGE_STRIDE)
+        }
+
+        /// Het ctx-blok van slot `i`.
+        pub(super) fn ctx(&self, i: usize) -> Pa {
+            self.block(i).add(CTX_OFF)
+        }
     }
 }

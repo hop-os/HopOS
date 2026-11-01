@@ -40,7 +40,6 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         net_dma_pa: map::NET_DMA.base,
         pool,
         ram_base: 0,
-        max_slots: (app_cores + 1).max(abi::layout::SLOTS_DEFAULT),
         app_cores,
         os_core,
         ..PlanSpec::default()

@@ -18,8 +18,8 @@ use abi::hopabi::{
     CTRL_DOOR_IRQ, CTRL_IDLE_MODE, CTRL_MBOX_PA, CTRL_S2_TABLE, CTRL_VEC_PA, IDLE_YIELD,
 };
 use abi::layout::{
-    self, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_TARGET, CTX_NEXT_PA, CTX_SMP, CtxState, LINK_BASE,
-    Plan,
+    self, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_TARGET, CTX_NEXT_PA, CTX_SMP, CTX_VTTBR, CtxState,
+    LINK_BASE, Plan,
 };
 use board::Board;
 use core::cell::OnceCell;
@@ -194,12 +194,15 @@ impl Isa for Arm {
     /// wektijd.
     fn build(&self, plan: &Plan, b: &Built) -> Result<u64, CageError> {
         let (s, ctx) = (b.s, b.ctx);
-        let block = plan.cage_table_pa(s).map_err(|_| err(code::PLAN))?;
         let mbox = plan.park_mbox_pa(b.core).map_err(|_| err(code::PLAN))?;
-        let l1 = el2::stage2::build(block, LINK_BASE, b.part.base, b.part.size).map_err(|e| {
+        let l1 = el2::stage2::build(b.block, LINK_BASE, b.part.base, b.part.size).map_err(|e| {
             println!("cage: slot {s}: stage-2 refused: {e} HOPOS_CAGE_STAGE2");
             err(code::CAGE)
         })?;
+        // De VTTBR van de eenheid, voor de switcher en de OS-core: zijn L1
+        // en de VMID die de kooi hem gaf.
+        let vttbr = l1.0 | u64::from(b.vmid) << 48;
+        el2::ctx_write(ctx, CTX_VTTBR, vttbr);
         // Op de OS-core is idle een yield: WFE op EL1 zou de hele core laten
         // slapen, en op QEMU spinnen tot de volgende interrupt. Zijn eerste
         // beurt legt de kern zelf klaar: geen trampoline.
@@ -225,10 +228,11 @@ impl Isa for Arm {
         let mut ring = [ctx; SMP_MAX];
         for (k, x) in ring.iter_mut().enumerate().take(b.cores).skip(1) {
             let c = layout::Core::new(b.core.get() + k).ok_or(err(code::SPAN))?;
-            *x = el2::prepare_secondary(plan, c, s, b.ctrl, affinity(plan, c)).map_err(|e| {
-                println!("cage: slot {s}: SMP context on core {c}: {e} HOPOS_CAGE_SMP");
-                err(code::SPAN)
-            })?;
+            *x =
+                el2::prepare_secondary(plan, c, vttbr, b.ctrl, affinity(plan, c)).map_err(|e| {
+                    println!("cage: slot {s}: SMP context on core {c}: {e} HOPOS_CAGE_SMP");
+                    err(code::SPAN)
+                })?;
         }
         el2::ctx_write(ctx, CTX_KICK_TARGET, affinity(plan, b.core));
         el2::chain(ring.get(..b.cores).unwrap_or(&[]));
@@ -272,10 +276,11 @@ impl Isa for Arm {
     }
 
     fn start_secondary(&self, plan: &Plan, b: &Built, c: layout::Core) -> Result<(), CageError> {
-        let (slot, s) = (b.s, b.s);
+        let slot = b.s;
         let ctx = plan.smp_ctx_pa(c).map_err(|_| err(code::PLAN))?;
         let mbox = plan.park_mbox_pa(c).map_err(|_| err(code::PLAN))?;
-        let l1 = plan.cage_table_pa(s).map_err(|_| err(code::PLAN))?;
+        // De L1 ligt vooraan in het kooi-blok (`el2::stage2::build`).
+        let l1 = b.block;
         // De handoff is node-owned: de EL1-staat komt van de page van de app,
         // al het EL2-gezag (tabel, VMID, mailbox, vectoren) van hier. Na de
         // kopie kan de app hem niet meer veranderen.
@@ -284,7 +289,7 @@ impl Isa for Arm {
             handoff,
             b.ctrl,
             l1.0,
-            s.get() as u64,
+            u64::from(b.vmid),
             mbox,
             plan.vec_base_pa(),
         );
@@ -320,12 +325,14 @@ impl Isa for Arm {
     /// niets meer draaide (`el2::evict`). Op de OS-core doet de rotatie van
     /// de kern dat (`el2::next`).
     fn revoke(&self, plan: &Plan, slot: layout::Slot, b: Option<&Built>) {
-        if let Err(e) = el2::revoke(plan, slot) {
-            println!("cage: slot {slot}: revoke: {e} HOPOS_CAGE_REVOKE");
-        }
-        let Some(b) = b.filter(|b| b.core.get() != 0) else {
+        let Some(b) = b else {
+            println!("cage: slot {slot}: revoke without a cage HOPOS_CAGE_REVOKE");
             return;
         };
+        el2::revoke(b.block);
+        if b.core.get() == 0 {
+            return;
+        }
         if let Err(e) = el2::evict(plan, b.core, b.ctx) {
             println!(
                 "cage: slot {slot}: evict from core {}: {e} HOPOS_CAGE_REVOKE",
@@ -356,6 +363,11 @@ impl Isa for Arm {
     /// (de aanname van QEMU virt), en dan plaatste een jobspec met
     /// `core-class` nooit: GEMETEN 01-10 op de M4, "big" gaf "no free run"
     /// met drie P-cores vrij. Een spec zonder klasse merkt hier niets van.
+    /// De VMID, voor elke bewoner, met zoveel bits als het ijzer heeft.
+    fn id_bits(&self, _c: layout::Core) -> u32 {
+        el2::vmid_bits()
+    }
+
     fn class(phys: usize) -> Option<CoreClass> {
         Some(match crate::BOARD.core_class(phys) {
             board::CoreClass::Small => CoreClass::Small,
@@ -396,8 +408,8 @@ fn join(plan: &Plan, b: &Built, tramp: Pa) -> Result<bool, CageError> {
     });
     let picked = seen.then_some(!parked);
     let mut others = 0usize;
-    let _ = roster::residents(plan, c, |id| {
-        if usize::from(id) != slot.get() {
+    let _ = roster::residents(plan, c, |x| {
+        if x != ctx {
             others += 1;
         }
     });
@@ -473,15 +485,8 @@ fn wake_sleeping(plan: &Plan, now: u64) {
             continue;
         }
         let mut due = false;
-        let _ = roster::residents(plan, c, |id| {
-            // Een id voorbij SLOT_CAP is de secundaire van deze core.
-            let ctx = match layout::Slot::new(usize::from(id)) {
-                Some(s) => plan.ctx_pa(s),
-                None => plan.smp_ctx_pa(c),
-            };
-            if let Ok(x) = ctx
-                && el2::ctx_state(x) == Some(CtxState::Saved)
-            {
+        let _ = roster::residents(plan, c, |x| {
+            if el2::ctx_state(x) == Some(CtxState::Saved) {
                 w.seen.fetch_add(1, Relaxed);
                 due |= el2::due(x, now).is_none();
             }
@@ -505,10 +510,11 @@ fn wake_sleeping(plan: &Plan, now: u64) {
 /// wakker: daar sliep anders de pomp tot zijn eigen timer, tot een seconde
 /// (04-09, rtt p99 145 ms tot 4,8 s op een app met twee cores).
 pub(crate) fn wake_rx(slot: usize) {
-    let Some(plan) = WAKE_PLAN.get().get() else {
+    // Alleen met de wekker van Apple aan.
+    if WAKE_PLAN.get().get().is_none() {
         return;
-    };
-    let Some(prim) = layout::Slot::new(slot).and_then(|s| plan.ctx_pa(s).ok()) else {
+    }
+    let Some(prim) = layout::Slot::new(slot).and_then(crate::kooi::ctx_of) else {
         return;
     };
     if !el2::rx_due(prim) {

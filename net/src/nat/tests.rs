@@ -47,8 +47,8 @@ impl TestIo {
         };
         Self {
             stats: Stats::new(),
-            attached: vec![false; SLOT_CAP + 1],
-            rings: vec![VecDeque::new(); SLOT_CAP + 1],
+            attached: vec![false; 256],
+            rings: vec![VecDeque::new(); 256],
             sent: Vec::new(),
             logs: RefCell::new(Vec::new()),
             stack: leannet::Stack::new(cfg, [1; 16]).unwrap(),
@@ -178,24 +178,21 @@ fn publish_validatie() {
     let (mut nat, _) = setup();
     // "icmp" bestaat niet meer: `Proto` kent alleen tcp en udp.
     assert!(
-        nat.publish(Proto::Tcp, 80, 0, 80, SLOT_CAP).is_err(),
+        nat.publish(Proto::Tcp, 80, 0, 80).is_err(),
         "slot 0 geaccepteerd"
     );
     assert!(
-        nat.publish(Proto::Tcp, 80, SLOT_CAP + 1, 80, SLOT_CAP)
+        nat.publish(Proto::Tcp, 80, abi::layout::SLOT_MAX + 1, 80)
             .is_err(),
         "slot buiten bereik"
     );
+    assert_eq!(nat.publish(Proto::Tcp, 0, 1, 80), Err(Error::PortZero));
+    nat.publish(Proto::Tcp, 80, 1, 80).unwrap();
     assert_eq!(
-        nat.publish(Proto::Tcp, 0, 1, 80, SLOT_CAP),
-        Err(Error::PortZero)
-    );
-    nat.publish(Proto::Tcp, 80, 1, 80, SLOT_CAP).unwrap();
-    assert_eq!(
-        nat.publish(Proto::Tcp, 80, 2, 80, SLOT_CAP),
+        nat.publish(Proto::Tcp, 80, 2, 80),
         Err(Error::AlreadyPublished { port: 80, slot: 1 })
     );
-    nat.publish(Proto::Udp, 80, 2, 80, SLOT_CAP).unwrap();
+    nat.publish(Proto::Udp, 80, 2, 80).unwrap();
 }
 
 /// Het volledige masquerade-pad: app belt uit, antwoord komt terug.
@@ -269,7 +266,7 @@ fn masquerade_uit_en_terug() {
 #[test]
 fn dnat_in_en_slot_antwoord_uit() {
     let (mut nat, mut io) = setup();
-    nat.publish(Proto::Tcp, 8080, 1, 9090, SLOT_CAP).unwrap();
+    nat.publish(Proto::Tcp, 8080, 1, 9090).unwrap();
     io.attach(1);
     let mut inf = mk_frame(
         PROTO_TCP, NIC_MAC, LAN_MAC0, LAN_IP, NODE_IP, 1234, 8080, b"hallo",
@@ -352,8 +349,7 @@ fn alloc_port_slaat_bezet_over() {
             seen: T0,
         })
         .unwrap();
-    nat.publish(Proto::Tcp, MASQ_BASE + 1, 1, 80, SLOT_CAP)
-        .unwrap();
+    nat.publish(Proto::Tcp, MASQ_BASE + 1, 1, 80).unwrap();
     assert_eq!(nat.alloc_port(PROTO_TCP, EXT_IP, 443), Some(MASQ_BASE + 2));
     // Naar een andere peer mag alles, tot hij rondgaat.
     for _ in MASQ_BASE..MASQ_END {
@@ -450,7 +446,7 @@ fn reverse_lookup_verwijdert_expired_en_valt_terug_op_dnat() {
     let id = flow_for(&mut nat, &mut io, PROTO_TCP, 1, 1001, EXT_IP, 443, now).unwrap();
     age(&mut nat, id, now - TCP_IDLE - SEC);
     let np = nat.flows.get(id).unwrap().node_port;
-    nat.publish(Proto::Tcp, np, 2, 8080, SLOT_CAP).unwrap();
+    nat.publish(Proto::Tcp, np, 2, 8080).unwrap();
     io.attach(2);
     let mut inf = mk_frame(
         PROTO_TCP, NIC_MAC, GW_MAC0, EXT_IP, NODE_IP, 443, np, b"nieuw",
@@ -614,7 +610,7 @@ fn vol_slot_rejectpad_is_rate_limited() {
         oldest.get_or_insert(id);
     }
     assert!(flow_for(&mut nat, &mut io, PROTO_UDP, 1, 60000, EXT_IP, 443, now).is_none());
-    let (first_sweep, first_log) = (nat.next_sweep, nat.next_slot_full_log[1]);
+    let (first_sweep, first_log) = (nat.next_sweep, nat.next_slot_full_log);
     assert!(
         first_sweep != 0 && first_log != 0,
         "eerste reject zette de cadans niet"
@@ -630,7 +626,7 @@ fn vol_slot_rejectpad_is_rate_limited() {
         "tweede reject veegde opnieuw vóór de cadans"
     );
     assert_eq!(
-        (nat.next_sweep, nat.next_slot_full_log[1]),
+        (nat.next_sweep, nat.next_slot_full_log),
         (first_sweep, first_log)
     );
     assert_eq!(io.logs.borrow().len(), 1, "herhaalde reject logde opnieuw");
@@ -646,8 +642,8 @@ fn vol_slot_rejectpad_is_rate_limited() {
 #[test]
 fn unpublish_slot_ruimt_op() {
     let (mut nat, mut io) = setup();
-    nat.publish(Proto::Tcp, 8080, 1, 8080, SLOT_CAP).unwrap();
-    nat.publish(Proto::Tcp, 8081, 2, 8081, SLOT_CAP).unwrap();
+    nat.publish(Proto::Tcp, 8080, 1, 8080).unwrap();
+    nat.publish(Proto::Tcp, 8081, 2, 8081).unwrap();
     flow_for(&mut nat, &mut io, PROTO_TCP, 1, 1001, EXT_IP, 443, T0).unwrap();
     flow_for(&mut nat, &mut io, PROTO_TCP, 2, 1002, EXT_IP, 443, T0).unwrap();
     flow_for(&mut nat, &mut io, PROTO_TCP, 2, 1003, port_ip4(1), 8080, T0).unwrap(); // hairpin naar 1
@@ -672,9 +668,9 @@ fn unpublish_slot_ruimt_op() {
 fn unpublish_slot_compacteert_publicatiepiek() {
     let (mut nat, _) = setup();
     for p in 1000u16..1128 {
-        nat.publish(Proto::Tcp, p, 1, p, SLOT_CAP).unwrap();
+        nat.publish(Proto::Tcp, p, 1, p).unwrap();
     }
-    nat.publish(Proto::Tcp, 9000, 2, 9000, SLOT_CAP).unwrap();
+    nat.publish(Proto::Tcp, 9000, 2, 9000).unwrap();
     nat.unpublish_slot(1);
     assert_eq!(nat.pubs.len(), 1);
     assert_eq!((nat.pubs[0].slot, nat.pubs[0].node_port), (2, 9000));
@@ -908,7 +904,7 @@ fn hairpin_heen_en_terug() {
     let (mut nat, mut io) = setup();
     io.attach(1);
     io.attach(2);
-    nat.publish(Proto::Tcp, 7878, 1, 7878, SLOT_CAP).unwrap();
+    nat.publish(Proto::Tcp, 7878, 1, 7878).unwrap();
     let (cli, srv) = (port_ip4(2), port_ip4(1));
     let mut heen = mk_frame(
         PROTO_TCP,
@@ -957,7 +953,7 @@ fn hairpin_udp() {
     let (mut nat, mut io) = setup();
     io.attach(1);
     io.attach(2);
-    nat.publish(Proto::Udp, 5353, 1, 5353, SLOT_CAP).unwrap();
+    nat.publish(Proto::Udp, 5353, 1, 5353).unwrap();
     let mut heen = mk_frame(
         PROTO_UDP,
         HOST_MAC,
@@ -1010,7 +1006,7 @@ fn hairpin_ongepubliceerd_dropt() {
 fn hairpin_reply_zonder_flow_dropt() {
     let (mut nat, mut io) = setup();
     io.attach(2);
-    nat.publish(Proto::Tcp, 7878, 1, 7878, SLOT_CAP).unwrap();
+    nat.publish(Proto::Tcp, 7878, 1, 7878).unwrap();
     let mut f = mk_frame(
         PROTO_TCP,
         HOST_MAC,
@@ -1036,7 +1032,7 @@ fn hairpin_reply_zonder_flow_dropt() {
 fn hairpin_storm_recyclet_achter_buurflows() {
     let (mut nat, mut io) = setup();
     io.attach(3);
-    nat.publish(Proto::Tcp, 8090, 3, 8090, SLOT_CAP).unwrap();
+    nat.publish(Proto::Tcp, 8090, 3, 8090).unwrap();
     for i in 0..60 {
         flow_for(&mut nat, &mut io, PROTO_TCP, 1, 1000 + i, EXT_IP, 443, T0).unwrap();
     }
@@ -1100,7 +1096,7 @@ fn hairpin_storm_recyclet_achter_buurflows() {
 fn vol_slot_neemt_altijd_de_oudste_gesloten_flow() {
     let (mut nat, mut io) = setup();
     io.attach(3);
-    nat.publish(Proto::Tcp, 8090, 3, 8090, SLOT_CAP).unwrap();
+    nat.publish(Proto::Tcp, 8090, 3, 8090).unwrap();
     let srv = port_ip4(3);
     let mut hop = 1000;
     let mut buren = |nat: &mut Nat, io: &mut TestIo, n: u16| {

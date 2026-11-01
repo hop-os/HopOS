@@ -58,14 +58,14 @@ extern crate alloc;
 #[cfg(test)]
 use super::dispatch::ctx_state;
 use super::dispatch::{
-    Flavor, HVC_EXIT, HVC_YIELD, VEC_FIQ_LOWER, VEC_SYNC_LOWER, context_id, ctx_read, ctx_write,
-    os_ctx_read, os_ctx_write, rx_due,
+    Flavor, HVC_EXIT, HVC_YIELD, VEC_FIQ_LOWER, VEC_SYNC_LOWER, ctx_read, ctx_write, os_ctx_read,
+    os_ctx_write, rx_due,
 };
 use super::layout::{
-    CAGE_STRIDE, CTX_CTRL_PA, CTX_FP_END, CTX_FP_LIVE, CTX_FPRS, CTX_FPRS_ARM_WORDS, CTX_GPRS,
-    CTX_KICK_PENDING, CTX_OFF, CTX_REGIME, CTX_REGIME_ARM_WORDS, CTX_RESUME, CTX_REVOKE, CTX_SP,
-    CTX_STATE, CTX_UNIT_SLOT, CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, Plan, SCHED_CLINT_PA,
-    SCHED_CURRENT, SCHED_CURSOR, SCHED_MSIP_PA, SLOT_CAP,
+    CTX_CTRL_PA, CTX_FP_BITS, CTX_FP_END, CTX_FP_LIVE, CTX_FPRS, CTX_FPRS_ARM_WORDS, CTX_GPRS,
+    CTX_KICK_PENDING, CTX_REGIME, CTX_REGIME_ARM_WORDS, CTX_RESUME, CTX_REVOKE, CTX_SP, CTX_STATE,
+    CTX_VTTBR, CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, Plan, SCHED_CLINT_PA, SCHED_CURRENT,
+    SCHED_CURSOR, SCHED_MSIP_PA,
 };
 use super::{Error, roster};
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
@@ -425,9 +425,10 @@ pub struct Stats {
     /// Kicks die de interrupt-dispatch van de kern claimde (ook die de kern
     /// uit zijn WFI haalden, niet alleen uit een beurt). Het board telt.
     pub kicks: AtomicU64,
-    /// De laatste beurt: de bewoner in bits 7:0, [`Back::code`] in 15:8.
-    /// Staat de console stil, dan zegt dit woord (via de monitor gelezen)
-    /// wie de core het laatst had en hoe hij hem teruggaf.
+    /// De laatste beurt: de PA van het ctx-blok van de bewoner, met
+    /// [`Back::code`] in bits 7:0 (een ctx-blok ligt op 1 KB). Staat de
+    /// console stil, dan zegt dit woord (via de monitor gelezen) wie de core
+    /// het laatst had en hoe hij hem teruggaf.
     pub last: AtomicU64,
     /// De langste beurt sinds de vorige lezer hem nulde, in ticks.
     pub longest: AtomicU64,
@@ -465,7 +466,6 @@ pub fn count_kick() {
 /// draaien op deze ene core tussen twee rondes van de executor.
 pub struct OsCore {
     sched: Pa,
-    cage: Pa,
     flavor: Flavor,
     hcr: u64,
     bell: Option<Bell>,
@@ -510,7 +510,6 @@ impl OsCore {
         dev::write64(sched.add(SCHED_OS_KICK_PA), bell.map_or(0, |b| b.sgir));
         Ok(OsCore {
             sched,
-            cage: plan.vec_base_pa(),
             flavor,
             hcr: (arch::hcr() & !HCR_TGE) | HCR_GUEST,
             bell,
@@ -532,25 +531,24 @@ impl OsCore {
     /// teruggeeft of tot `deadline` (CNTPCT). Aanroepen met I en F
     /// gemaskeerd, ná de laatste `ready()`-toets van de executor.
     pub fn run(&mut self, deadline: u64) -> Turn {
-        let (sched, cage) = (self.sched, self.cage);
-        round(sched, cage, arch::counter(), |i, id, ctx, fresh| {
-            self.turn(i, id, ctx, deadline, fresh)
+        let sched = self.sched;
+        round(sched, arch::counter(), |i, ctx, fresh| {
+            self.turn(i, ctx, deadline, fresh)
         })
     }
 
-    /// De beurt van bewoner `id` op lijstplek `i`.
-    fn turn(&mut self, i: usize, id: u8, ctx: Pa, deadline: u64, fresh: bool) -> Back {
-        begin(self.sched, i, id, ctx);
+    /// De beurt van de bewoner met ctx-blok `ctx` op lijstplek `i`.
+    fn turn(&mut self, i: usize, ctx: Pa, deadline: u64, fresh: bool) -> Back {
+        begin(self.sched, i, ctx);
         // VTTBR naar de EENHEID van de bewoner (zoals de switcher): tabel en
-        // VMID van zijn slot. Geen TLBI bij een hervatting: de entries zijn
-        // VMID-getagd. Bij een verse bewoner wel, plus de I-cache: de VMID
-        // en de PA's kunnen van een vorige huurder zijn (Altra 15-07).
-        let unit = ctx_read(ctx, CTX_UNIT_SLOT) & 0xff;
-        let vttbr = self.cage.add(unit * CAGE_STRIDE).0 | (unit << 48);
-        arch::set_vttbr(vttbr, fresh);
+        // VMID die de kern bij de bouw in het ctx-blok zette. Geen TLBI bij
+        // een hervatting: de entries zijn VMID-getagd. Bij een verse bewoner
+        // wel, plus de I-cache: de VMID en de PA's kunnen van een vorige
+        // huurder zijn (Altra 15-07).
+        arch::set_vttbr(ctx_read(ctx, CTX_VTTBR), fresh);
         arch::timer_arm(deadline);
         self.listen(true);
-        let fp = fp_turn(id, fresh);
+        let fp = fp_turn(ctx, fresh);
         let t0 = arch::counter();
         let vec = arch::enter(self.flavor, ctx, self.hcr, fp);
         home(self.sched, arch::counter().wrapping_sub(t0));
@@ -560,9 +558,10 @@ impl OsCore {
             // Een FP-instructie met de trap aan: meteen weer aan de beurt op
             // dezelfde instructie, nu met FP (de FP-staat in zijn ctx-blok
             // zet de volgende overgang terug), zie [`FP_USER`].
-            if fp_trapped(id) {
+            if fp_trapped(ctx) {
                 crate::println!(
-                    "oscore: resident {id} uses FP, its FP state goes along from now on HOPOS_OS_FP"
+                    "oscore: resident {:#x} uses FP, its FP state goes along from now on HOPOS_OS_FP",
+                    ctx.0
                 );
             }
             ctx_write(ctx, CTX_WAKE, 0);
@@ -571,7 +570,7 @@ impl OsCore {
         } else {
             self.settle(ctx, vec, fired)
         };
-        end(id, back)
+        end(ctx, back)
     }
 
     /// Zet de staat van een bewoner na zijn beurt, en zegt waardoor de kern
@@ -785,8 +784,8 @@ pub fn release_held(plan: &Plan, core: Core) -> Result<(), Error> {
 /// onder E2H = 1).
 const EC_FP: u64 = 0x07;
 
-/// Lazy FP zoals KVM (`kvm_hyp_handle_fpsimd`), per kooi-context-id
-/// (1..=`SLOT_CAP`), drie bitmaps: [`FP_USER`], [`FP_SEEN`] en [`FP_ONCE`].
+/// Lazy FP zoals KVM (`kvm_hyp_handle_fpsimd`), per bewoner: drie bits in
+/// zijn ctx-blok ([`CTX_FP_BITS`]): [`FP_USER`], [`FP_SEEN`] en [`FP_ONCE`].
 ///
 /// Een bewoner die geen FP-bewoner is, draait met de FP-trap van CPTR_EL2
 /// aan, en dan gaat er bij zijn beurt geen FP-woord heen of terug. Zonder
@@ -798,74 +797,42 @@ const EC_FP: u64 = 0x07;
 /// heen, en terug), en pas een tweede trap maakt hem FP-bewoner voor de
 /// rest van dit kern-leven (een Go-app, een hardfloat-app). Een koude start
 /// wist alle drie.
-struct FpBits([AtomicU64; 3]);
-
-impl FpBits {
-    const fn new() -> Self {
-        Self([const { AtomicU64::new(0) }; 3])
-    }
-
-    fn get(&self, id: u8) -> bool {
-        self.0
-            .get(usize::from(id) / 64)
-            .is_some_and(|w| w.load(Relaxed) & 1 << (id % 64) != 0)
-    }
-
-    fn set(&self, id: u8, on: bool) {
-        if let Some(w) = self.0.get(usize::from(id) / 64) {
-            if on {
-                w.fetch_or(1 << (id % 64), Relaxed);
-            } else {
-                w.fetch_and(!(1 << (id % 64)), Relaxed);
-            }
-        }
-    }
-}
-
+///
 /// Zijn FP-staat gaat elke beurt mee (eager, zoals tot 03-10).
-static FP_USER: FpBits = FpBits::new();
+const FP_USER: u64 = 1;
 /// Hij trapte al een keer op FP.
-static FP_SEEN: FpBits = FpBits::new();
+const FP_SEEN: u64 = 2;
 /// Zijn volgende beurt met FP aan (na zijn eerste trap).
-static FP_ONCE: FpBits = FpBits::new();
+const FP_ONCE: u64 = 4;
 
-/// Gaat de FP-staat van bewoner `id` deze beurt mee? Een koude start
+/// Gaat de FP-staat van de bewoner van `ctx` deze beurt mee? Een koude start
 /// (`fresh`) begint opnieuw.
-fn fp_turn(id: u8, fresh: bool) -> bool {
-    if fresh {
-        for b in [&FP_USER, &FP_SEEN, &FP_ONCE] {
-            b.set(id, false);
-        }
-    }
-    let once = FP_ONCE.get(id);
-    if once {
-        FP_ONCE.set(id, false);
-    }
-    once || FP_USER.get(id)
+fn fp_turn(ctx: Pa, fresh: bool) -> bool {
+    let bits = if fresh { 0 } else { ctx_read(ctx, CTX_FP_BITS) };
+    ctx_write(ctx, CTX_FP_BITS, bits & !FP_ONCE);
+    bits & (FP_ONCE | FP_USER) != 0
 }
 
-/// Bewoner `id` trapte op FP: deze keer één beurt FP, de tweede keer voor
-/// altijd. `true` = vanaf nu FP-bewoner.
-fn fp_trapped(id: u8) -> bool {
-    if FP_SEEN.get(id) {
-        FP_USER.set(id, true);
+/// De bewoner van `ctx` trapte op FP: deze keer één beurt FP, de tweede keer
+/// voor altijd. `true` = vanaf nu FP-bewoner.
+fn fp_trapped(ctx: Pa) -> bool {
+    let bits = ctx_read(ctx, CTX_FP_BITS);
+    if bits & FP_SEEN != 0 {
+        ctx_write(ctx, CTX_FP_BITS, bits | FP_USER);
         return true;
     }
-    FP_SEEN.set(id, true);
-    FP_ONCE.set(id, true);
+    ctx_write(ctx, CTX_FP_BITS, bits | FP_SEEN | FP_ONCE);
     false
 }
 
 /// Wat [`next`] besluit.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Next {
-    /// Bewoner `id` op lijstplek `i`, met zijn ctx-blok; `fresh` = zijn
+    /// De bewoner met ctx-blok `ctx` op lijstplek `i`; `fresh` = zijn
     /// eerste beurt (boot-pending).
     Turn {
         /// De lijstplek: de nieuwe cursor.
         i: usize,
-        /// De kooi-context.
-        id: u8,
         /// Zijn ctx-blok.
         ctx: Pa,
         /// Koud starten.
@@ -900,17 +867,16 @@ pub enum Next {
 /// executor niets klaar heeft, en hij neemt de core terug op zijn deadline,
 /// een interrupt of de kick).
 #[must_use]
-pub fn next(sched: Pa, cage: Pa, now: u64) -> Next {
+pub fn next(sched: Pa, now: u64) -> Next {
     let count = roster::len(sched);
     let cursor = usize::try_from(dev::read64(sched.add(SCHED_CURSOR))).unwrap_or(0);
     let mut earliest: Option<u64> = None;
     for k in 1..=count {
         let i = (cursor + k) % count;
-        let id = roster::get(sched, i);
-        if id == 0 || usize::from(id) > SLOT_CAP {
-            continue;
-        }
-        let ctx = cage.add(u64::from(id) * CAGE_STRIDE + CTX_OFF);
+        let ctx = match roster::get(sched, i) {
+            0 => continue,
+            pa => Pa(pa),
+        };
         let fresh = match CtxState::from_raw(os_ctx_read(ctx, CTX_STATE)) {
             Some(CtxState::BootPending) => true,
             Some(CtxState::Saved) => match due(ctx, now) {
@@ -926,22 +892,17 @@ pub fn next(sched: Pa, cage: Pa, now: u64) -> Next {
             ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
             continue;
         }
-        return Next::Turn { i, id, ctx, fresh };
+        return Next::Turn { i, ctx, fresh };
     }
     Next::Idle { wake: earliest }
 }
 
 /// Eén ronde van de rotatie, op elke architectuur: [`next`] kiest, `turn`
-/// draait de gekozen bewoner (lijstplek, id, ctx-blok, koud) en zegt hoe
-/// de kern terugkwam.
-pub(crate) fn round(
-    sched: Pa,
-    cage: Pa,
-    now: u64,
-    turn: impl FnOnce(usize, u8, Pa, bool) -> Back,
-) -> Turn {
-    match next(sched, cage, now) {
-        Next::Turn { i, id, ctx, fresh } => Turn::Ran(turn(i, id, ctx, fresh)),
+/// draait de gekozen bewoner (lijstplek, ctx-blok, koud) en zegt hoe de
+/// kern terugkwam.
+pub(crate) fn round(sched: Pa, now: u64, turn: impl FnOnce(usize, Pa, bool) -> Back) -> Turn {
+    match next(sched, now) {
+        Next::Turn { i, ctx, fresh } => Turn::Ran(turn(i, ctx, fresh)),
         Next::Idle { wake } => {
             STATS.idle.fetch_add(1, Relaxed);
             Turn::Idle { wake }
@@ -949,12 +910,12 @@ pub(crate) fn round(
     }
 }
 
-/// Het begin van de beurt van bewoner `id` op lijstplek `i`, op elke
-/// architectuur: de cursor, wie er draait, een kick die nu vervalt, en zijn
-/// staat.
-pub(crate) fn begin(sched: Pa, i: usize, id: u8, ctx: Pa) {
+/// Het begin van de beurt van de bewoner met ctx-blok `ctx` op lijstplek
+/// `i`, op elke architectuur: de cursor, wie er draait, een kick die nu
+/// vervalt, en zijn staat.
+pub(crate) fn begin(sched: Pa, i: usize, ctx: Pa) {
     dev::write64(sched.add(SCHED_CURSOR), i as u64);
-    dev::write64(sched.add(SCHED_CURRENT), u64::from(id));
+    dev::write64(sched.add(SCHED_CURRENT), ctx.0);
     os_ctx_write(ctx, CTX_KICK_PENDING, 0);
     os_ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
     STATS.entries.fetch_add(1, Relaxed);
@@ -968,10 +929,10 @@ pub(crate) fn home(sched: Pa, dt: u64) {
     dev::write64(sched.add(SCHED_CURRENT), 0);
 }
 
-/// Het einde van de beurt van `id`, na zijn `settle`: de laatste beurt in
-/// de meetlat.
-pub(crate) fn end(id: u8, back: Back) -> Back {
-    STATS.last.store(u64::from(id) | back.code() << 8, Relaxed);
+/// Het einde van de beurt van de bewoner van `ctx`, na zijn `settle`: de
+/// laatste beurt in de meetlat.
+pub(crate) fn end(ctx: Pa, back: Back) -> Back {
+    STATS.last.store(ctx.0 | back.code(), Relaxed);
     back
 }
 
@@ -1022,14 +983,7 @@ pub fn prepare(ctx: Pa, entry: u64, arg: u64) {
 
 /// Sched-blok 0: de bewonerslijst van de OS-core.
 fn os_sched(plan: &Plan) -> Result<Pa, Error> {
-    roster::sched(plan, Core::new(0).ok_or(Error::BadContextId { id: 0 })?)
-}
-
-/// De kooi-context-id van `ctx`, alleen voor een kooi (geen secundaire).
-fn cage_id(plan: &Plan, ctx: Pa) -> Result<u8, Error> {
-    context_id(plan, ctx)
-        .filter(|id| usize::from(*id) <= SLOT_CAP)
-        .ok_or(Error::BadContext { pa: ctx.0 })
+    roster::sched(plan, Core::new(0).ok_or(Error::BadContext { pa: 0 })?)
 }
 
 /// Maakt de bewoner met ctx-blok `ctx` bewoner van de OS-core: de rotatie
@@ -1037,7 +991,7 @@ fn cage_id(plan: &Plan, ctx: Pa) -> Result<u8, Error> {
 /// lijst, dan boot-pending). Het tegenstuk van [`super::dispatch`] voor een
 /// app-core, zonder mailbox: de kern ís de core.
 pub fn host(plan: &Plan, ctx: Pa) -> Result<(), Error> {
-    roster::enlist(os_sched(plan)?, ctx, cage_id(plan, ctx)?)
+    roster::enlist(os_sched(plan)?, ctx)
 }
 
 /// Zet de bewoner met ctx-blok `ctx` terug in de rotatie van de OS-core
@@ -1045,16 +999,13 @@ pub fn host(plan: &Plan, ctx: Pa) -> Result<(), Error> {
 /// zijn bewaarde staat nog, en de nieuwe kern hervat hem waar de oude hem
 /// liet. Geeft `true` als hij er niet meer in stond.
 pub fn rehost(plan: &Plan, ctx: Pa) -> Result<bool, Error> {
-    roster::add(os_sched(plan)?, cage_id(plan, ctx)?)
+    roster::add(os_sched(plan)?, ctx)
 }
 
 /// Staat de bewoner met ctx-blok `ctx` in de rotatie van de OS-core?
 #[must_use]
 pub fn hosts(plan: &Plan, ctx: Pa) -> bool {
-    match (cage_id(plan, ctx), os_sched(plan)) {
-        (Ok(id), Ok(sched)) => roster::find(sched, id).is_some(),
-        _ => false,
-    }
+    os_sched(plan).is_ok_and(|sched| roster::find(sched, ctx).is_some())
 }
 
 /// Trekt de bewoner van de OS-core met ctx-blok `ctx` in: de aanvraag
@@ -1182,6 +1133,9 @@ mod arch {
     pub(super) fn prepare(flavor: Flavor) {
         const VTCR_NO_PS: u64 = 0x8000_3559;
         const PARANGE_44: u64 = 4;
+        // VTCR_EL2.VS: zestien VMID-bits als het ijzer ze heeft, zoals de
+        // trampoline (`cpu::el2::switch`).
+        const VTCR_VS: u64 = 1 << 19;
         let cptr = cptr(flavor, true);
         // SAFETY: registers van het EL2-regime die alleen een lagere EL
         // raken (VTCR, CNTVOFF, de EL1-toegang in CNTHCTL) of een trap
@@ -1193,6 +1147,12 @@ mod arch {
                 "cmp {t}, {p44}",
                 "csel {t}, {t}, {p44}, lo",
                 "orr {t}, {vtcr}, {t}, lsl #16",
+                "mrs {u}, id_aa64mmfr1_el1",
+                "ubfx {u}, {u}, #4, #4",
+                "cmp {u}, #2",
+                "b.ne 2f",
+                "orr {t}, {t}, {vs}",
+                "2:",
                 "msr vtcr_el2, {t}",
                 "msr cptr_el2, {cptr}",
                 "mrs {t}, cnthctl_el2",
@@ -1202,6 +1162,8 @@ mod arch {
                 "msr cntvoff_el2, xzr",
                 "isb",
                 t = out(reg) _,
+                u = out(reg) _,
+                vs = in(reg) VTCR_VS,
                 p44 = in(reg) PARANGE_44,
                 vtcr = in(reg) VTCR_NO_PS,
                 cptr = in(reg) cptr,

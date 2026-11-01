@@ -583,7 +583,7 @@ fn budget_env_and_address_parsing() {
     let c = slot_config(3, 2 << 20);
     assert_eq!(
         (c.ip, c.mac, c.gw, c.prefix),
-        (slot_ip(3), mac_of(3).0, HOST, 24)
+        (slot_ip(3), mac_of(3).0, HOST, 16)
     );
     assert_eq!(c.mtu, NET_MTU);
     assert_eq!(sys::ADDRESS, (HOST, abi::systemapi::PORT));

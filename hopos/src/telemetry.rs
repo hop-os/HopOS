@@ -28,7 +28,7 @@ use board::dvfs::{self, Knob as _, SAMPLE_NS};
 use board::{Board, ClockKnob, Thermal};
 use core::sync::atomic::{AtomicI32, Ordering::Relaxed};
 use core::time::Duration;
-use counters::{SOURCES, SlotHost};
+use counters::SlotHost;
 use cpu::println;
 use executor::Executor;
 
@@ -125,7 +125,7 @@ fn governor(exec: &'static Executor) {
     }
     let task = async move {
         let mut host = SlotHost::new(exec);
-        dvfs::run_after_boot::<SOURCES>(knob, hold, &mut host, level).await;
+        dvfs::run_after_boot(knob, hold, &mut host, level).await;
     };
     if let Err(e) = exec.spawn(task) {
         println!("dvfs: task not spawned ({e:?}), the clock stays at full");
@@ -141,14 +141,12 @@ async fn thermal(exec: &'static Executor) {
         crate::seed::refresh();
         let t = BOARD.temp_milli_c();
         TEMP.store(t, Relaxed);
-        for i in 0..=kern::SLOT_CAP {
-            if let Some(page) = crate::clock::ctrl_page(i) {
-                let at = page.add(abi::hopabi::CTRL_TEMP);
-                dev::write64(at, i64::from(t) as u64);
-                // Een bewoner leest zijn page ook met de MMU uit: naar DRAM.
-                dev::push(at, 8);
-            }
-        }
+        crate::clock::each_page(|_, page| {
+            let at = page.add(abi::hopabi::CTRL_TEMP);
+            dev::write64(at, i64::from(t) as u64);
+            // Een bewoner leest zijn page ook met de MMU uit: naar DRAM.
+            dev::push(at, 8);
+        });
         exec.after(Duration::from_secs(1)).await;
     }
 }
@@ -164,26 +162,16 @@ mod counters {
     use cpu::println;
     use executor::Executor;
 
-    /// De bronnen van het beleid: de kern en elk slot dat er kan zijn, zoals
-    /// de meetlat (load.rs). Tot 03-10 waren het er zestien, en het plan
-    /// geeft er 32 (`SLOTS_DEFAULT`): een rekenaar in slot 17 of hoger zag
-    /// het beleid niet.
-    pub(super) const SOURCES: usize = kern::SLOT_CAP + 1;
-
     /// De tellers voor het beleid: de idle-teller en de status van elk slot
     /// op zijn control-page, en of zijn bewoner nu rekent (het ctx-blok).
     pub(super) struct SlotHost {
         exec: &'static Executor,
-        plan: Option<abi::layout::Plan>,
     }
 
     impl SlotHost {
-        /// De tellers van `exec`, met het slot-plan van de OS-core.
+        /// De tellers van `exec`.
         pub(super) fn new(exec: &'static Executor) -> Self {
-            Self {
-                exec,
-                plan: crate::slots::os_plan().ok(),
-            }
+            Self { exec }
         }
 
         /// Wil de bewoner van slot `i` de core? Hij rekent (`Running`), of hij
@@ -194,12 +182,9 @@ mod counters {
         /// Alleen `Running` was te weinig: een bewoner van de OS-core is
         /// `Saved` zodra de kern (en dus deze taak) draait, ook als de CNTHP
         /// hem midden in zijn rekenwerk onderbrak.
-        fn running(&self, i: usize) -> bool {
+        fn running(&self, i: kern::Slot) -> bool {
             use abi::layout::CtxState;
-            let Some(plan) = &self.plan else {
-                return true;
-            };
-            let Some(ctx) = abi::layout::Slot::new(i).and_then(|s| plan.ctx_pa(s).ok()) else {
+            let Some(ctx) = crate::kooi::ctx_of(i) else {
                 return true;
             };
             match cpu::el2::ctx_state(ctx) {
@@ -227,7 +212,7 @@ mod counters {
         dev::read64(page.add(off))
     }
 
-    impl Host<SOURCES> for SlotHost {
+    impl Host for SlotHost {
         fn now(&self) -> u64 {
             self.exec.now()
         }
@@ -244,32 +229,39 @@ mod counters {
         /// gedeelde OS-core is de beurt van een bewoner slaap van de kern;
         /// die bewoner (Hop, of een groep `system`) telt als zijn eigen slot,
         /// met zijn eigen teller.
-        fn sample(&mut self, out: &mut [Sample; SOURCES]) {
+        /// Bron `i` op plek `i`: de kern, dan elk slot tot de hoogste
+        /// gebouwde kooi (een gat is geen bron). Geen vast aantal: zoveel
+        /// bronnen als er kooien zijn; een plek die de heap niet geeft, telt
+        /// dit sample niet mee.
+        fn sample(&mut self, out: &mut alloc::vec::Vec<Sample>) {
             use abi::hopabi::{AppStatus, CTRL_CORES, CTRL_IDLE, CTRL_STATUS};
-            for (i, s) in out.iter_mut().enumerate() {
-                *s = Sample::default();
-                if i == 0 {
-                    *s = Sample {
-                        live: true,
-                        idle: self.kern_idle(),
-                        cores: 1,
-                        running: true,
-                    };
-                    continue;
-                }
-                let Some(page) = crate::clock::ctrl_page(i) else {
-                    continue;
-                };
-                if AppStatus::from_raw(word(page, CTRL_STATUS)) != Some(AppStatus::Ready) {
-                    continue;
-                }
-                *s = Sample {
-                    live: true,
-                    idle: word(page, CTRL_IDLE),
-                    cores: word(page, CTRL_CORES),
-                    running: self.running(i),
-                };
+            let kern = Sample {
+                live: true,
+                idle: self.kern_idle(),
+                cores: 1,
+                running: true,
+            };
+            if out.try_reserve(1).is_err() {
+                return;
             }
+            out.push(kern);
+            crate::clock::each_page(|slot, page| {
+                let s = if AppStatus::from_raw(word(page, CTRL_STATUS)) == Some(AppStatus::Ready) {
+                    Sample {
+                        live: true,
+                        idle: word(page, CTRL_IDLE),
+                        cores: word(page, CTRL_CORES),
+                        running: self.running(slot),
+                    }
+                } else {
+                    Sample::default()
+                };
+                let i = slot.get();
+                if out.try_reserve((i + 1).saturating_sub(out.len())).is_ok() {
+                    out.resize(i, Sample::default());
+                    out.push(s);
+                }
+            });
         }
 
         fn temp_milli_c(&mut self) -> i32 {

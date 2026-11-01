@@ -7,13 +7,15 @@
 //! valideert bestaat niet. Apps zien hier niets van; hun IPA-beeld is op
 //! elk board gelijk en de stage-2 vertaalt.
 //!
-//! Wat hier NIET staat: de fysieke adressen van de staart van een slot.
-//! Partities leven per job, dus die PA bestaat alleen tijdens een
-//! lifecycle; de kern rekent hem uit met [`super::Tail`].
+//! Wat hier NIET staat: wat per slot is. De staart van een slot ligt in zijn
+//! partitie (de kern rekent hem uit met [`super::Tail`]), en zijn kooi-blok
+//! (stage-2-tabellen en ctx-blok) komt bij de plaatsing uit de pool. Het plan
+//! is per core, en cores zijn vast: er is geen maximum aantal slots.
 
 use super::{
-    BOOT_SCRATCH_LEN, CAGE_STRIDE, CTRL_STRIDE, CTX_OFF, Core, HOP_RAM_START, PARK_CODE_OFF,
-    PARK_MBOX_LEN, PARK_MBOX_OFF, SLOT_CAP, SMP_CTX_OFF, SWITCH_CODE_OFF, Slot, USB_DMA_SIZE,
+    BOOT_SCRATCH_LEN, CORE_CTX_OFF, CORES_MAX, CTRL_STRIDE, CTX_LEN, Core, HOP_RAM_START,
+    PARK_CODE_OFF, PARK_MBOX_LEN, PARK_MBOX_OFF, SWITCH_CODE_OFF, USB_DMA_SIZE, cage_len,
+    node_ctrl_len,
 };
 use crate::{Error, Region, Result};
 use bounded::BoundedVec;
@@ -158,13 +160,13 @@ pub fn carve_pool(banks: &[Region], holes: &[Region], min: u64) -> Result<Pool> 
 #[derive(Clone, Debug, Default)]
 pub struct PlanSpec {
     /// De control-pages van de éígen cores van de kern (node-SMP): die
-    /// hebben geen partitie en dus geen staart. `max_slots + 1` pagina's,
-    /// 4 KB-gealigneerd. Verplicht.
+    /// hebben geen partitie en dus geen staart. Eén pagina per core
+    /// ([`node_ctrl_len`]), 4 KB-gealigneerd. Verplicht.
     pub node_ctrl_pa: u64,
-    /// De kooi-regio: `max_slots + 1` blokken van [`CAGE_STRIDE`]. Op ARM de
-    /// EL2-vectoren en de stage-2-tabellen, op RISC-V de ctx-blokken en de
-    /// park-mailboxen. 2 KB-gealigneerd (de eis van VBAR_EL2). Verplicht:
-    /// zonder las de Go-kern vanaf adres nul (gemeten 30-07).
+    /// De kooi-regio ([`cage_len`]): blok 0 (de EL2-vectoren, de parkeerlus,
+    /// de sched-blokken, de switch-code) en de ctx-blokken van de cores.
+    /// 2 KB-gealigneerd (de eis van VBAR_EL2). Verplicht: zonder las de
+    /// Go-kern vanaf adres nul (gemeten 30-07).
     pub cage_pa: u64,
     /// Het venster dat de identity map van de kern als Device mapt (maat 0 =
     /// geen eis). De hele kooi-regio moet erin vallen: de app-cores lezen
@@ -199,12 +201,8 @@ pub struct PlanSpec {
     /// [`Plan::required_ram`] (0 = [`HOP_RAM_START`]). Zonder rekende de
     /// LicheeRV "layout requires 1216 MB" op een 256 MB-board (30-07).
     pub ram_base: u64,
-    /// De kooi-capaciteit: het hoogste slotnummer op deze node, geklemd op
-    /// `1..=SLOT_CAP` (0 = [`SLOT_CAP`]). Meerdere kooien mogen één core
-    /// delen, dus dit mag boven `app_cores` liggen.
-    pub max_slots: usize,
-    /// Het aantal fysieke app-cores, geklemd op `1..=SLOT_CAP` (0 = 3,
-    /// de Pi- en QEMU-standaard van Go).
+    /// Het aantal fysieke app-cores, geklemd op `1..CORES_MAX` (0 = 3, de
+    /// Pi- en QEMU-standaard van Go).
     pub app_cores: usize,
     /// De fysieke index van de OS-core: de core waar de kern woont en die
     /// hij met Hop deelt (PORT.md beslissing 2, 30-09). In het plan is dat
@@ -221,7 +219,7 @@ pub struct PlanSpec {
 /// Alle verplichte velden zijn gezet en gealigneerd; geen gereserveerde
 /// regio loopt om; elke pool- en kernregio is niet-leeg, 2 MB-gealigneerd
 /// en overlapt geen andere pool-, kern- of gereserveerde regio;
-/// `1 <= max_slots <= SLOT_CAP` en `1 <= app_cores <= SLOT_CAP`.
+/// `1 <= app_cores < CORES_MAX`.
 #[derive(Clone, Debug)]
 pub struct Plan {
     spec: PlanSpec,
@@ -247,9 +245,9 @@ fn aligned(what: &'static str, v: u64, align: u64) -> Result {
     Ok(())
 }
 
-/// Klemt een aantal op `1..=SLOT_CAP`, met `dflt` voor 0.
-fn clamp_count(n: usize, dflt: usize) -> usize {
-    if n == 0 { dflt } else { n.min(SLOT_CAP) }
+/// Klemt het aantal app-cores op `1..CORES_MAX`, met 3 voor 0.
+fn clamp_cores(n: usize) -> usize {
+    if n == 0 { 3 } else { n.min(CORES_MAX - 1) }
 }
 
 impl Plan {
@@ -266,8 +264,7 @@ impl Plan {
         }
         required("cage_pa", spec.cage_pa, 0x800)?;
         aligned("trap_vec_pa", spec.trap_vec_pa, 0x800)?;
-        spec.max_slots = clamp_count(spec.max_slots, SLOT_CAP);
-        spec.app_cores = clamp_count(spec.app_cores, 3);
+        spec.app_cores = clamp_cores(spec.app_cores);
         // De OS-core is een van de `app_cores + 1` fysieke cores.
         if spec.os_core > spec.app_cores {
             return Err(Error::OutOfPlan {
@@ -276,8 +273,7 @@ impl Plan {
             });
         }
 
-        let blocks = spec.max_slots as u64 + 1;
-        let cage = Region::new(spec.cage_pa, blocks * CAGE_STRIDE);
+        let cage = Region::new(spec.cage_pa, cage_len(spec.app_cores));
         let w = spec.device_window;
         if w.size != 0
             && (cage.base < w.base
@@ -287,7 +283,7 @@ impl Plan {
         }
         let mut reserved = BoundedVec::<Region, 8>::new();
         let fixed = [
-            Region::new(spec.node_ctrl_pa, blocks * CTRL_STRIDE),
+            Region::new(spec.node_ctrl_pa, node_ctrl_len(spec.app_cores)),
             cage,
             Region::new(spec.boot_scratch_pa, BOOT_SCRATCH_LEN),
         ];
@@ -338,12 +334,6 @@ impl Plan {
         Ok(Plan { spec })
     }
 
-    /// De kooi-capaciteit.
-    #[must_use]
-    pub fn max_slots(&self) -> usize {
-        self.spec.max_slots
-    }
-
     /// Het aantal fysieke app-cores.
     #[must_use]
     pub fn app_cores(&self) -> usize {
@@ -385,12 +375,12 @@ impl Plan {
         Core::new(i)
     }
 
-    /// Toetst een index tegen `max_slots`.
+    /// Toetst een core tegen de cores van dit plan.
     fn within(&self, i: usize) -> Result {
-        if i > self.spec.max_slots {
+        if i > self.spec.app_cores {
             return Err(Error::OutOfPlan {
                 index: i,
-                max: self.spec.max_slots,
+                max: self.spec.app_cores,
             });
         }
         Ok(())
@@ -441,30 +431,19 @@ impl Plan {
         Pa(self.spec.cage_pa)
     }
 
-    /// Het stage-2-tabelblok van een slot.
-    pub fn cage_table_pa(&self, slot: Slot) -> Result<Pa> {
-        self.within(slot.get())?;
-        Ok(Pa(self.spec.cage_pa + slot.get() as u64 * CAGE_STRIDE))
-    }
-
-    /// Het ctx-blok van een slot.
-    pub fn ctx_pa(&self, slot: Slot) -> Result<Pa> {
-        Ok(self.cage_table_pa(slot)?.add(CTX_OFF))
-    }
-
     /// Het ctx-blok van een secundaire core van een SMP-app (core 2 tot en
-    /// met `max_slots`); zie [`Core::smp_context_id`].
+    /// met `app_cores`): de ctx-blokken van de cores achter blok 0.
     pub fn smp_ctx_pa(&self, core: Core) -> Result<Pa> {
         self.within(core.get())?;
         if core.get() < 2 {
             return Err(Error::OutOfPlan {
                 index: core.get(),
-                max: self.spec.max_slots,
+                max: self.spec.app_cores,
             });
         }
         Ok(Pa(self.spec.cage_pa
-            + core.get() as u64 * CAGE_STRIDE
-            + SMP_CTX_OFF))
+            + CORE_CTX_OFF
+            + core.get() as u64 * CTX_LEN))
     }
 
     /// De EL2-parkeerlus.
@@ -513,10 +492,9 @@ impl Plan {
     /// kooi-regio en pool.
     #[must_use]
     pub fn top_addr(&self) -> u64 {
-        let blocks = self.spec.max_slots as u64 + 1;
         // Geen omloop: Plan::new toetste deze regio's.
-        let mut top = self.spec.node_ctrl_pa + blocks * CTRL_STRIDE;
-        top = top.max(self.spec.cage_pa + blocks * CAGE_STRIDE);
+        let mut top = self.spec.node_ctrl_pa + node_ctrl_len(self.spec.app_cores);
+        top = top.max(self.spec.cage_pa + cage_len(self.spec.app_cores));
         for r in self.spec.pool.iter() {
             top = top.max(r.base + r.size);
         }

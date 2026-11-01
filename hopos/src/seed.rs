@@ -107,9 +107,7 @@ pub(crate) fn plant(page: dev::Pa) -> bool {
 /// Vers zaad op de page van elke gebouwde kooi; de telemetrie-tik roept dit
 /// elke seconde.
 pub(crate) fn refresh() {
-    for i in 0..=kern::SLOT_CAP {
-        if let Some(page) = crate::clock::ctrl_page(i) {
-            plant(page);
-        }
-    }
+    crate::clock::each_page(|_, page| {
+        plant(page);
+    });
 }

@@ -19,11 +19,13 @@ use abi::Region;
 use abi::layout::{POOL_MAX, Plan, PlanSpec, Pool, pool_of};
 use board::stage;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use dev::Pa;
 
 /// De control-pages van de eigen cores van de kern: het begin van het
 /// kooi-venster.
 pub const NODE_CTRL_PA: u64 = ADMIN.base.0;
-/// De kooi-regio: 1 MB verder, tot (SLOT_CAP + 1) blokken van 64 KB.
+/// De kooi-regio: 1 MB verder, blok 0 en de ctx-blokken van de cores
+/// (`abi::layout::cage_len`). Wat per slot is, komt uit de pool.
 pub const CAGE_PA: u64 = ADMIN.base.0 + 0x10_0000;
 /// Het Device-venster van de kooi.
 pub const DEVICE_WINDOW: Region = Region::new(ADMIN.base.0, ADMIN.size);
@@ -39,11 +41,11 @@ pub const STAGE_MAX: u64 = LOADER.base.0 + LOADER.size - STAGE_PA;
 const _: () = {
     assert!(BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN <= STAGE_HDR_PA);
     assert!(STAGE_HDR_PA + 8 <= STAGE_PA);
-    // Node-control (SLOT_CAP + 1 pagina's) vóór de kooi, de kooi binnen het
-    // venster, ook bij het volle plafond.
-    let blocks = abi::layout::SLOT_CAP as u64 + 1;
-    assert!(NODE_CTRL_PA + blocks * abi::layout::CTRL_STRIDE <= CAGE_PA);
-    assert!(CAGE_PA + blocks * abi::layout::CAGE_STRIDE <= ADMIN.base.0 + ADMIN.size);
+    // Node-control (een pagina per core) vóór de kooi, de kooi binnen het
+    // venster, ook bij het grootste aantal cores dat het plan draagt.
+    let cores = abi::layout::CORES_MAX - 1;
+    assert!(NODE_CTRL_PA + abi::layout::node_ctrl_len(cores) <= CAGE_PA);
+    assert!(CAGE_PA + abi::layout::cage_len(cores) <= ADMIN.base.0 + ADMIN.size);
 };
 
 /// De memory map zoals hij bij de exit was.
@@ -98,7 +100,6 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         net_dma_pa: crate::NET_DMA.base.0,
         pool: pool()?,
         ram_base: ram_base(),
-        max_slots: (app_cores + 1).max(abi::layout::SLOTS_DEFAULT),
         app_cores,
         os_core,
         ..PlanSpec::default()
@@ -134,6 +135,31 @@ pub(crate) fn map_device(pa: u64, size: u64) -> bool {
     }
     let lo = pa & !((1 << 30) - 1);
     let hi = pa.saturating_add(size).next_multiple_of(1 << 30);
+    remap(lo, hi.saturating_sub(lo), cpu::boot::ATTR_DEVICE)
+}
+
+/// Zet een chunk van het kooi-geheugen (2 MB uit de pool) op Device, of
+/// terug op Normal (`board::Board::map_cage`), in de levende map met de
+/// tabellen uit `crate::TABLES`. Niet via `cpu::memattr`: die neemt een
+/// tabel voor een gesplitst blok uit de heap van de kern, en die heap
+/// overschrijft de volgende kern bij een flip terwijl de map blijft (QEMU
+/// UEFI 01-11: de 1 GB met de kern zelf werd gesplitst, en kern B hing na
+/// de landing).
+pub(crate) fn map_cage(pa: u64, size: u64, device: bool) -> bool {
+    if device {
+        // Eerst de regels van de vorige huurder (een partitie) weg.
+        dev::pull(Pa(pa), usize::try_from(size).unwrap_or(0));
+    }
+    let attr = if device {
+        cpu::boot::ATTR_DEVICE
+    } else {
+        cpu::boot::ATTR_NORMAL
+    };
+    remap(pa, size, attr)
+}
+
+/// Mapt `[lo, lo + size)` met MAIR-index `attr` in de levende map.
+fn remap(lo: u64, size: u64, attr: u64) -> bool {
     let used = facts::MMU_TABLES.load(Relaxed);
     // SAFETY: de tabelpool is `crate::TABLES` en de eerste `used` tabellen
     // zijn de levende map (de stub bouwde hem daar); alleen de kern-core
@@ -143,13 +169,7 @@ pub(crate) fn map_device(pa: u64, size: u64) -> bool {
     else {
         return false;
     };
-    let ok = m
-        .map(
-            lo,
-            hi.saturating_sub(lo),
-            crate::mmu::attrs(cpu::boot::ATTR_DEVICE),
-        )
-        .is_ok();
+    let ok = m.map(lo, size, crate::mmu::attrs(attr)).is_ok();
     facts::MMU_TABLES.store(m.tables(), Relaxed);
     crate::arch::tlbi_all();
     ok

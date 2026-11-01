@@ -8,7 +8,7 @@ use crate::soc::{self, GMAC1_M1_PINS, hiword, iomux_reg};
 fn the_slot_plan_validates_and_keeps_clear_of_the_kern() {
     // Zonder DTB: de luide terugval, en die moet valideren.
     let p = slots::plan(4, 0).unwrap();
-    assert_eq!((p.app_cores(), p.max_slots()), (3, crate::slots::SLOTS));
+    assert_eq!(p.app_cores(), crate::slots::CORES - 1);
     for r in p.pool() {
         assert!(r.base >= POOL_BASE, "pool {r:?} under the pool base");
         assert!(!r.overlaps(abi::Region::new(STRUCT_WINDOW.base.0, STRUCT_WINDOW.size)));

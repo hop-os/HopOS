@@ -26,9 +26,10 @@
 use crate::kooi::{Built, Isa, Kooi, KooiCores, app_ram, code, err, tail_of};
 use abi::hopabi::{CTRL_IDLE_MODE, CTRL_TIMEBASE_HZ, IDLE_KICK, IDLE_YIELD};
 use abi::layout::{
-    self, ABI_CTRL_OFF, ABI_MAP_PAGES, ABI_TAIL, CTX_BOOT_ARG, CTX_BOOT_PC, CTX_LEN, CTX_REGIME,
+    self, ABI_CTRL_OFF, ABI_MAP_PAGES, ABI_TAIL, CTX_ASID, CTX_BOOT_ARG, CTX_BOOT_PC, CTX_REGIME,
     CTX_STATE, CtxState, LINK_BASE, PARK_MBOX_LEN, Plan, SCHED_CLINT_PA, SCHED_CURRENT,
-    SCHED_MSIP_PA, SCHED_OS_BELL, SCHED_S2_PA, SCHED_SLEEP_CAP, SCHED_TICK_TICKS, Tail,
+    SCHED_LIST_PA, SCHED_MSIP_PA, SCHED_OS_BELL, SCHED_S2_PA, SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
+    Tail,
 };
 use board::Board;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -37,8 +38,8 @@ use cpu::println;
 use cpu::riscv::switch::{self, AppHart, REGIME_PMPADDR0, REGIME_PMPCFG0, REGIME_SATP};
 use cpu::riscv::{boot, pmp, sv39};
 use dev::Pa;
+use kern::Region;
 use kern::cage::{CageError, CoreClass};
-use kern::{Region, SLOT_CAP};
 
 /// De kooi van deze node, en zijn cores.
 pub(crate) type SlotCage = Kooi<Rv>;
@@ -117,6 +118,11 @@ pub(crate) struct Installed {
 /// De riscv64-kant van de kooi: de switch-code in het kern-image.
 pub(crate) struct Rv {
     installed: Installed,
+    /// De ASID-bits van het hart van de kern (`oscore::asid_bits`), als de
+    /// rotatie daar ASID's gebruikt (`hopos.oscore.asid`); 0 = een flush per
+    /// wissel. Alleen een bewoner van de OS-core krijgt er een: een app-hart
+    /// flusht bij elke wissel.
+    asid_bits: u32,
 }
 
 impl Rv {
@@ -131,24 +137,15 @@ impl Rv {
 /// leeg, en het hart de switcher in (`parkenter`). Eén keer bij boot, vóór
 /// de eerste dispatch.
 ///
-/// De ctx-blokken vers nullen is de les van 17-08 (Go, boot 3): een reboot
-/// liet `CtxRunning` van een vorige boot staan, en elke plaatsing weigerde
-/// met "still live".
+/// Het ctx-blok van een kooi begint de bouw schoon, uit het kooi-geheugen
+/// (de les van 17-08, Go boot 3: een reboot liet `CtxRunning` van een vorige
+/// boot staan, en elke plaatsing weigerde met "still live").
 pub(crate) fn new(plan: Plan) -> Result<SlotCage, Error> {
     let base = plan.vec_base_pa();
-    for i in 1..=plan.max_slots() {
-        let s = layout::Slot::new(i).ok_or(Error::Plan(abi::Error::TooMany {
-            what: "slots",
-            cap: SLOT_CAP,
-        }))?;
-        let ctx = plan.ctx_pa(s).map_err(Error::Plan)?;
-        dev::clear(ctx, CTX_LEN as usize);
-        dev::push(ctx, CTX_LEN as usize);
-    }
     for c in 1..=plan.app_cores() {
         let core = layout::Core::new(c).ok_or(Error::Plan(abi::Error::TooMany {
             what: "app cores",
-            cap: SLOT_CAP,
+            cap: layout::CORES_MAX - 1,
         }))?;
         let hart = plan.phys_core(core);
         let sched = plan.park_mbox_pa(core).map_err(Error::Plan)?;
@@ -184,7 +181,18 @@ pub(crate) fn new(plan: Plan) -> Result<SlotCage, Error> {
         tramp: Pa(switch::park_pc()),
         hash: code_hash(begin, end),
     };
-    Ok(Kooi::new(plan, Rv { installed }))
+    let asid_bits = if crate::OS_ASID.load(Relaxed) {
+        cpu::riscv::oscore::asid_bits()
+    } else {
+        0
+    };
+    Ok(Kooi::new(
+        plan,
+        Rv {
+            installed,
+            asid_bits,
+        },
+    ))
 }
 
 /// Een flip bestaat op riscv64 niet (de switch-code draait uit het
@@ -236,6 +244,9 @@ impl Isa for Rv {
         }
         for (at, v) in [
             (regime.add(REGIME_SATP), satp),
+            // De ASID op het hart van de kern (`oscore::OsCore::turn`); 0
+            // elders.
+            (ctx.add(CTX_ASID), u64::from(b.vmid)),
             (ctx.add(CTX_BOOT_PC), b.entry),
             // a0 van de koude boot: de control-page zoals de app hem ziet.
             (ctx.add(CTX_BOOT_ARG), LINK_BASE + ram + ABI_CTRL_OFF),
@@ -269,7 +280,7 @@ impl Isa for Rv {
     fn start(&self, plan: &Plan, b: &Built) -> Result<(), CageError> {
         let (slot, hart) = (b.s, plan.phys_core(b.core));
         let sched = plan.park_mbox_pa(b.core).map_err(|_| err(code::PLAN))?;
-        if roster::enlist(sched, b.ctx, slot.get() as u8).is_err() {
+        if roster::enlist(sched, b.ctx).is_err() {
             println!("cage: slot {slot}: resident list of hart {hart} is full HOPOS_CAGE_DISPATCH");
             return Err(err(code::ROSTER));
         }
@@ -315,6 +326,12 @@ impl Isa for Rv {
         // De C906B en C906L zijn hetzelfde ontwerp; QEMU virt homogeen.
         None
     }
+
+    /// De ASID, alleen op het hart van de kern: daar wisselt de rotatie
+    /// zonder flush. Een app-hart flusht bij elke wissel.
+    fn id_bits(&self, c: layout::Core) -> u32 {
+        if c.get() == 0 { self.asid_bits } else { 0 }
+    }
 }
 
 impl Rv {
@@ -334,8 +351,12 @@ impl Rv {
         let t = crate::BOARD.app_hart(hart);
         el2::ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
         // Alle andere bewoners van dit hart gingen met de reset mee; op
-        // riscv64 is er één per hart, dus de lijst mag leeg.
+        // riscv64 is er één per hart, dus de lijst mag leeg. De lijst zelf
+        // (in het kooi-geheugen) blijft van dit hart.
+        let list = dev::read64(sched.add(SCHED_LIST_PA));
         arm_sched(sched, plan.vec_base_pa().0, &t, true);
+        dev::write64(sched.add(SCHED_LIST_PA), list);
+        dev::push(sched.add(SCHED_LIST_PA), 8);
         match boot::start_hart(hart, switch::park_pc(), sched.0, t.msip) {
             Ok(()) => {
                 crate::BOARD.start_app_hart(hart);
@@ -417,7 +438,7 @@ fn arm_sched(sched: Pa, cage: u64, t: &AppHart, fresh: bool) {
     if fresh {
         dev::clear(sched, PARK_MBOX_LEN as usize);
     }
-    roster::reset(sched, None);
+    let _ = roster::reset(sched, None);
     for (off, v) in [
         (SCHED_S2_PA, cage),
         (SCHED_CLINT_PA, t.mtimecmp.0),

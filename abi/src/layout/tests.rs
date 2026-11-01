@@ -262,13 +262,18 @@ fn stage_addr_rejects_window_overflow() {
     assert!(stage_addr(0x1000, 0x100, 0x100).is_none());
 }
 
+// Het plan legt per core vast, niet per slot: de kooi-regio is blok 0 en
+// de ctx-blokken van de cores, en de control-pages een pagina per core.
+// Hoeveel slots er komen, zegt de pool.
 #[test]
-fn rk3566_reserved_capacity() {
+fn the_plan_reserves_per_core_not_per_slot() {
+    assert_eq!(cage_len(3), 2 * CAGE_STRIDE);
+    assert_eq!(cage_len(128), CAGE_STRIDE + 3 * CAGE_STRIDE);
+    assert_eq!(node_ctrl_len(3), 4 * CTRL_STRIDE);
+    // De Radxa: van de kooi-regio tot de trap-vector was er plaats voor
+    // twaalf kooien; nu draagt hij blok 0 en vier cores.
     let (ctrl, cage, trap) = (0x0620_0000u64, 0x0622_0000u64, 0x062f_0000u64);
-    let capacity = (trap - cage) / CAGE_STRIDE - 1;
-    assert_eq!(capacity, 12);
-    assert!(ctrl + (capacity + 1) * CTRL_STRIDE <= cage);
-    assert!(cage + (capacity + 1) * CAGE_STRIDE <= trap);
+    assert!(ctrl + node_ctrl_len(3) <= cage && cage + cage_len(3) <= trap);
     let mut pool = Pool::new();
     pool.push(Region::new(0x0780_0000, 0x2000_0000)).unwrap();
     let plan = Plan::new(PlanSpec {
@@ -279,14 +284,14 @@ fn rk3566_reserved_capacity() {
         net_dma_pa: 0x0640_0000,
         usb_dma_pa: 0x06c0_0000,
         pool,
-        max_slots: capacity as usize,
+        app_cores: 3,
         ..PlanSpec::default()
     })
     .unwrap();
-    assert_eq!(plan.max_slots(), 12);
-    // Slot 13 ligt buiten de reservering, en het plan zegt dat.
-    assert!(plan.cage_table_pa(Slot::new(13).unwrap()).is_err());
-    assert!(plan.cage_table_pa(Slot::new(12).unwrap()).is_ok());
+    assert_eq!(plan.top_addr(), 0x0780_0000 + 0x2000_0000);
+    // Cores zijn vast: een core buiten het plan bestaat niet.
+    assert!(plan.park_mbox_pa(Core::new(4).unwrap()).is_err());
+    assert!(Core::new(CORES_MAX).is_none());
 }
 
 // --- sched_offsets_test.go --------------------------------------------------
@@ -304,7 +309,7 @@ fn sched_offsets() {
         ("SCHED_TICK_TICKS", SCHED_TICK_TICKS, 8, true),
         ("SCHED_CURSOR", SCHED_CURSOR, 8, true),
         ("SCHED_COUNT", SCHED_COUNT, 8, true),
-        ("SCHED_LIST", SCHED_LIST, SLOT_CAP as u64, true),
+        ("SCHED_LIST_PA", SCHED_LIST_PA, 8, true),
         ("SCHED_S2_PA", SCHED_S2_PA, 8, true),
         ("SCHED_CLINT_PA", SCHED_CLINT_PA, 8, true),
         ("SCHED_SLEEP_CAP", SCHED_SLEEP_CAP, 8, true),
@@ -344,15 +349,10 @@ fn tail_rekent_uit_twee_waarden() {
 #[test]
 fn slot_en_core_hebben_een_bewezen_bereik() {
     assert!(Slot::new(0).is_none());
-    assert!(Slot::new(SLOT_CAP + 1).is_none());
-    let s = Slot::new(SLOT_CAP).unwrap();
-    assert_eq!(s.get(), 128);
-    assert_eq!(Slot::FIRST.base(), LINK_BASE);
-    assert_eq!(Slot::new(2).unwrap().base(), SLOTS_BASE + SLOT_STRIDE);
-    assert_eq!(Core::new(2).unwrap().smp_context_id(), Some(129));
-    assert_eq!(Core::new(128).unwrap().smp_context_id(), Some(255));
-    assert_eq!(Core::new(1).unwrap().smp_context_id(), None);
-    assert!(Core::new(SLOT_CAP + 1).is_none());
+    assert!(Slot::new(SLOT_MAX + 1).is_none());
+    assert_eq!(Slot::new(SLOT_MAX).unwrap().get(), 65533);
+    assert_eq!(Core::new(CORES_MAX - 1).unwrap().get(), 142);
+    assert!(Core::new(CORES_MAX).is_none());
 }
 
 /// De getallen die de Go-kant hard noemt, en de inverse die de kern
@@ -366,32 +366,28 @@ fn net_plan_is_deterministisch() {
     assert_eq!(port_ip4(0), HOST_IP4);
     assert_eq!(port_ip4(1), 0x0A64_0002);
     assert_eq!(port_mac(0), HOST_MAC);
-    for i in 0..=SLOT_CAP {
+    for i in (0..=SLOT_MAX).step_by(97).chain([255, 256, SLOT_MAX]) {
         assert_eq!(ip4_port(port_ip4(i)), Some(i));
         if let Some(s) = Slot::new(i) {
             assert_eq!((slot_ip4(s), slot_mac(s)), (port_ip4(i), port_mac(i)));
         }
     }
-    assert_eq!(ip4_port(HOST_IP4 - 1), None, ".0");
+    // Boven de 254 loopt het slot de derde byte in: /16, niet /24.
+    assert_eq!(Ip4(port_ip4(255)).to_string(), "10.100.1.0");
+    assert_eq!(Ip4(port_ip4(SLOT_MAX)).to_string(), "10.100.255.254");
+    assert_eq!(port_mac(300), [2, 0, 0, 0, 1, 44]);
+    assert_eq!(ip4_port(HOST_IP4 - 1), None, "het netadres");
+    assert_eq!(ip4_port(0x0A64_FFFF), None, "de broadcast");
     assert_eq!(ip4_port(0x0A65_0002), None, "ander subnet");
 }
 
 #[test]
 fn plan_adressen_en_uitsluiten() {
     let mut plan = Plan::new(test_spec()).unwrap();
-    let s1 = Slot::FIRST;
-    assert_eq!(
-        plan.cage_table_pa(s1).unwrap(),
-        Pa(0xc200_0000 + CAGE_STRIDE)
-    );
-    assert_eq!(
-        plan.ctx_pa(s1).unwrap(),
-        Pa(0xc200_0000 + CAGE_STRIDE + CTX_OFF)
-    );
     let c2 = Core::new(2).unwrap();
     assert_eq!(
         plan.smp_ctx_pa(c2).unwrap(),
-        Pa(0xc200_0000 + 2 * CAGE_STRIDE + SMP_CTX_OFF)
+        Pa(0xc200_0000 + CORE_CTX_OFF + 2 * CTX_LEN)
     );
     assert!(plan.smp_ctx_pa(Core::new(1).unwrap()).is_err());
     assert_eq!(
@@ -401,7 +397,7 @@ fn plan_adressen_en_uitsluiten() {
     assert_eq!(facts_pa(0xb000_0000), 0xb000_0080);
     assert_eq!(plan.flip_stage_pa(), None);
     assert_eq!(plan.ram_base(), HOP_RAM_START);
-    assert_eq!(plan.top_addr(), 0xc200_0000 + 129 * CAGE_STRIDE);
+    assert_eq!(plan.top_addr(), 0xc200_0000 + cage_len(3));
     plan.exclude_from_pool(0x6000_0000, 0x20_0000).unwrap();
     assert_eq!(
         plan.pool(),

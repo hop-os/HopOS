@@ -33,6 +33,9 @@
     )
 )]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::fmt;
 use core::future::Future;
 
@@ -185,11 +188,20 @@ impl History {
     }
 }
 
-/// Het beleid over `N` bronnen (bron 0 is de kern-core).
-pub struct Governor<const N: usize> {
-    hist: [History; N],
-    last: [u64; N],
-    seen: [bool; N],
+/// Wat de governor van één bron onthoudt.
+#[derive(Clone, Copy, Debug, Default)]
+struct Src {
+    hist: History,
+    last: u64,
+    seen: bool,
+}
+
+/// Het beleid over de bronnen van een sample (bron 0 is de kern-core,
+/// bron n is slot n). Er is geen vast aantal: de governor onthoudt zoveel
+/// bronnen als het langste sample ooit had, zoals er geen maximum aantal
+/// slots is.
+pub struct Governor {
+    srcs: Vec<Src>,
     high: bool,
     quiet_since: u64,
     /// De console-pin.
@@ -198,25 +210,18 @@ pub struct Governor<const N: usize> {
     pub busy: Option<Busy>,
 }
 
-impl<const N: usize> Default for Governor<N> {
+impl Default for Governor {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize> Governor<N> {
+impl Governor {
     /// Een governor die nog niets weet.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            hist: [History {
-                d: [0; WINDOW],
-                want: [0; WINDOW],
-                k: 0,
-                full: false,
-            }; N],
-            last: [0; N],
-            seen: [false; N],
+            srcs: Vec::new(),
             high: false,
             quiet_since: 0,
             hold: Hold::Auto,
@@ -252,7 +257,7 @@ impl<const N: usize> Governor<N> {
         &mut self,
         now: u64,
         expect: u64,
-        samples: &[Sample; N],
+        samples: &[Sample],
         knob: &mut impl Knob,
     ) -> Option<Change> {
         let busy = self.measure(now, expect, samples);
@@ -287,14 +292,23 @@ impl<const N: usize> Governor<N> {
 
     /// Leest de bronnen in de vensters; `true` als er één druk is. De
     /// drukste (minste idle) wordt [`Governor::busy`].
-    fn measure(&mut self, now: u64, expect: u64, samples: &[Sample; N]) -> bool {
+    fn measure(&mut self, now: u64, expect: u64, samples: &[Sample]) -> bool {
         let mut worst: Option<Busy> = None;
+        // Een langer sample dan ooit: plaats voor de nieuwe bronnen. Lukt
+        // dat niet, dan tellen zij dit sample niet mee.
+        if let Some(more) = samples.len().checked_sub(self.srcs.len())
+            && more > 0
+            && self.srcs.try_reserve(more).is_ok()
+        {
+            self.srcs.resize(samples.len(), Src::default());
+        }
         for (i, s) in samples.iter().enumerate() {
-            let (Some(h), Some(last), Some(seen)) = (
-                self.hist.get_mut(i),
-                self.last.get_mut(i),
-                self.seen.get_mut(i),
-            ) else {
+            let Some(Src {
+                hist: h,
+                last,
+                seen,
+            }) = self.srcs.get_mut(i)
+            else {
                 continue;
             };
             if !s.live || s.cores == 0 {
@@ -343,7 +357,7 @@ pub const REPORT_NS: u64 = 10_000_000_000;
 
 /// Wat [`run`] van de binary nodig heeft buiten de knop: de klok, de slaap
 /// en de tellers.
-pub trait Host<const N: usize> {
+pub trait Host {
     /// Monotone nanoseconden.
     fn now(&self) -> u64;
     /// Slaapt `ns` nanoseconden (de timer van de executor).
@@ -351,8 +365,9 @@ pub trait Host<const N: usize> {
     /// Het verwachte idle-tempo per core per sample (CNTFRQ maal
     /// [`SAMPLE_NS`]).
     fn expect(&self) -> u64;
-    /// Vult de tellers van dit sample.
-    fn sample(&mut self, out: &mut [Sample; N]);
+    /// Vult de tellers van dit sample: `out` is leeg, en bron `i` komt op
+    /// plek `i` (een gat is een `Sample` die niet `live` is).
+    fn sample(&mut self, out: &mut Vec<Sample>);
     /// De temperatuur voor de meetregel, in milligraden; 0 = geen.
     fn temp_milli_c(&mut self) -> i32;
     /// Eén Engelse logregel.
@@ -364,8 +379,8 @@ pub trait Host<const N: usize> {
 /// flank naar stil na [`COOLDOWN_NS`], en elke [`REPORT_NS`] één
 /// meetregel (`HOPOS_CLOCK`). `hold` is de pin uit de config
 /// (`hopos.clock`). Keert nooit terug.
-pub async fn run<const N: usize>(mut knob: impl Knob, hold: Hold, host: &mut impl Host<N>) {
-    let mut g: Governor<N> = Governor::new();
+pub async fn run(mut knob: impl Knob, hold: Hold, host: &mut impl Host) {
+    let mut g = Governor::new();
     g.hold = hold;
     let c = g.boot(host.now(), &mut knob);
     report_change(host, &c, None);
@@ -378,13 +393,13 @@ pub async fn run<const N: usize>(mut knob: impl Knob, hold: Hold, host: &mut imp
 /// op de volle klok, zoals een koude boot, ook als de vorige kern stil
 /// stond (30-09: twee flips vanuit 800 MHz met een NIC die nooit meer
 /// meldde).
-pub async fn run_after_boot<const N: usize>(
+pub async fn run_after_boot(
     knob: impl Knob,
     hold: Hold,
-    host: &mut impl Host<N>,
+    host: &mut impl Host,
     level: Option<Level>,
 ) {
-    let mut g: Governor<N> = Governor::new();
+    let mut g = Governor::new();
     g.hold = hold;
     g.high = level.is_some();
     g.quiet_since = host.now();
@@ -392,18 +407,19 @@ pub async fn run_after_boot<const N: usize>(
 }
 
 /// De lus van de governor na de boot-flank.
-async fn run_governor<const N: usize>(
-    mut g: Governor<N>,
+async fn run_governor(
+    mut g: Governor,
     mut knob: impl Knob,
-    host: &mut impl Host<N>,
+    host: &mut impl Host,
     level: Option<Level>,
 ) {
-    let mut samples = [Sample::default(); N];
+    let mut samples = Vec::new();
     let mut last_report = host.now();
     let mut level = level;
     loop {
         host.sleep(SAMPLE_NS).await;
         let now = host.now();
+        samples.clear();
         host.sample(&mut samples);
         if let Some(c) = g.step(now, host.expect(), &samples, &mut knob) {
             report_change(host, &c, g.busy);
@@ -434,7 +450,7 @@ async fn run_governor<const N: usize>(
 
 /// De flank, met de drukke bron erbij als hij de reden is
 /// (`(full, busy: slot 3 (0 permille idle))`).
-fn report_change<const N: usize>(host: &impl Host<N>, c: &Change, busy: Option<Busy>) {
+fn report_change(host: &impl Host, c: &Change, busy: Option<Busy>) {
     let by = busy.filter(|_| c.why == "busy");
     match c.level {
         Some(l) => host.log(format_args!(

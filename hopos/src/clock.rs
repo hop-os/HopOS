@@ -24,7 +24,8 @@
 //! netwerkvlak en de USB-taak.
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use kern::{SLOT_CAP, Slot};
+use kern::{Slot, SlotVec};
+use sync::LocalCell;
 
 /// De tijd van de executor van de OS-core.
 pub(crate) use executor::ExecTimer;
@@ -36,8 +37,10 @@ pub(crate) const BOOT_WALL_SECS: u64 = 1_790_640_000;
 /// Unix-nanoseconden bij tellerstand 0; 0 = geen klok.
 static WALL_OFF: AtomicU64 = AtomicU64::new(0);
 
-/// De control-page van elke gebouwde kooi (fysiek adres; 0 = geen).
-static CTRL: [AtomicU64; SLOT_CAP + 1] = [const { AtomicU64::new(0) }; SLOT_CAP + 1];
+/// De control-page van elke gebouwde kooi, op slotnummer. Alleen de
+/// executor van de OS-core raakt hem (de kooi, de system-API, de
+/// telemetrie).
+static CTRL: LocalCell<SlotVec<dev::Pa>> = LocalCell::cell(SlotVec::new());
 
 /// Zet de klok: `unix_ns` is nu, `now_ns` de teller-ns van hetzelfde
 /// moment. De nieuwe offset gaat meteen op de control-page van elke levende
@@ -48,15 +51,12 @@ pub(crate) fn set(unix_ns: u64, now_ns: u64) -> u64 {
     // klok" betekenen, dus minstens 1.
     let off = unix_ns.saturating_sub(now_ns).max(1);
     WALL_OFF.store(off, Relaxed);
-    for c in CTRL.iter() {
-        let pa = c.load(Relaxed);
-        if pa != 0 {
-            let at = dev::Pa(pa).add(abi::hopabi::CTRL_WALL_OFF);
-            dev::write64(at, off);
-            // De app leest zijn page met de MMU uit: naar DRAM ermee.
-            dev::push(at, 8);
-        }
-    }
+    each_page(|_, page| {
+        let at = page.add(abi::hopabi::CTRL_WALL_OFF);
+        dev::write64(at, off);
+        // De app leest zijn page met de MMU uit: naar DRAM ermee.
+        dev::push(at, 8);
+    });
     off
 }
 
@@ -72,20 +72,24 @@ pub(crate) fn restore(off: u64) {
     WALL_OFF.store(off, Relaxed);
 }
 
-/// De kooi van `slot` is gebouwd met zijn control-page op `ctrl`.
-pub(crate) fn attach(slot: Slot, ctrl: dev::Pa) {
-    if let Some(c) = CTRL.get(slot.get()) {
-        c.store(ctrl.0, Relaxed);
-    }
+/// De kooi van `slot` is gebouwd met zijn control-page op `ctrl`; faalt
+/// alleen als de tabel niet kan groeien (dan past het slot niet).
+pub(crate) fn attach(slot: Slot, ctrl: dev::Pa) -> kern::Result {
+    CTRL.borrow_mut().insert(slot, ctrl).map(|_| ())
 }
 
-/// De control-page van slot `i` als hij een gebouwde kooi heeft: de
-/// telemetrie leest er de idle-teller en de heartbeat en zet er de
-/// temperatuur op (telemetry.rs, watchdog.rs).
-pub(crate) fn ctrl_page(i: usize) -> Option<dev::Pa> {
-    match CTRL.get(i).map(|c| c.load(Relaxed)) {
-        Some(0) | None => None,
-        Some(pa) => Some(dev::Pa(pa)),
+/// De control-page van `slot` als hij een gebouwde kooi heeft: de
+/// watchdog leest er de heartbeat van Hop (watchdog.rs).
+pub(crate) fn ctrl_page(slot: Slot) -> Option<dev::Pa> {
+    CTRL.borrow().get(slot).copied()
+}
+
+/// Doet `f` op de control-page van elke gebouwde kooi, oplopend: de
+/// telemetrie leest er de idle-teller en zet er de temperatuur en het zaad
+/// op (telemetry.rs, seed.rs). `f` mag de tabel niet wijzigen.
+pub(crate) fn each_page(mut f: impl FnMut(Slot, dev::Pa)) {
+    for (slot, page) in CTRL.borrow().iter() {
+        f(slot, *page);
     }
 }
 
@@ -93,7 +97,5 @@ pub(crate) fn ctrl_page(i: usize) -> Option<dev::Pa> {
 /// `Cage::detach` bij elke stop): zijn page is niet meer van hem, en niemand
 /// schrijft of leest er nog via deze tabel.
 pub(crate) fn detach(slot: Slot) {
-    if let Some(c) = CTRL.get(slot.get()) {
-        c.store(0, Relaxed);
-    }
+    CTRL.borrow_mut().remove(slot);
 }

@@ -21,7 +21,7 @@
 //! krijgt het blok als [`Pa`].
 
 use super::Error;
-use super::layout::{CAGE_STRIDE, CTX_LEN, CTX_OFF, FB_IPA, SMP_CTX_OFF};
+use super::layout::{CAGE_STRIDE, CTX_OFF, FB_IPA};
 use dev::Pa;
 
 /// L1/L2-entry naar de volgende tabel.
@@ -115,14 +115,12 @@ fn check(ipa_base: u64, pa_base: u64, size: u64) -> Result<u64, Error> {
 /// ([`table_reserve`] niet nul) bezit de aanroeper óók die bytes op
 /// `pa_base+size`: daar komen de L2's, buiten de zichtbare map.
 ///
-/// Het secundaire ctx-blok in het kooiblok kan van een ándere kooi zijn en
-/// blijft staan; al het andere in het blok begint schoon, ook een oude
-/// framebuffer-grant en het primaire ctx-blok.
+/// Het hele blok begint schoon (het komt uit het kooi-geheugen en kan van
+/// een vorige kooi zijn): de tabellen, een oude framebuffer-grant en het
+/// ctx-blok.
 pub fn build(block: Pa, ipa_base: u64, pa_base: u64, size: u64) -> Result<Pa, Error> {
     let extra = check(ipa_base, pa_base, size)?;
-    let smp_end = SMP_CTX_OFF + CTX_LEN;
-    dev::clear(block, SMP_CTX_OFF as usize);
-    dev::clear(block.add(smp_end), (CAGE_STRIDE - smp_end) as usize);
+    dev::clear(block, CAGE_STRIDE as usize);
     let tables = Pa(pa_base + size);
     if extra != 0 {
         dev::clear(tables, extra as usize);
@@ -506,21 +504,18 @@ mod tests {
         assert_partition(b.block, None, SLOT1, POOL + 5 * GB, 5 * GB);
     }
 
+    // Het blok komt uit het kooi-geheugen en kan van een vorige kooi zijn:
+    // de bouw begint het helemaal schoon, de grant en het ctx-blok ook.
     #[test]
-    fn rebuild_keeps_the_secondary_context_and_clears_the_rest() {
+    fn rebuild_clears_the_whole_block() {
         let c = cage();
-        let secondary = c.block.add(SMP_CTX_OFF);
-        for off in (0..CTX_LEN).step_by(8) {
-            dev::write64(secondary.add(off), 0x5350_4d00_0000_0000 | off);
-        }
         build(c.block, SLOT1, POOL, 5 * GB).unwrap();
         dev::write64(c.block.add(CTX_OFF), 4);
+        dev::write64(c.block.add(CAGE_STRIDE - 8), 0x5350_4d00);
         grant_window(c.block, 0x3e10_8000, 8 << 20).unwrap();
         build(c.block, SLOT1, POOL, 8 << 20).unwrap();
-        for off in (0..CTX_LEN).step_by(8) {
-            assert_eq!(dev::read64(secondary.add(off)), 0x5350_4d00_0000_0000 | off);
-        }
         assert_eq!(dev::read64(c.block.add(CTX_OFF)), 0);
+        assert_eq!(dev::read64(c.block.add(CAGE_STRIDE - 8)), 0);
         assert_partition(c.block, None, SLOT1, POOL, 8 << 20);
     }
 

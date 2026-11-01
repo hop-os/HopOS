@@ -26,7 +26,7 @@
 //! snapshot voor de kern-flip is een gewone lees-ronde.
 
 use crate::flows::{FKey, Flow, FlowTable, Id, MAX_FLOWS_PER_SLOT, RKey};
-use crate::plan::{HOST_MAC, SLOT_CAP, port_ip4, port_mac};
+use crate::plan::{HOST_MAC, port_ip4, port_mac};
 use crate::wire::{
     ETH_LEN, PROTO_TCP, PROTO_UDP, TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN, be16, be32, byte,
     fix_csum32, ipv4_l4, mac_at, put_mac, put32, rewrite_l4,
@@ -125,7 +125,7 @@ impl Uplink {
 struct Pub {
     proto: u8,
     node_port: u16,
-    slot: u8,
+    slot: u16,
     slot_port: u16,
 }
 
@@ -176,7 +176,9 @@ pub struct Nat {
     masq_next: u16,
     next_sweep: u64,
     next_full_log: u64,
-    next_slot_full_log: [u64; SLOT_CAP + 1],
+    /// Eén grens voor de regel van een vol slot, voor alle slots samen: een
+    /// dader die de zijne vult, gijzelt zo de console niet.
+    next_slot_full_log: u64,
 }
 
 /// Waar de masquerade begint: een plek in het bereik die per boot verschilt
@@ -201,7 +203,7 @@ impl Nat {
             masq_next: first,
             next_sweep: 0,
             next_full_log: 0,
-            next_slot_full_log: [0; SLOT_CAP + 1],
+            next_slot_full_log: 0,
         })
     }
 
@@ -233,9 +235,8 @@ impl Nat {
         node_port: u16,
         slot: usize,
         slot_port: u16,
-        max_slots: usize,
     ) -> Result<(), Error> {
-        let Some(s) = slot_byte(slot, max_slots) else {
+        let Some(s) = slot_word(slot) else {
             return Err(Error::SlotRange(slot));
         };
         if node_port == 0 || slot_port == 0 {
@@ -271,7 +272,7 @@ impl Nat {
     /// verouderde omgekeerde route.
     pub fn unpublish_slot(&mut self, i: usize) {
         self.pubs.retain(|p| usize::from(p.slot) != i);
-        let target = if (1..=SLOT_CAP).contains(&i) {
+        let target = if slot_word(i).is_some() {
             port_ip4(i)
         } else {
             0
@@ -679,8 +680,8 @@ impl Nat {
         if let Some(id) = self.lookup_flow(&k, now) {
             return Some((id, false));
         }
-        let s = slot_byte(slot, SLOT_CAP)?;
-        if self.flows.is_full() || self.flows.count(slot) >= MAX_FLOWS_PER_SLOT {
+        let s = slot_word(slot)?;
+        if self.flows.is_full() || self.flows.count(s) >= MAX_FLOWS_PER_SLOT {
             self.maybe_sweep(now);
             // Als de veeg niets opleverde: recycle de oudste al gesloten flow
             // van dit slot. Een flow met beide FIN's houdt zijn plek alleen
@@ -689,7 +690,7 @@ impl Nat {
             // p51): 200 korte verbindingen per storm vullen de 512 van een
             // slot sneller dan die minuut ze vrijgeeft, en dan dropte dit pad
             // de SYN; in zes van twaalf rondes, met `nat_flowfull` als bewijs.
-            if (self.flows.is_full() || self.flows.count(slot) >= MAX_FLOWS_PER_SLOT)
+            if (self.flows.is_full() || self.flows.count(s) >= MAX_FLOWS_PER_SLOT)
                 && let Some(old) = self.oldest_closed(s)
             {
                 self.flows.remove(old);
@@ -705,15 +706,13 @@ impl Nat {
             }
             return None;
         }
-        let n = self.flows.count(slot);
+        let n = self.flows.count(s);
         if n >= MAX_FLOWS_PER_SLOT {
-            if let Some(t) = self.next_slot_full_log.get_mut(slot)
-                && now >= *t
-            {
+            if now >= self.next_slot_full_log {
                 io.log(format_args!(
                     "HOPOS_MASQ_SLOT_FULL: slot {slot} has {n} flows (max {MAX_FLOWS_PER_SLOT}), new outbound flow dropped"
                 ));
-                *t = now.saturating_add(FLOW_LOG_EVERY);
+                self.next_slot_full_log = now.saturating_add(FLOW_LOG_EVERY);
             }
             return None;
         }
@@ -758,7 +757,7 @@ impl Nat {
     /// van Hop af en toe geen gesloten flow van het slot terwijl het er
     /// honderden had (hairpin-storm, de derde run binnen een minuut: 180
     /// conn/s, p99 1002 ms, HOPOS_MASQ_SLOT_FULL).
-    fn oldest_closed(&self, slot: u8) -> Option<Id> {
+    fn oldest_closed(&self, slot: u16) -> Option<Id> {
         self.flows
             .ids()
             .filter_map(|id| self.flows.get(id).map(|fl| (id, fl)))
@@ -865,12 +864,10 @@ impl Nat {
     }
 }
 
-/// Het slotnummer als byte, als het in 1..=`max` ligt.
-fn slot_byte(slot: usize, max: usize) -> Option<u8> {
-    if slot < 1 || slot > max.min(SLOT_CAP) {
-        return None;
-    }
-    u8::try_from(slot).ok()
+/// Het slotnummer als woord, als het een slot is (1..=`SLOT_MAX`, de
+/// zestien bits van het slot-LAN).
+fn slot_word(slot: usize) -> Option<u16> {
+    abi::layout::Slot::new(slot).and_then(|s| u16::try_from(s.get()).ok())
 }
 
 fn flow_idle(fl: &Flow) -> u64 {

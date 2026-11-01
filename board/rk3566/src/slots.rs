@@ -93,12 +93,13 @@ pub fn pool(banks: &[Region], holes: &[Region]) -> (Pool, bool) {
 }
 
 /// Het PA-plan voor een node met `cores` cores, met de kern op fysieke core
-/// De kooi-capaciteit: 11, wat de kooi-regio draagt (12 blokken tot de
-/// boot-scratch); de cores tellen niet (kooien delen een core).
-pub const SLOTS: usize = 11;
+/// De cores van de RK3566: vier A55's. Het plan legt per core vast (de
+/// control-pages en de kooi-regio); wat per slot is, komt uit de pool, dus
+/// er is geen kooi-capaciteit meer (tot 01-11: 11, wat de regio droeg).
+pub const CORES: usize = 4;
 const _: () = {
-    assert!(NODE_CTRL_PA + (SLOTS as u64 + 1) * 0x1000 <= CAGE_PA);
-    assert!(CAGE_PA + (SLOTS as u64 + 1) * abi::layout::CAGE_STRIDE <= BOOT_SCRATCH_PA);
+    assert!(NODE_CTRL_PA + abi::layout::node_ctrl_len(CORES - 1) <= CAGE_PA);
+    assert!(CAGE_PA + abi::layout::cage_len(CORES - 1) <= CAGE_END);
 };
 
 /// `os_core` (PORT.md beslissing 2): elke andere core is een app-core met
@@ -115,15 +116,13 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         usb_dma_pa: crate::USB_DMA.base.0,
         ram_base: crate::DRAM_BASE,
         pool: crate::pool_now(),
-        max_slots: (app_cores + 1).max(SLOTS),
         app_cores,
         os_core,
         ..PlanSpec::default()
     })?;
-    // De kooi-regio moet vóór de boot-scratch eindigen: Go's carve droeg
-    // twaalf kooien, en kooi 13 overschreef de trap-vector.
-    let blocks = plan.max_slots() as u64 + 1;
-    let cage_end = CAGE_PA + blocks * abi::layout::CAGE_STRIDE;
+    // De kooi-regio moet vóór de trap-vector eindigen: Go's carve droeg
+    // twaalf kooien, en kooi 13 overschreef hem.
+    let cage_end = CAGE_PA + abi::layout::cage_len(plan.app_cores());
     if cage_end > CAGE_END {
         return Err(abi::Error::Overlap {
             a: Region::new(CAGE_PA, cage_end - CAGE_PA),

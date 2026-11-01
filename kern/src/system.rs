@@ -64,10 +64,10 @@ use crate::kernflip;
 use crate::pool::{GroupName, Placement};
 use crate::rpc::{self, FsCall, FsInbox};
 use crate::slots::{
-    self, Envelope, ImageGrant, Occupancy, Reply, Request, Response, Servicers, SlotSet, StartSpec,
-    try_vec,
+    self, Envelope, ImageGrant, Occupancy, Reply, Request, Response, ServicerCtl, Servicers,
+    StartSpec, try_vec,
 };
-use crate::{Error, Result, SLOT_CAP, Slot};
+use crate::{Error, Result, Slot};
 use abi::hopabi::{
     HDR_LEN, Req, Resp, STATUS_DENIED, STATUS_ERROR, STATUS_NO_ENT, STATUS_OK, decode_req,
 };
@@ -75,8 +75,10 @@ use abi::layout::{ABI_CTRL_OFF, ABI_TAIL, LINK_BASE};
 use abi::place::{self, MAX_SEGMENTS, Segment};
 use abi::systemapi::{
     HOP_IMAGE_JOB, HOP_RESTART_GRACE_MAX_MS, HOP_RESTART_GRACE_MS, HOP_STATE_MAX, Header, Kind,
-    PrivOp, SlotInfo, SlotState, StartReq, StreamResp, StreamState, decode_header, encode_header,
+    PrivOp, SLOT_LEN, SlotInfo, SlotState, StartReq, StreamResp, StreamState, decode_header,
+    encode_header,
 };
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 use bounded::BoundedVec;
 use core::fmt;
@@ -270,9 +272,8 @@ impl Raw {
 
 /// Het slot achter een bron-IP, of `None` als het geen app-adres is.
 #[must_use]
-pub fn slot_from_remote(ip: u32, max_slots: usize) -> Option<Slot> {
-    let slot = Slot::new(abi::layout::ip4_port(ip)?)?;
-    (slot.get() <= max_slots).then_some(slot)
+pub fn slot_from_remote(ip: u32) -> Option<Slot> {
+    Slot::new(abi::layout::ip4_port(ip)?)
 }
 
 async fn read_full(c: &mut impl Conn, buf: &mut [u8]) -> Result {
@@ -1250,7 +1251,6 @@ pub struct System<'i, 'r, const N: usize> {
     fs: Option<&'i FsInbox<'r>>,
     devices: Option<&'i crate::deviceabi::Inbox<'r>>,
     store: Option<&'i crate::store::StoreQueue>,
-    max_slots: usize,
 }
 
 impl<'i, 'r, const N: usize> System<'i, 'r, N> {
@@ -1261,7 +1261,6 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         inbox: &'i Mailbox<Envelope<'r>, N>,
         svc: &'i Servicers,
         privilege: Option<Privilege>,
-        max_slots: usize,
     ) -> Self {
         System {
             inbox,
@@ -1273,7 +1272,6 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             fs: None,
             devices: None,
             store: None,
-            max_slots,
         }
     }
 
@@ -1314,16 +1312,17 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// Laat een verbinding toe: het slot uit het bron-IP, een levende
     /// servicer, en hooguit [`MAX_SYSTEM_CONNS`] van die levensduur (Hop
     /// [`MAX_HOP_CONNS`]); de verbindingen van een vorige levensduur tellen
-    /// niet mee ([`slots::ServicerCtl::try_conn`]). Het resultaat geeft de
+    /// niet mee: zij houden hun eigen besturing ([`ServicerCtl::try_conn`]).
+    /// Het resultaat geeft de
     /// verbinding weer vrij in zijn `Drop`; een weigering zegt waarom.
     ///
     /// # Errors
     ///
     /// Geen slot achter het adres, geen levende bewoner, of vol.
-    pub fn admit(&self, ip: u32) -> core::result::Result<Admitted<'i>, Refusal> {
-        let slot = slot_from_remote(ip, self.max_slots).ok_or(Refusal::NoSlot)?;
-        let generation = self.svc.current(slot).ok_or(Refusal::NotLive { slot })?;
+    pub fn admit(&self, ip: u32) -> core::result::Result<Admitted, Refusal> {
+        let slot = slot_from_remote(ip).ok_or(Refusal::NoSlot)?;
         let ctl = self.svc.ctl(slot).ok_or(Refusal::NotLive { slot })?;
+        let generation = ctl.generation();
         // Hop houdt één verbinding meer: zijn store-taak wacht er blijvend
         // op NEXT_STORE, naast de eigenaar-taak en de kloktaak.
         let hop = self.privilege.as_ref().is_some_and(|p| p.slot == slot);
@@ -1332,11 +1331,11 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         // een weigering wegvalt, geeft in zijn `Drop` een plaats terug die
         // nooit genomen was (gemeten 29-09: na één weigering liet de cap een
         // derde verbinding toe).
-        ctl.try_conn(generation, cap)
+        ctl.try_conn(cap)
             .then(|| Admitted {
                 slot,
                 generation,
-                svc: self.svc,
+                ctl: Rc::clone(&ctl),
             })
             .ok_or(Refusal::Full { slot, cap })
     }
@@ -1358,7 +1357,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     pub async fn serve(
         &self,
         conn: &mut impl Conn,
-        who: &Admitted<'_>,
+        who: &Admitted,
         reply: &'r Reply,
         timer: &impl Timer,
         mem: &mut impl PhysMem,
@@ -1394,7 +1393,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     async fn frames<C: Conn, T: Timer>(
         &self,
         w: &mut Watched<'_, C, T>,
-        who: &Admitted<'_>,
+        who: &Admitted,
         reply: &'r Reply,
         mem: &mut impl PhysMem,
         hooks: &impl Hooks,
@@ -1468,7 +1467,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// de hopfs-actor en komen met het antwoord terug.
     async fn fs_call(
         &self,
-        who: &Admitted<'_>,
+        who: &Admitted,
         h: FsHead,
         reply: &'r Reply,
         buf: &mut Vec<u8>,
@@ -1535,7 +1534,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     )]
     async fn store_call<T: Timer, L: Console>(
         &self,
-        who: &Admitted<'_>,
+        who: &Admitted,
         h: crate::store::Head,
         reply: &'r Reply,
         timer: &T,
@@ -1620,6 +1619,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 done(slots::call(self.inbox, reply, Request::Stop { slot, timeout }).await?)
             }
             PrivOp::SlotStatus => self.status(c, reply, hooks, data).await,
+            PrivOp::Slots => self.occupied(c, reply, data).await,
             PrivOp::NextLog => {
                 let max = usize::try_from(c.n).unwrap_or(usize::MAX).min(data.len());
                 let dst = data.get_mut(..max).unwrap_or(&mut []);
@@ -1794,7 +1794,8 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     // een stroom wil over een `.await` heen, haalt hem eruit (`take_stream`)
     // en is dan de enige eigenaar.
 
-    /// Loopt er een stroom voor `slot`?
+    /// Loopt er een stroom voor `slot`? (Voor de toetsen.)
+    #[cfg(test)]
     fn has_stream(&self, slot: Slot) -> bool {
         self.streams
             .borrow()
@@ -1883,12 +1884,14 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             req.memory_limit
         };
         let job = try_vec(req.job)?;
-        let slot = self.free_slot(reply).await?;
-        let mut spec = StartSpec::new(slot, mem, placement);
+        // Het slot kiest de actor: het laagste vrije, behalve dat van Hop
+        // (dat tijdens zijn herstart even leeg staat). Geen maximum.
+        let mut spec = StartSpec::free(mem, placement, self.privilege.as_ref().map(|p| p.slot));
         spec.job = job;
         spec.ports = start_ports(&req)?;
         spec.mounts = start_mounts(&req)?;
         let grant = claim(self.inbox, reply, spec).await?;
+        let slot = grant.slot();
         let placer = match Placer::for_grant(&grant, req.image_size, raw.is_some()) {
             Ok(p) => p,
             Err(e) => {
@@ -1906,32 +1909,6 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             return Err(Error::Full { cap: MAX_STREAMS }.into());
         }
         Ok((slot.get() as u64, 0))
-    }
-
-    /// Het eerste slot zonder eigenaar, in één vraag aan de actor: de
-    /// slots van Hop, van een lopende stroom en boven `max_slots` slaat hij
-    /// over. Hop serialiseert zijn starts, dus tussen de vraag en de claim
-    /// komt er niemand tussen; komt er toch iemand, dan weigert de claim met
-    /// `StillOwned` en faalt de start luid.
-    async fn free_slot(&self, reply: &'r Reply) -> Result<Slot> {
-        let mut skip: SlotSet = u32::try_from(self.max_slots)
-            .ok()
-            .and_then(|n| SlotSet::MAX.checked_shl(n))
-            .unwrap_or(0);
-        for i in 1..=self.max_slots.min(SLOT_CAP) {
-            let Some(slot) = Slot::new(i) else { continue };
-            if self.privilege.as_ref().is_some_and(|p| p.slot == slot) || self.has_stream(slot) {
-                skip |= 1 << (i - 1);
-            }
-        }
-        match slots::call(self.inbox, reply, Request::FirstEmpty { skip }).await? {
-            Response::Free(Some(slot)) => Ok(slot),
-            Response::Free(None) => Err(Error::Full {
-                cap: self.max_slots,
-            }),
-            Response::Failed(e) => Err(e),
-            _ => Err(Error::Busy),
-        }
     }
 
     /// STREAM_IMAGE: bytes naar hun plek; bij de laatste plaatsen en armen.
@@ -1985,6 +1962,23 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
 
     /// SLOT_STATUS: het grootboek van de actor plus de stand van een stroom;
     /// slot 0 is de kern zelf ([`kern_status`]).
+    /// SLOTS: de bezette slots na `off`, zoveel als er in `n` en het
+    /// antwoord passen.
+    async fn occupied(&self, c: &Req<'_>, reply: &'r Reply, data: &mut [u8]) -> Answer {
+        let after = usize::try_from(c.off).unwrap_or(usize::MAX);
+        let room = usize::try_from(c.n).unwrap_or(usize::MAX).min(data.len()) / SLOT_LEN;
+        let list =
+            match slots::call(self.inbox, reply, Request::Occupied { after, max: room }).await? {
+                Response::Occupied(v) => v,
+                Response::Failed(e) => return Err(e.into()),
+                _ => return Err(Error::Busy.into()),
+            };
+        for (s, d) in list.iter().zip(data.chunks_exact_mut(SLOT_LEN)) {
+            d.copy_from_slice(&u16::try_from(s.get()).unwrap_or(u16::MAX).to_le_bytes());
+        }
+        Ok((list.len() as u64, list.len() * SLOT_LEN))
+    }
+
     async fn status(
         &self,
         c: &Req<'_>,
@@ -2196,7 +2190,7 @@ fn target(c: &Req<'_>) -> Result<Slot> {
         .and_then(Slot::new)
         .ok_or(Error::SlotRange {
             slot: usize::try_from(c.off).unwrap_or(usize::MAX),
-            max: SLOT_CAP,
+            max: abi::layout::SLOT_MAX,
         })
 }
 
@@ -2298,13 +2292,14 @@ fn done(r: Response) -> Answer {
 }
 
 /// Een toegelaten verbinding; `Drop` geeft de plaats terug.
-pub struct Admitted<'a> {
+pub struct Admitted {
     slot: Slot,
     generation: u32,
-    svc: &'a Servicers,
+    /// De besturing van de levensduur waarvoor de plaats geteld is.
+    ctl: Rc<ServicerCtl>,
 }
 
-impl Admitted<'_> {
+impl Admitted {
     /// Het slot van de peer.
     #[must_use]
     pub fn slot(&self) -> Slot {
@@ -2312,11 +2307,9 @@ impl Admitted<'_> {
     }
 }
 
-impl Drop for Admitted<'_> {
+impl Drop for Admitted {
     fn drop(&mut self) {
-        if let Some(ctl) = self.svc.ctl(self.slot) {
-            ctl.drop_conn(self.generation);
-        }
+        self.ctl.drop_conn();
     }
 }
 
@@ -2608,7 +2601,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         let mut hop = Pipe::new(
             port_ip4(1),
@@ -2874,14 +2867,16 @@ mod tests {
 
     #[test]
     fn slot_from_remote_maps_the_internal_net() {
-        let ip = |d: u32| (abi::layout::HOST_IP4 & !0xff) | d;
-        assert_eq!(slot_from_remote(ip(2), 8), Some(s(1)));
-        assert_eq!(slot_from_remote(ip(9), 8), Some(s(8)));
-        assert_eq!(slot_from_remote(ip(10), 8), None, "beyond max slots");
-        assert_eq!(slot_from_remote(ip(1), 8), None, "HOP itself");
-        assert_eq!(slot_from_remote(ip(0), 8), None);
+        let ip = |d: u32| (abi::layout::HOST_IP4 & !0xffff) | d;
+        assert_eq!(slot_from_remote(ip(2)), Some(s(1)));
+        assert_eq!(slot_from_remote(ip(9)), Some(s(8)));
+        // Geen maximum aantal slots: elk adres van het /16 is een slot.
+        assert_eq!(slot_from_remote(ip(0x9c41)), Some(s(40_000)));
+        assert_eq!(slot_from_remote(ip(1)), None, "HOP itself");
+        assert_eq!(slot_from_remote(ip(0)), None);
+        assert_eq!(slot_from_remote(ip(0xffff)), None, "broadcast");
         assert_eq!(
-            slot_from_remote((10 << 24) | (101 << 16) | 2, 8),
+            slot_from_remote((10 << 24) | (101 << 16) | 2),
             None,
             "other net"
         );
@@ -3029,18 +3024,32 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let timer = FakeTimer::default();
         let mut sbuf = [0u8; 256];
-        let mut servicer: Servicer<'_> = std::boxed::Box::pin(servicer_task(
-            s(3),
-            &svc,
-            |_: Region| OneLine(Some(b"app says hi")),
-            &timer,
-            &tee,
-            &inbox,
-            &mut sbuf,
-        ));
+        // De servicer van slot 3 bestaat pas vanaf de plaatsing (de kooi
+        // spawnt hem per levensduur); deze wacht tot zijn besturing er is.
+        let (svcr, sbufr) = (&svc, &mut sbuf);
+        let mut servicer: Servicer<'_> = std::boxed::Box::pin(async {
+            let ctl = loop {
+                if let Some(c) = svcr.ctl(s(3)) {
+                    break c;
+                }
+                sync::yield_now().await;
+            };
+            servicer_task(
+                s(3),
+                ctl,
+                |_: Region| OneLine(Some(b"app says hi")),
+                &timer,
+                &tee,
+                &inbox,
+                sbufr,
+            )
+            .await;
+            // `drive` pollt hem daarna gewoon door.
+            core::future::pending::<()>().await;
+        });
         let img = elf(u64::from(abi::ABI_VERSION));
         let (c1, c2) = (0x50, SEG_OFF + 0x80);
         let env = b"BUCKET=hop-apps\n";
@@ -3151,6 +3160,48 @@ mod tests {
         assert_eq!(info.slot_state(), Some(SlotState::Empty));
     }
 
+    /// SLOTS: de bezette slots in stukken, zoals `getdents`, van Hop; een
+    /// ander slot krijgt "denied".
+    #[test]
+    fn slots_lists_the_occupied_slots_in_pieces() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
+        let mut p = Pipe::new(
+            port_ip4(1),
+            &[
+                op(PrivOp::Slots, 1, 0, 64),
+                op(PrivOp::Slots, 2, 0, 2),
+                op(PrivOp::Slots, 3, 1, 64),
+                op(PrivOp::Slots, 4, 2, 64),
+            ],
+        );
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        let res = results(&p.tx);
+        assert_eq!(
+            (res[0].1, res[0].3, &res[0].4[..]),
+            (STATUS_OK, 2, &[1, 0, 2, 0][..])
+        );
+        assert_eq!(
+            (res[1].3, &res[1].4[..]),
+            (1, &[1, 0][..]),
+            "as many as fit in n"
+        );
+        assert_eq!((res[2].3, &res[2].4[..]), (1, &[2, 0][..]), "after slot 1");
+        assert_eq!(res[3].3, 0, "none after the last");
+        let mut other = Pipe::new(port_ip4(2), &[op(PrivOp::Slots, 5, 0, 64)]);
+        drive(
+            &sys, &mut a, &inbox, &reply, &mut other, &mut mem, &hooks, &tee, None,
+        );
+        assert_eq!(results(&other.tx)[0].1, STATUS_DENIED);
+    }
+
     /// Een start met volumes: van de draad tot in de mount-tabel van de
     /// hopfs-actor, met één regel. Een volume op `/`, onder `/.tasks` of met
     /// `..` wordt geweigerd vóór de claim: het slot blijft leeg.
@@ -3161,7 +3212,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let img = elf(u64::from(abi::ABI_VERSION));
         let mut p = Pipe::new(
             port_ip4(1),
@@ -3226,7 +3277,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let fill: Vec<std::string::String> = (0..12_000)
             .map(|i| std::format!("core::fmt::rt::local{i}"))
             .collect();
@@ -3274,7 +3325,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let bad_abi = elf(9);
         let good = elf(u64::from(abi::ABI_VERSION));
         let mut p = Pipe::new(
@@ -3333,7 +3384,7 @@ mod tests {
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
         let fsin: FsInbox<'_> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, None, 8).with_fs(&fsin);
+        let sys = System::new(&inbox, &svc, None).with_fs(&fsin);
         let req = |op: u8, seq: u32, path: &'static [u8], data: &'static [u8], n: u64| {
             enc(&abi::hopabi::Req {
                 op,
@@ -3381,7 +3432,7 @@ mod tests {
 
         // Zonder schijf: niet gevonden, net als op een lege schijf, en de
         // verbinding leeft door.
-        let bare = System::new(&inbox, &svc, None, 8);
+        let bare = System::new(&inbox, &svc, None);
         let mut p = Pipe::new(port_ip4(2), &[req(OP_STAT, 1, b"x", b"", 0)]);
         let _ = drive(
             &bare, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
@@ -3400,7 +3451,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let sha = [7u8; 32];
         let flip = abi::hopabi::Req {
             op: PrivOp::Flip.op(),
@@ -3432,7 +3483,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         // Geen ELF: een flip-bundel gaat rauw de partitie in.
         let bundle = b"not an ELF but a flip bundle".repeat(3);
         let start = {
@@ -3517,7 +3568,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let mut p = Pipe::new(
             port_ip4(1),
             &[
@@ -3564,7 +3615,7 @@ mod tests {
         let (svc, con) = (Servicers::new(), FakeConsole::default());
         let _a = node(&svc, &con);
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         sys.state_put(b"kept").unwrap();
         let big = vec![7u8; HOP_STATE_MAX + 1];
         assert_eq!(
@@ -3587,7 +3638,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let mut app = Pipe::new(
             port_ip4(2),
             &[
@@ -3613,7 +3664,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let sha = [5u8; 32];
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         for (call, why) in [
@@ -3675,7 +3726,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         // Geen geldige ELF: de kern plaatst hem niet, hij gaat rauw de
         // partitie in; som en ELF toetst de haak.
         let img = b"a new Hop, raw".repeat(5);
@@ -3742,7 +3793,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let img = elf(1);
         let mut p = Pipe::new(
             port_ip4(1),
@@ -3792,7 +3843,7 @@ mod tests {
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
         let kern = crate::conport::tests::ring(256);
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_console(&kern);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1)))).with_console(&kern);
         kern.append(b"net: 10.0.2.15 HOPOS_NET_UP\n");
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         // Een app mag hem niet lezen.
@@ -3830,8 +3881,7 @@ mod tests {
         let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
         crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
         let inbox: Mailbox<Envelope<'_>, 2> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, None, 8);
-        let gen1 = svc.current(s(1)).unwrap();
+        let sys = System::new(&inbox, &svc, None);
         let one = sys.admit(port_ip4(1)).unwrap();
         let two = sys.admit(port_ip4(1)).unwrap();
         let full = Refusal::Full {
@@ -3849,7 +3899,7 @@ mod tests {
             Some(full),
             "a refusal gave a seat back"
         );
-        assert_eq!(svc.ctl(s(1)).unwrap().conns(gen1), 2);
+        assert_eq!(svc.ctl(s(1)).unwrap().conns(), 2);
         drop(one);
         assert!(sys.admit(port_ip4(1)).is_ok());
         drop(two);
@@ -3860,7 +3910,7 @@ mod tests {
         );
         assert_eq!(sys.admit(0x0A64_0001).err(), Some(Refusal::NoSlot));
         // Het slot van Hop houdt er één meer, voor zijn store-taak.
-        let hop = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let hop = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let seats: Vec<_> = (0..MAX_HOP_CONNS).map(|_| hop.admit(port_ip4(1))).collect();
         assert!(seats.iter().all(core::result::Result::is_ok));
         assert!(
@@ -3879,7 +3929,7 @@ mod tests {
         let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
         crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
         let inbox: Mailbox<Envelope<'_>, 2> = Mailbox::new();
-        let hop = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let hop = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let old: Vec<_> = (0..MAX_HOP_CONNS)
             .map(|_| hop.admit(port_ip4(1)).unwrap())
             .collect();
@@ -3888,7 +3938,6 @@ mod tests {
         // open staan.
         crate::slots::tests::stop(&mut a, 1).unwrap();
         crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
-        let gen2 = svc.current(s(1)).unwrap();
         let new: Vec<_> = (0..MAX_HOP_CONNS).map(|_| hop.admit(port_ip4(1))).collect();
         assert!(
             new.iter().all(core::result::Result::is_ok),
@@ -3900,13 +3949,13 @@ mod tests {
         assert!(hop.admit(port_ip4(1)).is_err(), "the new cap still holds");
         // De oude geven hun plaats terug: de nieuwe telt er nog drie.
         drop(old);
-        assert_eq!(svc.ctl(s(1)).unwrap().conns(gen2), u32::from(MAX_HOP_CONNS));
+        assert_eq!(svc.ctl(s(1)).unwrap().conns(), u32::from(MAX_HOP_CONNS));
         assert!(
             hop.admit(port_ip4(1)).is_err(),
             "an old drop gave a new seat"
         );
         drop(new);
-        assert_eq!(svc.ctl(s(1)).unwrap().conns(gen2), 0);
+        assert_eq!(svc.ctl(s(1)).unwrap().conns(), 0);
     }
 
     /// De belofte van een start (ook die van een herstarte Hop): vanaf de
@@ -3921,7 +3970,7 @@ mod tests {
         let inbox: &'static Mailbox<Envelope<'static>, 2> =
             std::boxed::Box::leak(std::boxed::Box::new(Mailbox::new()));
         let hop: &'static System<'static, 'static, 2> = std::boxed::Box::leak(
-            std::boxed::Box::new(System::new(inbox, svc, Some(Privilege::for_test(s(1))), 8)),
+            std::boxed::Box::new(System::new(inbox, svc, Some(Privilege::for_test(s(1))))),
         );
         let seen: &'static std::cell::RefCell<Vec<core::result::Result<(), Refusal>>> =
             std::boxed::Box::leak(std::boxed::Box::default());
@@ -3976,7 +4025,7 @@ mod tests {
         // De antwoordplekken leven langer dan de inbox die ernaar wijst.
         let (mut s1, mut s2) = (Seat::new(), Seat::new());
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
         let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
         let mut quiet = Pipe::silent(port_ip4(2));
         let mut hop = Pipe::new(
@@ -4023,7 +4072,7 @@ mod tests {
             }
             assert!(f1.as_mut().poll(&mut cx).is_pending());
             assert_eq!(
-                svc.ctl(s(2)).unwrap().conns(svc.current(s(2)).unwrap()),
+                svc.ctl(s(2)).unwrap().conns(),
                 1,
                 "silent peer lost its seat"
             );
@@ -4045,10 +4094,10 @@ mod tests {
         let mut a = node(&svc, &con);
         let (mut s1, mut s2) = (Seat::new(), Seat::new());
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, None, 8);
+        let sys = System::new(&inbox, &svc, None);
         let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
         let (mut p1, mut p2) = (Pipe::silent(port_ip4(2)), Pipe::silent(port_ip4(2)));
-        let life = svc.current(s(2)).unwrap();
+        let ctl = svc.ctl(s(2)).unwrap();
         let (w1, w2) = (
             sys.admit(port_ip4(2)).unwrap(),
             sys.admit(port_ip4(2)).unwrap(),
@@ -4102,11 +4151,7 @@ mod tests {
         }
         assert_eq!(ends, [Some(End::Evicted), Some(End::Evicted)]);
         drop((w1, w2));
-        assert_eq!(
-            svc.ctl(s(2)).unwrap().conns(life),
-            0,
-            "seats not given back"
-        );
+        assert_eq!(ctl.conns(), 0, "seats not given back");
         assert!(sys.admit(port_ip4(2)).is_err(), "stopped slot admitted");
     }
 
@@ -4119,7 +4164,7 @@ mod tests {
         let _a = node(&svc, &con);
         let mut seat = Seat::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, None, 8);
+        let sys = System::new(&inbox, &svc, None);
         let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
         let mut p = Pipe::silent(port_ip4(2));
         let who = sys.admit(port_ip4(2)).unwrap();

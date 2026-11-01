@@ -146,7 +146,7 @@ const OS_HZ: fn() -> u64 = if cfg!(target_arch = "riscv64") {
 static HEAP: Heap = Heap::new();
 
 /// De executor van core 0. Alleen de taken op deze core raken hem aan.
-static EXEC: Local<Executor> = Local::new(Executor::new());
+pub(crate) static EXEC: Local<Executor> = Local::new(Executor::new());
 
 /// Dereks bunny, het origineel (2026-07-11), letterlijk uit de Go-main:
 /// oren netjes boven het snuitje. Bewust geen architectuur in de tagline
@@ -391,7 +391,7 @@ fn setup(board: &'static Machine, el: u8, wd: watchdog::Armed) -> <Machine as Bo
     // MEDIA: de codec-dienst ná de opslag, want de firmware-blobs staan op
     // het volume (codec.rs); zonder VPU meldt hij luid dat er geen is.
     codec::up(exec);
-    let system = system(privilege, disk.is_some(), slot_count(board));
+    let system = system(privilege, disk.is_some());
 
     exec.spawn(tick(exec)).expect("spawn tick");
     // De taak van de node-watchdog (gewapend aan het begin) en de
@@ -434,7 +434,7 @@ fn setup(board: &'static Machine, el: u8, wd: watchdog::Armed) -> <Machine as Bo
     // geen link is net zo'n node. Na een flip is een NIC die faalt meteen
     // `HOPOS_FATAL`: de bewoners rekenen op hun net.
     let (hok, carried) = match landing {
-        Some(l) => (Some(l.slots), Some(l.lease)),
+        Some(l) => (Some((l.slots, l.cage)), Some(l.lease)),
         None => (None, None),
     };
     match board.probe_nic() {
@@ -482,7 +482,6 @@ fn nic_up(
 ) {
     println!("net: nic up HOPOS_NIC_UP mac={}", nic.mac());
     let params = net::Params {
-        max_slots: slot_count(board),
         now: board.clock(),
         slot_wake: slots::wake,
         resident: slots::resident,
@@ -553,8 +552,8 @@ static STORE: kern::store::StoreQueue = kern::store::StoreQueue::new();
 /// daarna voor altijd. Boot-code: een heap die dit niet kan geven, is
 /// parkeren.
 #[inline(never)] // eigen frame, niet in dat van `setup`
-fn system(privilege: Option<Privilege>, fs: bool, max_slots: usize) -> &'static KernSystem {
-    let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, max_slots)
+fn system(privilege: Option<Privilege>, fs: bool) -> &'static KernSystem {
+    let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege)
         .with_console(&conport::RING)
         .with_store(&STORE);
     if fs {
@@ -589,20 +588,6 @@ fn system_api(system: &'static KernSystem) -> net::SystemApi {
         hooks: &SYSTEM_HOOKS,
         log: &SYSTEM_LOG,
     }
-}
-
-/// Het aantal slots van dit board: één per app-core plus één voor de
-/// OS-core, waar Hop naast de kern woont (het plan van het board, PORT.md
-/// beslissing 2): twee cores zijn twee slots. De switch en de system-API
-/// kennen hetzelfde getal. Tot 01-10 kreeg de system-API het plafond uit de
-/// ABI (128): een volle Pi 4 zocht dan door tot slot 5, de lifecycle
-/// weigerde die met "slot 5 out of range 1..4" in plaats van "full", Hop las
-/// daar geen capaciteitstekort in en bleef elke paar seconden opnieuw
-/// vragen, en elke vraag was 128 statuscalls door de lifecycle-mailbox: een
-/// koude flip vond hem vol ("actor mailbox full").
-pub(crate) fn slot_count(board: &Machine) -> usize {
-    // Kooien tellen niet als cores: het plan van het board zegt hoeveel.
-    vboard::slots::plan(board.cores(), 0).map_or(2, |p| p.max_slots())
 }
 
 /// De haken van de system-API: de klok van Hop zet de wandklok van de kern

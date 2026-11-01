@@ -48,7 +48,6 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         boot_scratch_pa: BOOT_SCRATCH_PA,
         pool: pool_of(POOL)?,
         ram_base: 0x8000_0000,
-        max_slots: (app_cores + 1).max(abi::layout::SLOTS_DEFAULT),
         app_cores,
         os_core,
         ..PlanSpec::default()
@@ -108,7 +107,6 @@ mod tests {
     fn the_plan_holds_for_two_harts() {
         let p = plan(2, 0).unwrap();
         assert_eq!(p.app_cores(), 1);
-        assert_eq!(p.max_slots(), abi::layout::SLOTS_DEFAULT);
         assert_eq!(core_of(mpidr(1)), 1);
     }
 }

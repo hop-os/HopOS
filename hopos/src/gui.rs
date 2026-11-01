@@ -316,20 +316,15 @@ pub(crate) mod hooks {
         }
     }
 
-    /// Het venster in de kooi, op ijzer: het tabelblok van het slot uit het
-    /// plan van deze node, en `cpu::el2::stage2::grant_window` (dezelfde
-    /// bouwer als de kooi zelf, cage.rs); de toets na een flip is
-    /// `has_grant_window` ernaast.
+    /// Het venster in de kooi, op ijzer: het kooi-blok van het slot (uit
+    /// het kooi-geheugen, `kooi::block_of`), en
+    /// `cpu::el2::stage2::grant_window` (dezelfde bouwer als de kooi zelf,
+    /// cage.rs); de toets na een flip is `has_grant_window` ernaast.
     struct CageWindows;
 
     impl CageWindows {
         fn block(slot: Slot) -> kern::Result<dev::Pa> {
-            let bad = kern::Error::SlotRange {
-                slot: slot.get(),
-                max: abi::layout::SLOT_CAP,
-            };
-            let plan = crate::slots::os_plan().map_err(|_| bad)?;
-            plan.cage_table_pa(slot).map_err(|_| bad)
+            crate::kooi::block_of(slot).ok_or(kern::Error::NotOwned { slot: slot.get() })
         }
     }
 

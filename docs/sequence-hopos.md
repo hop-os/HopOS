@@ -747,7 +747,7 @@ Te wegen:
    2. Een budget.
    3. Zaad.
    4. DNS uit de env.
-   5. Een leannet-stack: IP 10.100.0.(slot+1), MAC 02:00:00:00:00:slot.
+   5. Een leannet-stack: IP 10.100.0.1 + slot in een /16 (slot 1 is 10.100.0.2), MAC 02:00:00:00 met de zestien bits van het slot.
    6. De gateway 10.100.0.1 als statische buur, zonder ARP.
    7. De pomp.
 2. **Een frame naar buiten:**
@@ -1269,7 +1269,7 @@ stap.
 | S16 | hopfs: head-of-line over alle slots; `OP_SYNC` is een globale commit; een commit tijdens een commit wacht vooraan | Wachten per slot; commits samenvoegen (`dirty` draagt ze al) |
 | S17 | Flip-resten: `SUM`, `bundle_sum`, `window`, `total`, nulwoorden, recorder-stappen zonder schrijver, `PSCI_HVC`; de handoff-pointer draagt geen informatie; relocaties twee keer getoetst | Opruimen (let op oudere kernen voor het blob-formaat) |
 | S18 | Dubbele intrekking op de arm-OS-core (`recall` plus stage-2 nullen plus `tlbi alle1is`); `CTX_REVOKE` heeft op arm-app-cores geen lezer; `tlbi alle1is` raakt alle VMID's | Per VMID intrekken; op core 0 alleen `recall` |
-| S19 | `max_slots` drie keer afgeleid (`slot_count`, `os_plan`, de switch) | Eén bron |
+| S19 | `max_slots` drie keer afgeleid (`slot_count`, `os_plan`, de switch) | Opgelost in v3.2.0: er is geen maximum aantal slots meer, dus ook geen `max_slots` (de kooi-blokken komen uit de pool) |
 | S20 | DHCP op twee manieren (rauw voor de eerste lease, dan een socket) | Volgt uit "de stack kan niet van adres wisselen"; samen met S13 bekijken |
 | S21 | De `Isa`-takken in `flip.rs` (vier paren) en de `cfg`-bos in hopos (watchdog, telemetrie, bench) | Als data of trait van het board |
 
@@ -1593,7 +1593,7 @@ Uit de leesronde. Per stuk eerst een grep op gebruikers, dan pas weghalen.
 - **Een tweede weg naar hetzelfde:**
   - `Board::boot_param` naast `NodeCfg::one` (S4): `NodeCfg` vroeger in
     `setup`, en alleen die;
-  - `max_slots` op drie plekken (S19);
+  - `max_slots` op drie plekken (S19; weg in v3.2.0);
   - het kern-adres op vijf plekken, en de draadvorm in applib naast abi
     (S14).
 - **De literals van het EL2-regime** op vier tot vijf plekken: één set

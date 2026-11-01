@@ -70,15 +70,11 @@
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use abi::layout::{
-    CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_OFF, CTX_REGIME, CTX_RESUME,
-    CTX_REVOKE, CTX_RING_HEAD_PA, CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, CtxState, SCHED_CLINT_PA,
-    SCHED_COUNT, SCHED_CURRENT, SCHED_LIST, SCHED_MSIP_PA, SCHED_OS_BELL, SCHED_ROTOR, SCHED_S2_PA,
-    SCHED_SCRATCH, SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
+    CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_REGIME, CTX_RESUME, CTX_REVOKE,
+    CTX_RING_HEAD_PA, CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, CtxState, ROSTER_CAP, ROSTER_ENTRIES,
+    SCHED_CLINT_PA, SCHED_COUNT, SCHED_CURRENT, SCHED_LIST_PA, SCHED_MSIP_PA, SCHED_OS_BELL,
+    SCHED_ROTOR, SCHED_SCRATCH, SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
 };
-
-/// De verschuiving van slot naar kooi-blok (`CAGE_STRIDE` = 64 KB).
-pub const CAGE_SHIFT: u32 = 16;
-const _: () = assert!(1 << CAGE_SHIFT == abi::layout::CAGE_STRIDE);
 
 /// De regime-woorden in `CTX_REGIME`, in de volgorde van de switcher:
 /// `satp`, `stvec`, `sscratch`, `pmpcfg0`, `pmpaddr0..7`.
@@ -466,12 +462,8 @@ __hopos_mentry:
     bne t0, t1, 40f
 
     // --- yield of exit (ecall uit S-mode) -----------------------------
-    ld t0, {current}(sp)
-    ld t1, {s2}(sp)
-    slli t0, t0, {shift}
-    add t1, t1, t0
-    li t0, {ctxoff}
-    add t1, t1, t0
+    // SCHED_CURRENT is de PA van het ctx-blok van de bewoner.
+    ld t1, {current}(sp)
     li t0, 2
     beq a7, t0, 46f
     bnez a7, 45f
@@ -519,13 +511,8 @@ __hopos_mentry:
     srli t0, t0, 1
     li t1, 7
     bne t0, t1, 39f
-    ld t0, {current}(sp)
-    beqz t0, 39f
-    ld t1, {s2}(sp)
-    slli t0, t0, {shift}
-    add t1, t1, t0
-    li t0, {ctxoff}
-    add t1, t1, t0
+    ld t1, {current}(sp)
+    beqz t1, 39f
     addi t0, t1, {revoke}
     HOPOS_RV_CIPA t0
     HOPOS_RV_SYNC
@@ -590,12 +577,7 @@ __hopos_mentry:
     // mcause, mtval en vec 1 naar de control-page van de bewoner, mepc,
     // ra, sp en satp voor het post-mortem in het ctx-blok.
 40:
-    ld t0, {current}(sp)
-    ld t1, {s2}(sp)
-    slli t0, t0, {shift}
-    add t1, t1, t0
-    li t0, {ctxoff}
-    add t1, t1, t0
+    ld t1, {current}(sp)
     ld t2, {ctrl}(t1)
     beqz t2, 41f
     csrr t0, mcause
@@ -662,20 +644,31 @@ __hopos_mentry:
     li s3, 0
     li s4, -1
     beqz s1, 60f
+    // De lijst (s8): een array van ctx-PA's in het kooi-geheugen, woord 0 de
+    // capaciteit; de lengte geklemd op die capaciteit. Een lijst die de kern
+    // intussen liet groeien, heeft dezelfde ingangen, en de oude blijft.
+    ld s8, {list}(sp)
+    beqz s8, 60f
+    HOPOS_RV_CIPA s8
+    HOPOS_RV_SYNC
+    ld t0, {rcap}(s8)
+    bleu s1, t0, 58f
+    mv s1, t0
+58:
+    beqz s1, 60f
+    addi s8, s8, {rentries}
 51:
     addi s2, s2, 1
     bltu s2, s1, 52f
     li s2, 0
 52:
-    addi t0, sp, {list}
-    add t0, t0, s2
-    lbu s5, 0(t0)
+    slli t0, s2, 3
+    add t0, s8, t0
+    HOPOS_RV_CIPA t0
+    HOPOS_RV_SYNC
+    ld s5, 0(t0)
     beqz s5, 55f
-    ld s6, {s2}(sp)
-    slli t0, s5, {shift}
-    add s6, s6, t0
-    li t0, {ctxoff}
-    add s6, s6, t0
+    mv s6, s5
     HOPOS_RV_CIPA s6
     HOPOS_RV_SYNC
     ld t0, {state}(s6)
@@ -797,11 +790,11 @@ __hopos_mentry:
     // en de staat al nieuw, zou het slot anders op twee harts starten. Wie de
     // nieuwe staat ziet, ziet ook de lijst van daarvóór.
 70:
-    addi t0, sp, {list}
-    add t0, t0, s2
+    slli t0, s2, 3
+    add t0, s8, t0
     HOPOS_RV_CIPA t0
     HOPOS_RV_SYNC
-    lbu t0, 0(t0)
+    ld t0, 0(t0)
     bne t0, s5, 55b
     // Het regime vers uit DRAM: de kern schreef het vanaf zijn hart.
     addi t0, s6, 256
@@ -973,15 +966,14 @@ __hopos_mmode_end:
     current = const SCHED_CURRENT,
     rotor = const SCHED_ROTOR,
     count = const SCHED_COUNT,
-    list = const SCHED_LIST,
-    s2 = const SCHED_S2_PA,
+    list = const SCHED_LIST_PA,
+    rcap = const ROSTER_CAP,
+    rentries = const ROSTER_ENTRIES,
     clint = const SCHED_CLINT_PA,
     cap = const SCHED_SLEEP_CAP,
     msip = const SCHED_MSIP_PA,
     osbell = const SCHED_OS_BELL,
     tick = const SCHED_TICK_TICKS,
-    shift = const CAGE_SHIFT,
-    ctxoff = const CTX_OFF,
     state = const CTX_STATE,
     ctrl = const CTX_CTRL_PA,
     bootpc = const CTX_BOOT_PC,

@@ -9,15 +9,14 @@
 use crate::kooi::tail_of;
 use abi::layout::{CtxState, RING_DATA_CAP};
 use abi::ring;
-use core::cell::Cell;
 use cpu::el2;
 use cpu::println;
 use dev::Pa;
 use kern::cage::{Console, PhysMem};
 use kern::slots::Outbox;
-use kern::{Region, SLOT_CAP, Slot};
+use kern::{Region, Slot, SlotVec};
 use net::ring::{AbiTx, Reader};
-use sync::Local;
+use sync::LocalCell;
 
 /// Fysiek geheugen over `dev`, voor de kooi, de image-stream van de
 /// system-API en de flip. De adressen komen uit het plan, uit de partitie
@@ -101,14 +100,18 @@ impl SlotOutbox {
         let tail = tail_of(part);
         let reader = tail.and_then(|t| ring::Reader::open(t.outbox(), RING_DATA_CAP).ok());
         let ctrl = tail.map(|t| t.ctrl_page());
-        if let (Some(t), Some(c)) = (tail.filter(|_| reader.is_some()), ctrl)
-            && let Some(d) = DOORS.get().get(slot.get())
-        {
-            d.set(Some(Door {
+        // Een deur die de tabel niet kan dragen, is een outbox die meteen
+        // corrupt meldt: de servicer stopt luid.
+        let mut reader = reader;
+        if let (Some(t), Some(c)) = (tail.filter(|_| reader.is_some()), ctrl) {
+            let door = Door {
                 outbox: t.outbox(),
                 ctx,
                 ctrl: c,
-            }));
+            };
+            if DOORS.borrow_mut().insert(slot, door).is_err() {
+                reader = None;
+            }
         }
         SlotOutbox {
             reader,
@@ -121,9 +124,7 @@ impl SlotOutbox {
 
 impl Drop for SlotOutbox {
     fn drop(&mut self) {
-        if let Some(d) = DOORS.get().get(self.slot.get()) {
-            d.set(None);
-        }
+        DOORS.borrow_mut().remove(self.slot);
     }
 }
 
@@ -136,10 +137,9 @@ struct Door {
     ctrl: Pa,
 }
 
-/// De deuren van de open outboxen, per slot. Alleen de kern-core raakt ze
-/// (de servicers, de deur van de executor).
-static DOORS: Local<[Cell<Option<Door>>; SLOT_CAP + 1]> =
-    Local::new([const { Cell::new(None) }; SLOT_CAP + 1]);
+/// De deuren van de open outboxen, op slotnummer. Alleen de kern-core
+/// raakt ze (de servicers, de deur van de executor).
+static DOORS: LocalCell<SlotVec<Door>> = LocalCell::cell(SlotVec::new());
 
 /// De deur van de outboxen (O10, docs/sequence-hopos.md §13.3): luidt de
 /// servicer van elk slot met werk in zijn outbox, een SMP-verzoek of een
@@ -150,14 +150,13 @@ static DOORS: Local<[Cell<Option<Door>>; SLOT_CAP + 1]> =
 /// er werd gebeld.
 pub(crate) fn ring_outboxes() -> bool {
     let mut rang = false;
-    for (i, d) in DOORS.get().iter().enumerate() {
-        let Some(d) = d.get() else { continue };
+    for (slot, d) in DOORS.borrow().iter() {
         // Het handvat zonder bit 0: de blik doet zijn eigen onderhoud
         // (`net::ring::AbiTx::probe`, dezelfde ABI-ring als een TX-ring).
         let work = <AbiTx as Reader>::probe(d.outbox.0)
             || smp_req(d.ctrl)
             || !is_live(el2::ctx_state(d.ctx));
-        if work && let Some(slot) = Slot::new(i) {
+        if work {
             crate::SERVICERS.ring(slot);
             rang = true;
         }

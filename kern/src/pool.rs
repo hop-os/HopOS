@@ -4,7 +4,7 @@
 //! of `cores` aaneengesloten voor een SMP-app). Met een sharegroup krijgt de
 //! groep een vaste set hele cores en balanceert de plaatsing de leden
 //! daarover. Kooi is geen core: er passen meer kooien dan cores, tot de
-//! partitie-pool of [`crate::SLOT_CAP`] op is.
+//! partitie-pool op is (er is geen maximum aantal slots).
 //!
 //! Een jobspec vraagt een klasse ([`CoreClass`]); de plaatsing kiest alleen
 //! cores met die klasse ([`Cores::class`]). Hop-de-bewoner vraagt
@@ -26,7 +26,7 @@
 //! Puur boekhouding, geen MMIO. Eigendom van de lifecycle-actor.
 
 use crate::cage::{CoreClass, Cores};
-use crate::{CORE_CAP, Core, Error, Result, SLOT_CAP, Slot};
+use crate::{CORE_CAP, Core, Error, Result, Slot, SlotVec};
 use bounded::BoundedVec;
 
 /// De langste sharegroup-naam (dezelfde grens als het handoff-blob draagt).
@@ -102,7 +102,7 @@ pub fn hop_group() -> GroupName {
 pub const SYSTEM_GROUP: &[u8] = b"system";
 
 /// `name` als [`GroupName`].
-fn group_name(name: &[u8]) -> Result<GroupName> {
+pub(crate) fn group_name(name: &[u8]) -> Result<GroupName> {
     let mut g = GroupName::new();
     for b in name {
         g.push(*b).map_err(|_| Error::TooLarge {
@@ -153,7 +153,7 @@ pub struct Places {
     groups: [Option<Group>; MAX_GROUPS],
     core_group: [Option<u8>; CORE_CAP + 1],
     core_apps: [u16; CORE_CAP + 1],
-    cages: [Option<CagePlace>; SLOT_CAP + 1],
+    cages: SlotVec<CagePlace>,
 }
 
 impl Places {
@@ -165,7 +165,7 @@ impl Places {
             groups: [const { None }; MAX_GROUPS],
             core_group: [None; CORE_CAP + 1],
             core_apps: [0; CORE_CAP + 1],
-            cages: [None; SLOT_CAP + 1],
+            cages: SlotVec::new(),
         }
     }
 
@@ -241,7 +241,7 @@ impl Places {
                 gid
             }
         };
-        Ok(self.reserve(slot, Core::OS, 1, Some(gid)))
+        self.reserve(slot, Core::OS, 1, Some(gid))
     }
 
     /// Een app-core zonder groepsclaim en zonder levende kooi.
@@ -268,26 +268,33 @@ impl Places {
     /// erin, niet alleen de primaire: gemeten 05-09 op de M4 landde een
     /// 1-core app op de tweede core van een SMP-buur en deed 3144 µs per
     /// system call in plaats van 23. Geen fout, geen logregel, 137x trager.
-    fn reserve(&mut self, slot: Slot, primary: Core, span: usize, group: Option<usize>) -> Core {
+    fn reserve(
+        &mut self,
+        slot: Slot,
+        primary: Core,
+        span: usize,
+        group: Option<usize>,
+    ) -> Result<Core> {
+        self.cages.insert(
+            slot,
+            CagePlace {
+                primary,
+                span,
+                group,
+            },
+        )?;
         for c in primary.get()..primary.get() + span {
             if let Some(n) = self.core_apps.get_mut(c) {
                 *n = n.saturating_add(1);
             }
         }
-        if let Some(p) = self.cages.get_mut(slot.get()) {
-            *p = Some(CagePlace {
-                primary,
-                span,
-                group,
-            });
-        }
-        primary
+        Ok(primary)
     }
 
     /// Kiest de fysieke core(s) voor `slot`. Idempotent per kooi: een tweede
     /// aanvraag geeft dezelfde core terug.
     pub fn place(&mut self, cores: &impl Cores, slot: Slot, spec: &Placement) -> Result<Core> {
-        if let Some(Some(p)) = self.cages.get(slot.get()) {
+        if let Some(p) = self.cages.get(slot) {
             return Ok(p.primary);
         }
         let pool_cores = spec.pool_cores.max(1);
@@ -336,7 +343,7 @@ impl Places {
             }
         }
         let core = best.ok_or(Error::NoCores { cores: 1 })?;
-        Ok(self.reserve(slot, core, 1, Some(gid)))
+        self.reserve(slot, core, 1, Some(gid))
     }
 
     /// [`Self::place`], en "waarever": een dedicated job van één core die
@@ -438,7 +445,7 @@ impl Places {
             if self.run_free(cores, c, n, class)
                 && let Some(core) = Core::new(c)
             {
-                return Ok(self.reserve(slot, core, n, None));
+                return self.reserve(slot, core, n, None);
             }
         }
         Err(Error::NoCores { cores: n })
@@ -447,7 +454,7 @@ impl Places {
     /// Geeft de core(s) van een gestopte kooi terug. Een pool-core blijft van
     /// de groep tot zijn laatste kooi weg is; dan komt de hele pool vrij.
     pub fn release(&mut self, slot: Slot) {
-        let Some(p) = self.cages.get_mut(slot.get()).and_then(Option::take) else {
+        let Some(p) = self.cages.remove(slot) else {
             return;
         };
         for c in p.primary.get()..p.primary.get() + p.span.max(1) {
@@ -477,18 +484,14 @@ impl Places {
     /// De primaire core en de span van `slot` (voor de tests).
     #[cfg(test)]
     pub(crate) fn placement_of(&self, slot: Slot) -> Option<(Core, usize)> {
-        self.cages
-            .get(slot.get())
-            .copied()
-            .flatten()
-            .map(|p| (p.primary, p.span))
+        self.cages.get(slot).map(|p| (p.primary, p.span))
     }
 
     /// De naam en de VOLLEDIGE pool van de groep van `slot`, ook cores
     /// zonder bewoner (voor de flip).
     #[must_use]
     pub fn group_of(&self, slot: Slot) -> Option<(&GroupName, &[Core])> {
-        let gid = self.cages.get(slot.get()).copied().flatten()?.group?;
+        let gid = self.cages.get(slot)?.group?;
         let g = self.groups.get(gid)?.as_ref()?;
         Some((&g.name, g.cores.as_slice()))
     }
@@ -530,7 +533,7 @@ impl Places {
                 }
             }),
         };
-        self.reserve(slot, primary, span, gid);
+        self.reserve(slot, primary, span, gid)?;
         Ok(())
     }
 }

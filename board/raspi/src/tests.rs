@@ -102,10 +102,7 @@ fn the_slot_plan_validates_and_keeps_the_cage_in_the_device_window() {
         p
     };
     let p = slots::plan(4, 0).unwrap();
-    assert_eq!(
-        (p.app_cores(), p.max_slots()),
-        (3, abi::layout::SLOTS_DEFAULT)
-    );
+    assert_eq!(p.app_cores(), 3);
     assert_eq!(p.vec_base_pa().0, map::CAGE_PA);
     for r in p.pool() {
         assert!(r.base >= map::FIXED_END);

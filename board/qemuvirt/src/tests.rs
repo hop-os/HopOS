@@ -13,10 +13,7 @@ fn a_dtb_outside_the_kern_ram_is_refused() {
 fn the_slot_plan_validates_and_keeps_clear_of_the_kern() {
     use crate::slots::{self, STAGE_HDR_PA, STAGE_MAX, STAGE_PA};
     let p = slots::plan(4, 0).unwrap();
-    assert_eq!(
-        (p.app_cores(), p.max_slots()),
-        (3, abi::layout::SLOTS_DEFAULT)
-    );
+    assert_eq!(p.app_cores(), 3);
     assert_eq!(p.vec_base_pa().0, slots::CAGE_PA);
     let stage = abi::Region::new(STAGE_HDR_PA, STAGE_PA + STAGE_MAX - STAGE_HDR_PA);
     for r in p.pool() {
@@ -32,10 +29,7 @@ fn the_slot_plan_validates_and_keeps_clear_of_the_kern() {
     assert_eq!(slots::plan(1, 0).unwrap().app_cores(), 1);
     // Twee cores met de kern op core 1: app-core 1 is fysiek core 0.
     let p = slots::plan(2, 1).unwrap();
-    assert_eq!(
-        (p.app_cores(), p.max_slots(), p.os_core()),
-        (1, abi::layout::SLOTS_DEFAULT, 1)
-    );
+    assert_eq!((p.app_cores(), p.os_core()), (1, 1));
     assert_eq!(p.phys_core(abi::layout::Core::new(1).unwrap()), 0);
     assert!(slots::plan(2, 2).is_err());
 }

@@ -50,16 +50,15 @@
 //! het ijzer niet op, dan gaat het terug ([`Request::ReleaseDevice`]).
 
 use crate::cage::{Cage, Console, Cores, PortError, Power, Status, Timer};
+use crate::cageheap::{CageHeap, Chunk, Lend};
 use crate::grants::{Grants, NoGrants};
 use crate::kernflip::{MAX_FLIP_JOB, MAX_FLIP_MOUNTS, MAX_FLIP_PATH, MAX_FLIP_PORTS};
 use crate::partmem::{Owned, Partition, PartitionPool, Stopped};
 use crate::pool::{GroupName, Placement, Places};
-use crate::{Core, Error, GRAIN, Region, Result, SLOT_CAP, Slot};
+use crate::{Core, Error, GRAIN, Region, Result, Slot, SlotVec};
+use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::sync::atomic::{
-    AtomicU64,
-    Ordering::{AcqRel, Acquire, Relaxed, Release},
-};
+use core::cell::Cell;
 use core::time::Duration;
 use sync::mpsc::Mailbox;
 use sync::{Either, LocalCell, Oneshot, Signal, oneshot, select, yield_now};
@@ -161,8 +160,12 @@ pub struct Mount {
 /// Wat een start vraagt.
 #[derive(Clone, Debug)]
 pub struct StartSpec {
-    /// Het slot.
-    pub slot: Slot,
+    /// Het slot, of `None`: de actor kiest het laagste vrije, zoals een fd
+    /// (geen maximum, alleen "past het").
+    pub slot: Option<Slot>,
+    /// Een slot dat de actor bij `slot: None` overslaat: dat van Hop, dat
+    /// tijdens zijn herstart even leeg staat.
+    pub avoid: Option<Slot>,
     /// De zichtbare partitie in bytes (`memory_limit`, inclusief ABI-staart).
     pub mem_limit: u64,
     /// De core-vraag.
@@ -176,11 +179,22 @@ pub struct StartSpec {
 }
 
 impl StartSpec {
-    /// Een spec zonder job, volumes of poorten.
+    /// Een spec voor `slot`, zonder job, volumes of poorten.
     #[must_use]
     pub fn new(slot: Slot, mem_limit: u64, placement: Placement) -> StartSpec {
         StartSpec {
-            slot,
+            slot: Some(slot),
+            ..StartSpec::free(mem_limit, placement, None)
+        }
+    }
+
+    /// Een spec waarvoor de actor het slot kiest: het laagste vrije, behalve
+    /// `avoid`.
+    #[must_use]
+    pub fn free(mem_limit: u64, placement: Placement, avoid: Option<Slot>) -> StartSpec {
+        StartSpec {
+            slot: None,
+            avoid,
             mem_limit,
             placement,
             job: Vec::new(),
@@ -270,11 +284,13 @@ pub enum Request {
     },
     /// De status van een slot.
     Status(Slot),
-    /// Het eerste slot zonder eigenaar, behalve die in `skip` (bit `i - 1`
-    /// voor slot `i`); het antwoord is [`Response::Free`].
-    FirstEmpty {
-        /// Wat de vrager zelf al bezet weet.
-        skip: SlotSet,
+    /// De bezette slots (een bewoner, of een stroom) boven `after`,
+    /// oplopend en hoogstens `max`; het antwoord is [`Response::Occupied`].
+    Occupied {
+        /// Het slot waarna de lijst begint (0 = vanaf het begin).
+        after: usize,
+        /// Hoeveel er hoogstens terugkomen.
+        max: usize,
     },
     /// De servicer zag een SMP-verzoek (vuur-en-vergeet).
     Smp(Slot),
@@ -300,11 +316,6 @@ pub enum Request {
     },
 }
 
-/// Een verzameling slots: bit `i - 1` voor slot `i`.
-pub type SlotSet = u128;
-
-const _: () = assert!(SLOT_CAP <= SlotSet::BITS as usize);
-
 /// Het antwoord van de actor.
 #[derive(Debug)]
 pub enum Response {
@@ -314,10 +325,10 @@ pub enum Response {
     Done,
     /// De status.
     Status(SlotStatus),
-    /// Het slot van [`Request::FirstEmpty`]; `None` als alles bezet is.
-    Free(Option<Slot>),
+    /// De slots van [`Request::Occupied`].
+    Occupied(Vec<Slot>),
     /// De bewoners voor het handoff-blob van de kern-flip.
-    Snapshot(Vec<SlotState>),
+    Snapshot(Vec<SlotState>, Vec<Chunk>),
     /// De env van de start, met wat de grant-aanbieder erbij zette.
     Env(Vec<u8>),
     /// Het blok van een [`Request::ReserveDevice`].
@@ -400,90 +411,73 @@ pub async fn call<'a, const N: usize>(
         .map_err(|_| Error::Busy)
 }
 
-/// De besturing van één servicer-taak.
+/// Eén levensduur van een slot, van de registratie tot de evict: de
+/// besturing van zijn servicer-taak en wat de system-API en de hopfs-actor
+/// erover lezen. De lifecycle-actor maakt hem bij de plaatsing
+/// ([`Servicers::open`]) en haalt hem bij de stop uit de tabel
+/// ([`Servicers::close`]); hij is weg als de laatste houder hem loslaat (de
+/// servicer, een open system-verbinding). Geen tabel van een vast aantal:
+/// een slot bestaat van de plaatsing tot de stop.
 ///
-/// `stop` is een [`Signal`] en geen `Stop`: een `Stop` gaat nooit meer uit,
-/// en de taak dient het ene slot over vele levensduren. De servicer is de
-/// enige wachter; de actor neemt de oude bel weg vóór een nieuwe start.
+/// `stop` is een [`Signal`]: de servicer is de enige wachter.
 pub struct ServicerCtl {
+    life: Life,
     stop: Signal,
     gone: Signal,
-    start: Signal,
-    /// De open system-verbindingen van één levensduur: de generatie in de
-    /// hoge 32 bits, het aantal in de lage. Eén atomic, want samen
-    /// betekenen ze iets (handboek §1.3): een plaats hoort bij een
-    /// levensduur, niet bij het slot.
-    conns: AtomicU64,
-    base: AtomicU64,
-    size: AtomicU64,
+    /// De bel van de servicer: werk in de outbox, een SMP-verzoek of een
+    /// gevallen context, gezien bij de kick van de app-core of na een beurt
+    /// op de OS-core ([`Servicers::ring`], docs/sequence-hopos.md §13.3).
+    bell: Signal,
+    /// De open system-verbindingen van deze levensduur. Die van een vorige
+    /// levensduur tellen niet: zij houden hun eigen besturing vast. Tot
+    /// 24-10 deelde het slot één teller over zijn levensduren, en een nieuwe
+    /// Hop die binnen milliseconden na zijn start belde (de ORION, na POST
+    /// /restart), vond de plaatsen van de oude nog bezet: zijn kloktaak
+    /// werd geweigerd, en zonder klok weigerde zijn TLS elke download.
+    conns: Cell<u32>,
+    part: Region,
+    /// De volume-tabel (langste `local` eerst); `None` is "geen zicht", en
+    /// dan weigert elke bestandscall.
+    mounts: Option<Vec<Mount>>,
+    /// De jobnaam (de naamruimte van de store-ops); `None` is geen job, en
+    /// dan weigert elke store-op.
+    job: Option<Vec<u8>>,
 }
 
 impl ServicerCtl {
-    const fn new() -> ServicerCtl {
-        ServicerCtl {
-            stop: Signal::new(),
-            gone: Signal::new(),
-            start: Signal::new(),
-            conns: AtomicU64::new(0),
-            base: AtomicU64::new(0),
-            size: AtomicU64::new(0),
+    /// Probeert een system-verbinding van deze levensduur te claimen
+    /// (hooguit `max`).
+    pub fn try_conn(&self, max: u8) -> bool {
+        let n = self.conns.get();
+        if n >= u32::from(max) {
+            return false;
         }
+        self.conns.set(n + 1);
+        true
     }
 
-    /// Probeert een system-verbinding van levensduur `generation` te
-    /// claimen (hooguit `max`). De plaatsen van een oudere levensduur tellen
-    /// niet: wie als eerste van een nieuwe levensduur claimt, begint bij
-    /// nul. Tot 24-10 deelde het slot één teller over zijn levensduren, en
-    /// een nieuwe Hop die binnen milliseconden na zijn start belde (de
-    /// ORION, na POST /restart), vond de plaatsen van de oude nog bezet tot
-    /// hun serve-taken op hun tik ([`crate::system::LIFE_TICK`]) zagen dat
-    /// die levensduur voorbij was: zijn kloktaak werd geweigerd, en zonder
-    /// klok weigerde zijn TLS elke download.
-    pub fn try_conn(&self, generation: u32, max: u8) -> bool {
-        let mut cur = self.conns.load(Acquire);
-        loop {
-            let (g, n) = split_conns(cur);
-            let n = if g == generation { n } else { 0 };
-            if n >= u32::from(max) {
-                return false;
-            }
-            let new = (u64::from(generation) << 32) | u64::from(n + 1);
-            match self.conns.compare_exchange_weak(cur, new, AcqRel, Acquire) {
-                Ok(_) => return true,
-                Err(v) => cur = v,
-            }
-        }
+    /// Geeft een system-verbinding van deze levensduur terug.
+    pub fn drop_conn(&self) {
+        self.conns.set(self.conns.get().saturating_sub(1));
     }
 
-    /// Geeft een system-verbinding van levensduur `generation` terug. Is
-    /// de teller al van een nieuwere levensduur, dan niets: die plaats telde
-    /// daar nooit mee, en aftrekken zou de nieuwe onderlopen.
-    pub fn drop_conn(&self, generation: u32) {
-        let mut cur = self.conns.load(Acquire);
-        loop {
-            let (g, n) = split_conns(cur);
-            if g != generation || n == 0 {
-                return;
-            }
-            let new = (u64::from(g) << 32) | u64::from(n - 1);
-            match self.conns.compare_exchange_weak(cur, new, AcqRel, Acquire) {
-                Ok(_) => return,
-                Err(v) => cur = v,
-            }
-        }
-    }
-
-    /// Het aantal open system-verbindingen van levensduur `generation`.
+    /// Het aantal open system-verbindingen van deze levensduur.
     #[must_use]
-    pub fn conns(&self, generation: u32) -> u32 {
-        let (g, n) = split_conns(self.conns.load(Relaxed));
-        if g == generation { n } else { 0 }
+    pub fn conns(&self) -> u32 {
+        self.conns.get()
     }
-}
 
-/// De generatie en het aantal uit het woord van [`ServicerCtl::conns`].
-fn split_conns(v: u64) -> (u32, u32) {
-    ((v >> 32) as u32, v as u32)
+    /// De generatie van deze levensduur.
+    #[must_use]
+    pub fn generation(&self) -> u32 {
+        self.life.generation
+    }
+
+    /// Meldt dat de servicer weg is (de servicer zelf; een toets die geen
+    /// servicer draait).
+    pub fn set_gone(&self) {
+        self.gone.set();
+    }
 }
 
 /// Eén regel van de servicer-tabel: de levende levensduur van een slot.
@@ -500,33 +494,19 @@ struct Life {
     adopted: bool,
 }
 
-/// De servicers van alle slots: per slot de besturing, plus de leesbare
-/// tabel van wie er NU leeft (met de generatie van zijn levensduur).
+/// De servicers van de levende slots: per slot de besturing van zijn
+/// levensduur ([`ServicerCtl`]), op slotnummer ([`SlotVec`]).
 ///
-/// Naast de generatie staat per slot de volume-tabel van die levensduur (Go:
-/// `servicer.mounts`; de eigen root is `/.tasks/slot<N>` en volgt uit het
-/// slot): de actor schrijft hem bij de start, de hopfs-actor leest hem kort
-/// bij elke bestandscall ([`crate::rpc::resolve`]). `None` is "geen zicht":
-/// elke bestandscall wordt dan geweigerd.
+/// De actor schrijft, de servicers, de system-listener en de hopfs-actor
+/// lezen kort (handboek §1.1); de eigen root van een slot is
+/// `/.tasks/slot<N>` en volgt uit het slot.
 ///
-/// Bij de generatie staat ook of die levensduur geadopteerd is
-/// ([`Servicers::root_kept`]): de lifecycle-actor schrijft het bij de
-/// registratie, de hopfs-actor leest het bij het klaarzetten van de root.
-///
-/// Elke wissel in de tabel luidt [`Servicers::changed`]: de committer hoort
-/// een stop zo, en hoeft niet rond te kijken.
+/// Elke wissel in de tabel luidt [`Servicers::changed`], en een stop zet
+/// het slot klaar voor [`Servicers::take_stopped`]: de committer hoort een
+/// stop zo, en hoeft niet rond te kijken.
 pub struct Servicers {
-    ctl: [ServicerCtl; SLOT_CAP + 1],
-    /// Per slot de bel van zijn servicer: werk in de outbox, een
-    /// SMP-verzoek of een gevallen context, gezien bij de kick van de
-    /// app-core of na een beurt op de OS-core ([`Servicers::ring`],
-    /// docs/sequence-hopos.md §13.3). Naast `ctl`, niet erin: één tabel
-    /// van 129 controls met de bel erbij is te groot voor de stack van een
-    /// `const`.
-    bells: [Signal; SLOT_CAP + 1],
-    table: LocalCell<[Option<Life>; SLOT_CAP + 1]>,
-    mounts: LocalCell<[Option<Vec<Mount>>; SLOT_CAP + 1]>,
-    jobs: LocalCell<[Option<Vec<u8>>; SLOT_CAP + 1]>,
+    table: LocalCell<SlotVec<Rc<ServicerCtl>>>,
+    stopped: LocalCell<Option<Slot>>,
     changed: Signal,
 }
 
@@ -535,11 +515,8 @@ impl Servicers {
     #[must_use]
     pub const fn new() -> Servicers {
         Servicers {
-            ctl: [const { ServicerCtl::new() }; SLOT_CAP + 1],
-            bells: [const { Signal::new() }; SLOT_CAP + 1],
-            table: LocalCell::cell([None; SLOT_CAP + 1]),
-            mounts: LocalCell::cell([const { None }; SLOT_CAP + 1]),
-            jobs: LocalCell::cell([const { None }; SLOT_CAP + 1]),
+            table: LocalCell::cell(SlotVec::new()),
+            stopped: LocalCell::cell(None),
             changed: Signal::new(),
         }
     }
@@ -549,8 +526,8 @@ impl Servicers {
     /// een app-core en na een beurt op de OS-core; de servicer zelf pollt
     /// niet (O10).
     pub fn ring(&self, slot: Slot) {
-        if let Some(b) = self.bells.get(slot.get()) {
-            b.set();
+        if let Some(c) = self.table.borrow().get(slot) {
+            c.bell.set();
         }
     }
 
@@ -560,54 +537,39 @@ impl Servicers {
         self.changed.wait()
     }
 
+    /// Het slot dat als laatste stopte sinds de vorige vraag (de committer
+    /// legt dan de boom vast).
+    pub fn take_stopped(&self) -> Option<Slot> {
+        self.stopped.borrow_mut().take()
+    }
+
     /// Doet `f` op de jobnaam van de levende bewoner van `slot` (leeg = geen
     /// job): de naamruimte van de store-ops ([`crate::store`]), binnen één
     /// lening. `None` zonder levende servicer.
     pub fn with_job<R>(&self, slot: Slot, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
-        self.current(slot)?;
-        let t = self.jobs.borrow();
-        let job = t.get(slot.get())?.as_deref().unwrap_or(&[]);
-        Some(f(job))
-    }
-
-    /// Zet de jobnaam van `slot` (zoals de volumes: de lifecycle-actor
-    /// schrijft bij de registratie en wist bij de evict). `None` is geen
-    /// job, en dan weigert elke store-op.
-    pub(crate) fn set_job(&self, slot: Slot, job: Option<Vec<u8>>) {
-        if let Some(e) = self.jobs.borrow_mut().get_mut(slot.get()) {
-            *e = job;
-        }
+        let t = self.table.borrow();
+        let c = t.get(slot)?;
+        Some(f(c.job.as_deref().unwrap_or(&[])))
     }
 
     /// Doet `f` op de volume-tabel van `slot` (langste `local` eerst),
     /// binnen één lening. `None` als het slot geen zicht heeft.
     pub fn with_mounts<R>(&self, slot: Slot, f: impl FnOnce(&[Mount]) -> R) -> Option<R> {
-        self.mounts
-            .borrow()
-            .get(slot.get())
-            .and_then(Option::as_ref)
-            .map(|m| f(m))
+        let t = self.table.borrow();
+        t.get(slot)?.mounts.as_deref().map(f)
     }
 
-    /// Zet de volume-tabel van `slot` (genormaliseerd door
-    /// [`crate::rpc::mount_table`]). Alleen de lifecycle-actor schrijft.
-    pub(crate) fn set_mounts(&self, slot: Slot, m: Option<Vec<Mount>>) {
-        if let Some(e) = self.mounts.borrow_mut().get_mut(slot.get()) {
-            *e = m;
-        }
-    }
-
-    /// De besturing van `slot`.
+    /// De besturing van de levende levensduur van `slot`.
     #[must_use]
-    pub fn ctl(&self, slot: Slot) -> Option<&ServicerCtl> {
-        self.ctl.get(slot.get())
+    pub fn ctl(&self, slot: Slot) -> Option<Rc<ServicerCtl>> {
+        self.table.borrow().get(slot).cloned()
     }
 
     /// De generatie van de levende servicer van `slot`, of `None`. Eén
     /// lening, geen `.await`.
     #[must_use]
     pub fn current(&self, slot: Slot) -> Option<u32> {
-        self.life(slot).map(|l| l.generation)
+        self.table.borrow().get(slot).map(|c| c.life.generation)
     }
 
     /// Houdt levensduur `generation` van `slot` zijn root? Waar alleen als
@@ -616,41 +578,56 @@ impl Servicers {
     /// gewone start (ook een herstart na de flip) begint leeg.
     #[must_use]
     pub fn root_kept(&self, slot: Slot, generation: u32) -> bool {
-        self.life(slot)
-            .is_some_and(|l| l.adopted && l.generation == generation)
+        self.table
+            .borrow()
+            .get(slot)
+            .is_some_and(|c| c.life.adopted && c.life.generation == generation)
     }
 
-    fn life(&self, slot: Slot) -> Option<Life> {
-        self.table.borrow().get(slot.get()).copied().flatten()
-    }
-
-    /// De partitie van de levende bewoner van `slot`: de basis en maat die
-    /// de actor bij de start in de besturing zette. `None` zonder levende
-    /// servicer (gestopt, of nog niet gestart) of met een lege partitie:
-    /// een codec-grant op een slot dat vrijkomt, weigert dan dicht.
-    ///
-    /// De actor zet basis en maat vóór hij de generatie publiceert
-    /// (`register`), en haalt de generatie weg vóór er iets vrijkomt
-    /// (`evict`); wie hier een partitie krijgt, krijgt die van de levensduur
-    /// die [`Servicers::current`] op dat moment zag. Twee atomics die samen
-    /// iets betekenen, zijn hier veilig omdat er maar één schrijver is en
-    /// de lezer binnen één synchrone beurt blijft (handboek §1.3).
+    /// De partitie van de levende bewoner van `slot`. `None` zonder levende
+    /// servicer (gestopt, of nog niet gestart): een codec-grant op een slot
+    /// dat vrijkomt, weigert dan dicht. De actor haalt de levensduur weg
+    /// vóór er iets vrijkomt (`evict`); wie hier een partitie krijgt, krijgt
+    /// die van de levensduur die [`Servicers::current`] op dat moment zag.
     #[must_use]
     pub fn partition(&self, slot: Slot) -> Option<Region> {
-        self.current(slot)?;
-        let ctl = self.ctl(slot)?;
-        let size = ctl.size.load(Acquire);
-        (size > 0).then(|| Region::new(ctl.base.load(Acquire), size))
+        self.table.borrow().get(slot).map(|c| c.part)
     }
 
-    fn set(&self, slot: Slot, v: Option<Life>) -> Option<Life> {
-        let mut t = self.table.borrow_mut();
-        let old = match t.get_mut(slot.get()) {
-            Some(e) => core::mem::replace(e, v),
-            None => return None,
-        };
+    /// Publiceert een nieuwe levensduur van `slot`; geeft zijn besturing
+    /// voor de servicer-taak. Faalt alleen als de tabel niet kan groeien.
+    fn open(
+        &self,
+        slot: Slot,
+        life: Life,
+        part: Region,
+        mounts: Option<Vec<Mount>>,
+        job: Option<Vec<u8>>,
+    ) -> Result<Rc<ServicerCtl>> {
+        // `Rc::new` kent op stable Rust geen faalbare vorm; de besturing is
+        // een handvol woorden, en een heap die dat niet meer kan geven, is
+        // een kern die luid valt.
+        let ctl = Rc::new(ServicerCtl {
+            life,
+            stop: Signal::new(),
+            gone: Signal::new(),
+            bell: Signal::new(),
+            conns: Cell::new(0),
+            part,
+            mounts,
+            job,
+        });
+        self.table.borrow_mut().insert(slot, Rc::clone(&ctl))?;
         self.changed.set();
-        old
+        Ok(ctl)
+    }
+
+    /// Haalt de levensduur van `slot` uit de tabel en geeft zijn besturing.
+    fn close(&self, slot: Slot) -> Option<Rc<ServicerCtl>> {
+        let old = self.table.borrow_mut().remove(slot)?;
+        *self.stopped.borrow_mut() = Some(slot);
+        self.changed.set();
+        Some(old)
     }
 }
 
@@ -672,15 +649,15 @@ pub trait Outbox {
     fn smp_pending(&self) -> bool;
 }
 
-/// De servicer-taak van één slot: wacht op een start, dient die levensduur,
-/// meldt `gone`, en opnieuw. Eén taak per slot uit een vaste pool; er wordt
-/// nooit per start gespawnd.
+/// De servicer-taak van één levensduur van `slot`: dient hem en meldt
+/// `gone`. De kooi spawnt er één per plaatsing ([`Cage::serve`]), met de
+/// besturing uit [`Servicers::open`].
 ///
-/// `open` opent de outbox voor de partitie van de nieuwe levensduur.
+/// `open` opent de outbox voor de partitie van de levensduur.
 pub async fn servicer_task<'a, O, T, L, const N: usize>(
     slot: Slot,
-    svc: &Servicers,
-    mut open: impl FnMut(Region) -> O,
+    ctl: Rc<ServicerCtl>,
+    open: impl FnOnce(Region) -> O,
     timer: &T,
     log: &L,
     inbox: &Mailbox<Envelope<'a>, N>,
@@ -690,15 +667,8 @@ pub async fn servicer_task<'a, O, T, L, const N: usize>(
     T: Timer,
     L: Console,
 {
-    let (Some(ctl), Some(bell)) = (svc.ctl(slot), svc.bells.get(slot.get())) else {
-        return;
-    };
-    loop {
-        ctl.start.wait().await;
-        let part = Region::new(ctl.base.load(Acquire), ctl.size.load(Acquire));
-        serve(slot, (ctl, bell), &mut open(part), timer, log, inbox, buf).await;
-        ctl.gone.set();
-    }
+    serve(slot, &ctl, &mut open(ctl.part), timer, log, inbox, buf).await;
+    ctl.gone.set();
 }
 
 /// Eén levensduur: outbox lezen, logs doorzetten, SMP-verzoeken melden.
@@ -707,7 +677,7 @@ pub async fn servicer_task<'a, O, T, L, const N: usize>(
 /// de termijn van [`IDLE_GRACE`] erbij.
 async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
     slot: Slot,
-    (ctl, bell): (&ServicerCtl, &Signal),
+    ctl: &ServicerCtl,
     out: &mut O,
     timer: &T,
     log: &L,
@@ -758,7 +728,7 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
             ));
             return;
         }
-        let wake = select(ctl.stop.wait(), bell.wait());
+        let wake = select(ctl.stop.wait(), ctl.bell.wait());
         let woke = if out.live() {
             saw_live = true;
             wake.await
@@ -846,6 +816,11 @@ pub struct SlotState {
     pub ports: Vec<u16>,
     /// De volumes.
     pub mounts: Vec<Mount>,
+    /// De PA van zijn kooi-blok (stage-2-tabellen en ctx-blok), uit het
+    /// kooi-geheugen.
+    pub cage_block: u64,
+    /// Zijn VMID (op riscv de ASID).
+    pub vmid: u32,
 }
 
 /// De lifecycle-actor. Eén taak; hij bezit de pool, de plaatsing, de
@@ -856,8 +831,11 @@ pub struct Lifecycle<'s, C, K, T, L, G = NoGrants> {
     timer: T,
     log: L,
     parts: PartitionPool,
+    /// Het kooi-geheugen (de blokken van de kooi buiten de partities); het
+    /// komt uit `parts` en gaat erin terug.
+    heap: CageHeap,
     places: Places,
-    residents: [Option<Resident>; SLOT_CAP + 1],
+    residents: SlotVec<Resident>,
     svc: &'s Servicers,
     generation: u32,
     grants: G,
@@ -887,8 +865,9 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             timer,
             log,
             parts,
+            heap: CageHeap::new(),
             places,
-            residents: [const { None }; SLOT_CAP + 1],
+            residents: SlotVec::new(),
             svc,
             generation: 0,
             grants,
@@ -920,12 +899,14 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                 self.stop(slot, timeout).await.map(|()| Response::Done)
             }
             Request::Status(slot) => Ok(Response::Status(self.status(slot))),
-            Request::FirstEmpty { skip } => Ok(Response::Free(self.first_empty(skip))),
+            Request::Occupied { after, max } => self.occupied(after, max).map(Response::Occupied),
             Request::Smp(slot) => {
                 self.smp(slot);
                 Ok(Response::Done)
             }
-            Request::Snapshot => self.snapshot().map(Response::Snapshot),
+            Request::Snapshot => self
+                .snapshot()
+                .and_then(|s| Ok(Response::Snapshot(s, try_vec(self.heap.chunks())?))),
             Request::ReserveDevice { size, what } => {
                 self.reserve_device(size, what).map(Response::Device)
             }
@@ -980,25 +961,29 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
     }
 
     fn resident(&self, slot: Slot) -> Option<&Resident> {
-        self.residents.get(slot.get()).and_then(Option::as_ref)
+        self.residents.get(slot)
     }
 
     fn resident_mut(&mut self, slot: Slot) -> Option<&mut Resident> {
-        self.residents.get_mut(slot.get()).and_then(Option::as_mut)
+        self.residents.get_mut(slot)
     }
 
     /// Stap 1 van een start: plaats, reserveer en wis (E1, E3). De claim
     /// komt pas na de toetsen; een geweigerde claim laat niets achter.
     async fn claim(&mut self, spec: StartSpec) -> Result<ImageGrant> {
-        let slot = spec.slot;
         // De volumes eerst: een spec die buiten zijn zicht wil, claimt niets.
         crate::rpc::mount_table(&spec.mounts)?;
-        if slot.get() > self.parts.max_slots() {
-            return Err(Error::SlotRange {
-                slot: slot.get(),
-                max: self.parts.max_slots(),
-            });
-        }
+        // Geen maximum: het laagste nummer zonder bewoner en zonder
+        // partitie. Of het past, zegt de plaatsing hieronder.
+        let slot = match spec.slot {
+            Some(s) => s,
+            None => self
+                .residents
+                .lowest_free(|s| Some(s) != spec.avoid && self.parts.partition_of(s).is_none())
+                .ok_or(Error::Full {
+                    cap: abi::layout::SLOT_MAX,
+                })?,
+        };
         if self.resident(slot).is_some() || self.parts.partition_of(slot).is_some() {
             return Err(Error::StillOwned { slot: slot.get() });
         }
@@ -1042,16 +1027,19 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         }
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
-        if let Some(e) = self.residents.get_mut(slot.get()) {
-            *e = Some(Resident {
-                held: Held::Streaming,
-                core,
-                span,
-                generation,
-                job: spec.job,
-                mounts: spec.mounts,
-                ports: spec.ports,
-            });
+        let resident = Resident {
+            held: Held::Streaming,
+            core,
+            span,
+            generation,
+            job: spec.job,
+            mounts: spec.mounts,
+            ports: spec.ports,
+        };
+        if let Err(e) = self.residents.insert(slot, resident) {
+            part.abandon(&mut self.parts);
+            self.places.release(slot);
+            return Err(e);
         }
         Ok(ImageGrant { part, generation })
     }
@@ -1088,7 +1076,12 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             self.abort(grant);
             return Err(e);
         }
-        if let Err(e) = self.cage.build(slot, region, entry, core, span) {
+        let mut mem = Lend {
+            heap: &mut self.heap,
+            pool: &mut self.parts,
+            map: C::MAP_CAGE,
+        };
+        if let Err(e) = self.cage.build(slot, region, entry, core, span, &mut mem) {
             // Nooit gedispatcht: bevestigde afwezigheid van uitvoering. De
             // poorten gingen al open; die horen bij deze start en gaan dicht.
             if !ports.is_empty() {
@@ -1120,7 +1113,20 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             generation,
             adopted: false,
         };
-        self.register(slot, life, region);
+        // Een servicer die er niet bij kan, is een weigering zoals een
+        // mislukte bouw: er draait nog niets.
+        if let Err(e) = self.register(slot, life, region) {
+            self.log.log(format_args!(
+                "slot {slot}: no servicer: {e}, start refused HOPOS_SLOT_SPAWN"
+            ));
+            if !ports.is_empty() {
+                self.cage.unpublish(slot);
+            }
+            self.grants.release(slot);
+            self.cage.detach(slot).await;
+            self.abort(grant);
+            return Err(e);
+        }
         // Een startschot dat faalt of niet aankomt, heeft een onbekende
         // uitkomst (ook een geweigerde CPU_ON: de koude boot geeft de core
         // schoon terug, zonder een tweede boekhouding van "nooit gelopen").
@@ -1177,9 +1183,11 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
     }
 
     /// Publiceert levensduur `life` van `slot` in de servicer-tabel, met
-    /// zijn volumes, jobnaam en partitie, en luidt het startschot van zijn
-    /// servicer.
-    fn register(&mut self, slot: Slot, life: Life, region: Region) {
+    /// zijn volumes, jobnaam en partitie, en geeft hem zijn servicer
+    /// ([`Cage::serve`]). Faalt als de tabel of de servicer er niet bij kan:
+    /// dan is er nog niets gedispatcht, en is het een weigering ("past
+    /// niet").
+    fn register(&mut self, slot: Slot, life: Life, region: Region) -> Result {
         // De volumes van deze levensduur, genormaliseerd. De claim toetste
         // ze al; faalt het hier toch (geheugen, of een geadopteerde spec),
         // dan krijgt het slot geen zicht en weigert elke bestandscall luid,
@@ -1207,22 +1215,21 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                 MountList(m)
             ));
         }
-        self.svc.set_mounts(slot, mounts);
         // Een geheugenweigering hier laat het slot zonder naamruimte: elke
         // store-op wordt dan luid geweigerd, nooit in een verkeerde map.
         let job = self
             .resident(slot)
             .filter(|r| !r.job.is_empty())
             .and_then(|r| try_vec(&r.job).ok());
-        self.svc.set_job(slot, job);
-        if let Some(ctl) = self.svc.ctl(slot) {
-            let _ = ctl.stop.take();
-            let _ = ctl.gone.take();
-            ctl.base.store(region.base, Release);
-            ctl.size.store(region.size, Release);
-            self.svc.set(slot, Some(life));
-            ctl.start.set();
+        let ctl = self.svc.open(slot, life, region, mounts, job)?;
+        if let Err(e) = self.cage.serve(slot, ctl) {
+            self.svc.close(slot);
+            return Err(Error::Cage {
+                slot: slot.get(),
+                code: e.code,
+            });
         }
+        Ok(())
     }
 
     /// De gewone rollback: de grant komt terug en er draaide nooit iets.
@@ -1234,11 +1241,20 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         }
         let slot = grant.slot();
         self.grants.release(slot);
+        self.release_cage(slot);
         grant.part.abandon(&mut self.parts);
         self.places.release(slot);
-        if let Some(e) = self.residents.get_mut(slot.get()) {
-            *e = None;
-        }
+        self.residents.remove(slot);
+    }
+
+    /// Het kooi-geheugen van `slot` terug (de kooi weet wat hij nam).
+    fn release_cage(&mut self, slot: Slot) {
+        let mut mem = Lend {
+            heap: &mut self.heap,
+            pool: &mut self.parts,
+            map: C::MAP_CAGE,
+        };
+        self.cage.release(slot, &mut mem);
     }
 
     /// De env-haak van een lopende start (Go: `prepareGrantedEnv`): de
@@ -1292,12 +1308,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
 
     /// Stopt de servicer van `slot` en wacht tot hij weg is.
     async fn evict(&mut self, slot: Slot) {
-        if self.svc.set(slot, None).is_none() {
-            return;
-        }
-        self.svc.set_mounts(slot, None);
-        self.svc.set_job(slot, None);
-        if let Some(ctl) = self.svc.ctl(slot) {
+        if let Some(ctl) = self.svc.close(slot) {
             ctl.stop.set();
             ctl.gone.wait().await;
         }
@@ -1425,12 +1436,13 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         // schrijft niemand meer in een partitie die vrijkomt.
         self.evict(slot).await;
         self.cage.detach(slot).await;
-        let Some(r) = self.residents.get_mut(slot.get()).and_then(Option::take) else {
+        let Some(r) = self.residents.remove(slot) else {
             return Ok(());
         };
         // Pas na de bevestigde stop gaat de device-grant terug (Go:
-        // `grantRelease` in `releaseSlot`).
+        // `grantRelease` in `releaseSlot`), en het kooi-geheugen.
         self.grants.release(slot);
+        self.release_cage(slot);
         if let Held::Running(p) = r.held {
             p.release(&mut self.parts, Stopped::confirmed(slot))?;
         }
@@ -1465,12 +1477,16 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         }
     }
 
-    /// Het eerste slot zonder bewoner dat niet in `skip` staat.
-    fn first_empty(&self, skip: SlotSet) -> Option<Slot> {
-        (1..=self.parts.max_slots().min(SLOT_CAP))
-            .filter(|i| (skip >> (i - 1)) & 1 == 0)
-            .filter_map(Slot::new)
-            .find(|s| self.resident(*s).is_none())
+    /// De bezette slots boven `after`, oplopend, hoogstens `max`.
+    fn occupied(&self, after: usize, max: usize) -> Result<Vec<Slot>> {
+        let mut out = Vec::new();
+        for (slot, _) in self.residents.iter().filter(|(s, _)| s.get() > after) {
+            if out.len() >= max {
+                break;
+            }
+            try_push(&mut out, slot)?;
+        }
+        Ok(out)
     }
 
     /// Dispatcht een extra SMP-core namens de app. Alleen de breedte uit
@@ -1539,10 +1555,13 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                 return Err(Error::NotLive { slot: slot.get() });
             }
             let Some(r) = r else { continue };
+            let (cage_block, vmid) = self.cage.carry(slot);
             let mut st = SlotState {
                 slot: slot.get(),
                 part_base: region.base,
                 part_size: region.size,
+                cage_block,
+                vmid,
                 core: r.core.get(),
                 cores: r.span,
                 job: try_vec(&r.job)?,
@@ -1578,12 +1597,24 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
 
     /// Herstelt EERST alle eigendomsclaims, daarna de diensten (E8). Een
     /// onbruikbare overdracht is een fout vóór er iets geclaimd is.
-    pub fn adopt(&mut self, states: &[SlotState]) -> Result<usize> {
+    pub fn adopt(&mut self, states: &[SlotState], cage: &[Chunk]) -> Result<usize> {
         validate_adoption(states, &self.cores, &self.places, &self.parts)?;
+        // Het kooi-geheugen eerst: zijn chunks uit de pool, terug op Device
+        // in de map van deze kern, met de bezetting van de vorige.
+        for c in cage {
+            self.parts.adopt_device(c.base, GRAIN)?;
+            if !(C::MAP_CAGE)(Region::new(c.base, GRAIN), true) {
+                return Err(Error::Range {
+                    base: c.base,
+                    size: GRAIN,
+                });
+            }
+        }
+        self.heap.adopt(cage)?;
         for st in states {
             let slot = Slot::new(st.slot).ok_or(Error::SlotRange {
                 slot: st.slot,
-                max: SLOT_CAP,
+                max: abi::layout::SLOT_MAX,
             })?;
             let core = adopted_core(st.core).ok_or(Error::CoreRange {
                 core: st.core,
@@ -1608,8 +1639,9 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             self.places.adopt(slot, core, st.cores, group)?;
             self.generation = self.generation.wrapping_add(1);
             let generation = self.generation;
-            if let Some(e) = self.residents.get_mut(slot.get()) {
-                *e = Some(Resident {
+            self.residents.insert(
+                slot,
+                Resident {
                     held: Held::Running(part),
                     core,
                     span: st.cores,
@@ -1617,8 +1649,8 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                     job: try_vec(&st.job)?,
                     mounts: try_vec(&st.mounts)?,
                     ports: try_vec(&st.ports)?,
-                });
-            }
+                },
+            )?;
         }
         // Dan de device-grants, uit de geërfde kooien en vóór er één bewoner
         // opnieuw verbindt (Go: `grant.Adopt` in `adopt.go`, dat daar
@@ -1645,7 +1677,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                     generation,
                     adopted: true,
                 };
-                self.register(slot, life, Region::new(st.part_base, st.part_size));
+                self.register(slot, life, Region::new(st.part_base, st.part_size))?;
                 self.log.log(format_args!(
                     "slot {slot}: adopted: partition {} MB @ {:#x} on core {} ({} core(s)), ownership restored",
                     st.part_size >> 20,
@@ -1664,12 +1696,13 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
     /// slots, Hop). Een weigering is een regel (`publish`), de bewoner
     /// draait door.
     pub async fn republish(&mut self) {
-        for i in 1..=SLOT_CAP {
-            let Some(slot) = Slot::new(i) else { continue };
-            let ports = match self.resident(slot).map(|r| try_vec(&r.ports)) {
-                Some(Ok(p)) => p,
-                _ => continue,
-            };
+        let mut todo: Vec<(Slot, Vec<u16>)> = Vec::new();
+        for (slot, r) in self.residents.iter() {
+            if let Ok(p) = try_vec(&r.ports) {
+                let _ = try_push(&mut todo, (slot, p));
+            }
+        }
+        for (slot, ports) in todo {
             let _ = self.publish(slot, &ports).await;
         }
     }
@@ -1713,8 +1746,7 @@ pub fn validate_adoption(
             base: s.part_base,
             size: s.part_size,
         };
-        if s.slot < 1
-            || s.slot > parts.max_slots()
+        if Slot::new(s.slot).is_none()
             || s.part_size == 0
             || s.part_base.checked_add(s.part_size).is_none()
             || s.part_base % GRAIN != 0
@@ -1809,6 +1841,7 @@ mod grant_tests;
 pub(crate) mod tests {
     use super::*;
     use crate::cage::CageError;
+    use crate::cageheap::CageMem;
     use crate::partmem::Geometry;
     use crate::pool::tests::FakeCores;
     use crate::testutil::{FakeTimer, block_on, join2};
@@ -1829,19 +1862,25 @@ pub(crate) mod tests {
         Never,
     }
 
+    /// Hoeveel slots de nep-kooi bijhoudt: genoeg voor de toets voorbij de
+    /// oude grens van 128.
+    pub(crate) const FAKE_SLOTS: usize = 512;
+
     pub(crate) struct FakeCage {
         pub(crate) obey: Obey,
-        pub(crate) exit_asked: [bool; 16],
-        pub(crate) revoked: [bool; 16],
+        pub(crate) exit_asked: [bool; FAKE_SLOTS],
+        pub(crate) revoked: [bool; FAKE_SLOTS],
         pub(crate) cleared: Vec<(u64, u64)>,
         pub(crate) built: Vec<(usize, Region, usize, usize)>,
+        /// De kooi-blokken die de bouw nam, per slot.
+        pub(crate) blocks: Vec<(usize, u64)>,
         pub(crate) dispatched: Vec<(usize, usize)>,
         pub(crate) secondaries: Vec<(usize, usize)>,
         pub(crate) fail_dispatch: bool,
         /// Het startschot van een secundaire faalt (onbekende uitkomst).
         pub(crate) fail_secondary: bool,
         pub(crate) fail_build: bool,
-        pub(crate) smp_req: [u64; 16],
+        pub(crate) smp_req: [u64; FAKE_SLOTS],
         pub(crate) calls: Cell<u32>,
         /// Wat er doorgezet werd: slot en poorten, in volgorde.
         pub(crate) published: Vec<(usize, Vec<u16>)>,
@@ -1854,14 +1893,14 @@ pub(crate) mod tests {
         pub(crate) taken: Option<(u16, usize)>,
         /// Cores die nooit stil worden, wat de app ook doet (een secundaire
         /// die de intrekking niet bevestigt).
-        pub(crate) stuck: [bool; 16],
+        pub(crate) stuck: [bool; FAKE_SLOTS],
         /// Welke (slot, core)-paren de stop naar stilte vroeg.
         pub(crate) asked_quiet: RefCell<Vec<(usize, usize)>>,
         /// De termijn in ms die de stop per slot op de vlag zette.
-        pub(crate) exit_grace_ms: [u64; 16],
+        pub(crate) exit_grace_ms: [u64; FAKE_SLOTS],
         /// Slots die boot-pending blijven tot `hog` ingetrokken is (een buur
         /// die nooit yieldt; zonder `hog` voor altijd).
-        pub(crate) boot_pending: [bool; 16],
+        pub(crate) boot_pending: [bool; FAKE_SLOTS],
         /// Wat `SCHED_CURRENT` zegt: de vasthouder van de core.
         pub(crate) hog: Option<usize>,
         /// Draait op het moment van het startschot, met het slot: de eerste
@@ -1874,25 +1913,26 @@ pub(crate) mod tests {
         pub(crate) fn new(obey: Obey) -> FakeCage {
             FakeCage {
                 obey,
-                exit_asked: [false; 16],
-                revoked: [false; 16],
+                exit_asked: [false; FAKE_SLOTS],
+                revoked: [false; FAKE_SLOTS],
                 cleared: Vec::new(),
                 built: Vec::new(),
+                blocks: Vec::new(),
                 dispatched: Vec::new(),
                 secondaries: Vec::new(),
                 fail_dispatch: false,
                 fail_secondary: false,
                 fail_build: false,
-                smp_req: [0; 16],
+                smp_req: [0; FAKE_SLOTS],
                 calls: Cell::new(0),
                 published: Vec::new(),
                 unpublished: Vec::new(),
                 detached: Vec::new(),
                 taken: None,
-                stuck: [false; 16],
+                stuck: [false; FAKE_SLOTS],
                 asked_quiet: RefCell::new(Vec::new()),
-                exit_grace_ms: [0; 16],
-                boot_pending: [false; 16],
+                exit_grace_ms: [0; FAKE_SLOTS],
+                boot_pending: [false; FAKE_SLOTS],
                 hog: None,
                 on_dispatch: None,
             }
@@ -1910,12 +1950,28 @@ pub(crate) mod tests {
             _: u64,
             first: Core,
             cores: usize,
+            mem: &mut dyn CageMem,
         ) -> core::result::Result<(), CageError> {
             if self.fail_build {
                 return Err(CageError { code: 7 });
             }
+            // Zoals de echte kooi: een kooi-blok uit het kooi-geheugen.
+            let block = mem.alloc(1).map_err(|_| CageError { code: 9 })?;
+            self.blocks.push((slot.get(), block));
             self.built.push((slot.get(), part, first.get(), cores));
             Ok(())
+        }
+        fn release(&mut self, slot: Slot, mem: &mut dyn CageMem) {
+            if let Some(i) = self.blocks.iter().position(|b| b.0 == slot.get()) {
+                let (_, block) = self.blocks.swap_remove(i);
+                mem.free(block, 1);
+            }
+        }
+        fn carry(&self, slot: Slot) -> (u64, u32) {
+            self.blocks
+                .iter()
+                .find(|b| b.0 == slot.get())
+                .map_or((0, 0), |b| (b.1, slot.get() as u32))
         }
         fn dispatch(&mut self, slot: Slot, core: Core) -> core::result::Result<(), CageError> {
             self.dispatched.push((slot.get(), core.get()));
@@ -2047,11 +2103,12 @@ pub(crate) mod tests {
         cores: usize,
         grants: G,
     ) -> Actor<'s, G> {
+        // De pool plus één chunk voor het kooi-geheugen: een toets die de
+        // pool precies vult met partities, vult hem zo nog steeds precies.
         let parts = PartitionPool::new(
-            &[Region::new(0x8000_0000, pool_mib * MIB)],
+            &[Region::new(0x8000_0000, pool_mib * MIB + GRAIN)],
             Region::default(),
             Geometry::FLAT,
-            SLOT_CAP,
         )
         .unwrap();
         Lifecycle::new(
@@ -2099,6 +2156,77 @@ pub(crate) mod tests {
         block_on(a.arm(g, 0x4001_0000))
     }
 
+    /// Eén core die iedereen deelt: zo past elk aantal slots op de cores.
+    fn shared() -> Placement {
+        Placement {
+            group: Some(crate::pool::group_name(b"many").unwrap()),
+            ..ded(1)
+        }
+    }
+
+    /// Een start waarvoor de actor het slot kiest; geeft het slot.
+    fn start_free<G: Grants>(a: &mut Actor<'_, G>, mib: u64) -> Result<Slot> {
+        let g = block_on(a.claim(StartSpec::free(mib * MIB, shared(), None)))?;
+        let slot = g.slot();
+        block_on(a.arm(g, 0x4001_0000))?;
+        a.svc.ctl(slot).unwrap().gone.set();
+        Ok(slot)
+    }
+
+    // Er is geen maximum aantal slots (Derek, 01-11): de kern deelt het
+    // laagste vrije nummer uit, ver voorbij de oude grens van 128 (en de
+    // 32 van een board), zolang het geheugen het draagt; een vrijgekomen
+    // nummer komt als eerste terug, zoals een fd.
+    #[test]
+    fn far_more_slots_than_the_old_ceiling_take_the_lowest_free_number() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 2048, 4);
+        for want in 1..=300 {
+            assert_eq!(start_free(&mut a, 4).unwrap(), s(want));
+        }
+        assert_eq!(
+            svc.current(s(300)),
+            a.resident(s(300)).map(|r| r.generation)
+        );
+        stop(&mut a, 7).unwrap();
+        stop(&mut a, 200).unwrap();
+        assert_eq!(
+            start_free(&mut a, 4).unwrap(),
+            s(7),
+            "the lowest free number"
+        );
+        assert_eq!(start_free(&mut a, 4).unwrap(), s(200));
+        assert_eq!(start_free(&mut a, 4).unwrap(), s(301));
+        // De lijst van de bezette slots, in stukken, zoals SLOTS ze geeft.
+        let mut page = |after, max| match block_on(a.handle(Request::Occupied { after, max })) {
+            Response::Occupied(v) => v.iter().map(|s| s.get()).collect::<Vec<_>>(),
+            r => panic!("{r:?}"),
+        };
+        assert_eq!(page(0, 3), [1, 2, 3]);
+        assert_eq!(page(299, 10), [300, 301]);
+        assert!(page(301, 10).is_empty());
+    }
+
+    // Wat niet past, is dezelfde weigering als altijd: de partitie past niet,
+    // en er blijft niets geclaimd; het nummer is daarna nog vrij.
+    #[test]
+    fn a_slot_that_does_not_fit_is_refused_and_claims_nothing() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 16, 4);
+        for want in 1..=4 {
+            assert_eq!(start_free(&mut a, 4).unwrap(), s(want));
+        }
+        let r = block_on(a.claim(StartSpec::free(4 * MIB, shared(), None)));
+        assert!(
+            matches!(r, Err(Error::NoPartition { .. })),
+            "a fifth 4 MiB in a 16 MiB pool: {r:?}"
+        );
+        assert!(a.resident(s(5)).is_none() && a.parts.partition_of(s(5)).is_none());
+        assert_eq!(a.places.placement_of(s(5)), None, "the core went back");
+        stop(&mut a, 2).unwrap();
+        assert_eq!(start_free(&mut a, 4).unwrap(), s(2));
+    }
+
     pub(crate) fn stop<G: Grants>(a: &mut Actor<'_, G>, slot: usize) -> Result {
         block_on(a.stop(s(slot), Duration::from_millis(50)))
     }
@@ -2106,7 +2234,7 @@ pub(crate) mod tests {
     /// De adoptie van kern B, met het vertrek van elke servicer klaar zoals
     /// bij [`start`]: de servicer-taken draait de toets niet.
     pub(crate) fn adopt<G: Grants>(a: &mut Actor<'_, G>, states: &[SlotState]) -> Result<usize> {
-        let n = a.adopt(states)?;
+        let n = a.adopt(states, &[])?;
         for st in states {
             a.svc.ctl(s(st.slot)).unwrap().gone.set();
         }
@@ -2476,7 +2604,7 @@ pub(crate) mod tests {
         let mut buf = [0u8; 64];
         let servicer = servicer_task(
             s(1),
-            &svc,
+            svc.ctl(s(1)).unwrap(),
             |_| SharedOutbox {
                 lines: &lines,
                 live: &live,
@@ -2502,7 +2630,10 @@ pub(crate) mod tests {
         assert!(servicer.as_mut().poll(&mut cx).is_pending());
         assert!(!ctl.gone.is_set(), "the fall is seen on the bell");
         svc.ring(s(1));
-        assert!(servicer.as_mut().poll(&mut cx).is_pending());
+        assert!(
+            servicer.as_mut().poll(&mut cx).is_ready(),
+            "one lifetime, one task"
+        );
         assert!(ctl.gone.is_set(), "the servicer left after the fall");
     }
 
@@ -2520,7 +2651,7 @@ pub(crate) mod tests {
         let mut buf = [0u8; 64];
         let servicer = servicer_task(
             s(1),
-            &svc,
+            svc.ctl(s(1)).unwrap(),
             |_| FakeOutbox {
                 lines: vec![b"bye".to_vec(), b"stopping".to_vec()],
                 live: &live,
@@ -2535,7 +2666,9 @@ pub(crate) mod tests {
         let ctl = svc.ctl(s(1)).unwrap();
         ctl.stop.set();
         for _ in 0..4 {
-            let _ = servicer.as_mut().poll(&mut cx);
+            if servicer.as_mut().poll(&mut cx).is_ready() {
+                break;
+            }
         }
         assert_eq!(
             con.app.borrow().as_slice(),
@@ -2562,7 +2695,7 @@ pub(crate) mod tests {
             .collect();
         let servicer = servicer_task(
             s(1),
-            &svc,
+            svc.ctl(s(1)).unwrap(),
             |_| FakeOutbox {
                 lines: lines.clone(),
                 live: &live,
@@ -2598,7 +2731,7 @@ pub(crate) mod tests {
         let mut buf = [0u8; 64];
         let servicer = servicer_task(
             s(1),
-            &svc,
+            svc.ctl(s(1)).unwrap(),
             |_| FakeOutbox {
                 lines: vec![b"hello".to_vec()],
                 live: &live,
@@ -2616,9 +2749,12 @@ pub(crate) mod tests {
         assert_eq!(con.app.borrow().as_slice(), &[(1, b"hello".to_vec())]);
         let ((), r) = join2(
             async {
+                let mut done = false;
                 for _ in 0..64 {
                     core::future::poll_fn(|cx| {
-                        let _ = servicer.as_mut().poll(cx);
+                        if !done {
+                            done = servicer.as_mut().poll(cx).is_ready();
+                        }
                         core::task::Poll::Ready(())
                     })
                     .await;
@@ -2647,7 +2783,6 @@ pub(crate) mod tests {
             &[Region::new(0x8000_0000, 256 * MIB)],
             Region::default(),
             Geometry::FLAT,
-            SLOT_CAP,
         )
         .unwrap()
     }
@@ -2732,7 +2867,7 @@ pub(crate) mod tests {
         let mut a = actor(&svc, &con, Obey::Exit, 256, 4);
         let mut states = [st(1, 3, 2, 0x8000_0000), st(2, 1, 1, 0x8200_0000)];
         states[1].ports = vec![80];
-        assert_eq!(a.adopt(&states).unwrap(), 2);
+        assert_eq!(a.adopt(&states, &[]).unwrap(), 2);
         // De NAT van de nieuwe kern is leeg: de poorten gaan open als het
         // net luistert, alleen slot 2 had er.
         assert!(a.cage.published.is_empty());
@@ -2783,7 +2918,7 @@ pub(crate) mod tests {
         // De nieuwe kern.
         let (svc2, con2) = (Servicers::new(), FakeConsole::default());
         let mut b = actor(&svc2, &con2, Obey::Exit, 256, 3);
-        b.adopt(&states).unwrap();
+        b.adopt(&states, &[]).unwrap();
         assert_eq!(start(&mut b, 3, 8, 1), Ok(()));
         assert_eq!(b.places.placement_of(s(3)).unwrap().0.get(), 3);
         assert!(
@@ -2791,7 +2926,7 @@ pub(crate) mod tests {
             "empty group core was given away"
         );
         let mut join = spec;
-        join.slot = s(5);
+        join.slot = Some(s(5));
         let g = block_on(b.claim(join)).unwrap();
         assert_eq!(b.places.placement_of(s(5)).unwrap().0.get(), 2);
         block_on(b.arm(g, 0)).unwrap();
@@ -2815,7 +2950,7 @@ pub(crate) mod tests {
 
         let (svc2, con2) = (Servicers::new(), FakeConsole::default());
         let mut b = actor(&svc2, &con2, Obey::Exit, 256, 3);
-        b.adopt(&states).unwrap();
+        b.adopt(&states, &[]).unwrap();
         assert_eq!(svc2.with_mounts(s(2), <[Mount]>::to_vec), Some(vec![vol]));
         assert!(con2.saw("slot 2: 1 volume(s) mounted: /data -> /volumes/demo HOPOS_SLOT_MOUNTS"));
     }

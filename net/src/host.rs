@@ -61,7 +61,6 @@ pub struct HostPort<'a, S, R, W> {
     /// De MAC en het IP van de node-stack op de uplink.
     mac: [u8; 6],
     ip: u32,
-    max_slots: usize,
 }
 
 impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
@@ -79,7 +78,6 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
         stats: &'a Stats,
         mac: [u8; 6],
         ip: u32,
-        max_slots: usize,
     ) -> Self {
         Self {
             stack,
@@ -90,7 +88,6 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
             stats,
             mac,
             ip,
-            max_slots,
         }
     }
 
@@ -148,10 +145,10 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
         let mut sent = false;
         for _ in 0..HOST_BURST {
             let mut refused = false;
-            let (stack, ip, slots) = (&mut self.stack, self.ip, self.max_slots);
+            let (stack, ip) = (&mut self.stack, self.ip);
             let r = self.tx.write_in_place(MAX_LAN_FRAME, |p| {
                 let n = stack.poll_transmit(p)?;
-                let kind = classify(p.get_mut(..n)?, ip, slots);
+                let kind = classify(p.get_mut(..n)?, ip);
                 refused = kind.is_none();
                 Some((kind?, n))
             });
@@ -193,9 +190,9 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
 /// intern frame wordt hier al vertaald. `None`: intern maar niet
 /// vertaalbaar (fragment, vreemd slot). Dat gaat ook niet de draad op, want
 /// dat zou het interne adresplan naar buiten lekken.
-fn classify(f: &mut [u8], ip: u32, max_slots: usize) -> Option<u32> {
+fn classify(f: &mut [u8], ip: u32) -> Option<u32> {
     if f.len() >= ETH_LEN + 20 && be16(f, 12) == ET_IPV4 && is_internal(be32(f, ETH_LEN + 16)) {
-        return gw::from_host(f, ip, max_slots).then_some(KIND_FRAME);
+        return gw::from_host(f, ip).then_some(KIND_FRAME);
     }
     Some(KIND_UPLINK)
 }
@@ -203,7 +200,7 @@ fn classify(f: &mut [u8], ip: u32, max_slots: usize) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{HOST_MAC, SLOT_CAP, host_ip4, port_ip4, port_mac};
+    use crate::plan::{HOST_MAC, host_ip4, port_ip4, port_mac};
     use crate::ring::mem::{self, MemReader, MemWriter};
     use crate::wire::testutil::*;
     use crate::wire::{PROTO_TCP, mac_at};
@@ -243,17 +240,7 @@ mod tests {
         let bell: &'static Signal = Box::leak(Box::new(Signal::new()));
         let door: &'static Signal = Box::leak(Box::new(Signal::new()));
         let stats: &'static Stats = Box::leak(Box::new(Stats::new()));
-        let port = HostPort::new(
-            FakeStack::default(),
-            rx,
-            tx,
-            bell,
-            door,
-            stats,
-            MAC,
-            IP,
-            SLOT_CAP,
-        );
+        let port = HostPort::new(FakeStack::default(), rx, tx, bell, door, stats, MAC, IP);
         T {
             port,
             sw_tx,

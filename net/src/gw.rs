@@ -11,7 +11,7 @@
 //! vollopen. ICMP heeft geen pseudo-header, dus daar volstaat de
 //! IP-checksum; fragmenten weigeren we (het interne net heeft één MTU).
 
-use crate::plan::{HOST_MAC, SLOT_CAP, host_ip4, ip4_port, port_mac};
+use crate::plan::{HOST_MAC, host_ip4, ip4_port, port_mac};
 use crate::wire::{
     ETH_LEN, PROTO_ICMP, PROTO_TCP, PROTO_UDP, be32, fix_csum32, fix_l4_ip, ipv4_head, put_mac,
     put32,
@@ -57,16 +57,14 @@ pub fn to_host(f: &mut [u8], host_ip: u32) -> bool {
 /// `host_ip` → 10.100.0.1 (plus checksums) en de MAC's uit het
 /// deterministische slot-plan, geen ARP. `false` = geen vertaalbaar frame
 /// of geen geldig slot-adres; niet bezorgen.
-pub fn from_host(f: &mut [u8], host_ip: u32, max_slots: usize) -> bool {
+pub fn from_host(f: &mut [u8], host_ip: u32) -> bool {
     let Some((l4, proto)) = gw_parse(f) else {
         return false;
     };
     if be32(f, ETH_LEN + 12) != host_ip {
         return false;
     }
-    let Some(slot) =
-        ip4_port(be32(f, ETH_LEN + 16)).filter(|&s| s >= 1 && s <= max_slots.min(SLOT_CAP))
-    else {
+    let Some(slot) = ip4_port(be32(f, ETH_LEN + 16)).filter(|&s| s >= 1) else {
         return false;
     };
     let gw = host_ip4();
@@ -139,7 +137,7 @@ mod tests {
                 b"antwoord",
             );
             assert!(
-                from_host(&mut f, GW_TEST_HOST_IP, SLOT_CAP),
+                from_host(&mut f, GW_TEST_HOST_IP),
                 "proto {proto}: geweigerd"
             );
             assert_eq!(be32(&f, ETH_LEN + 12), host_ip4());
@@ -158,7 +156,7 @@ mod tests {
             443,
             &[],
         );
-        assert!(!from_host(&mut f, GW_TEST_HOST_IP, SLOT_CAP));
+        assert!(!from_host(&mut f, GW_TEST_HOST_IP));
         // Bestemming 10.100.0.1 zelf (slot 0 is geen bezorgdoel): weigeren.
         let mut f = mk_frame(
             PROTO_TCP,
@@ -170,7 +168,7 @@ mod tests {
             443,
             &[],
         );
-        assert!(!from_host(&mut f, GW_TEST_HOST_IP, SLOT_CAP));
+        assert!(!from_host(&mut f, GW_TEST_HOST_IP));
         // Andere bron dan het stack-adres: weigeren.
         let mut f = mk_frame(
             PROTO_TCP,
@@ -182,7 +180,7 @@ mod tests {
             443,
             &[],
         );
-        assert!(!from_host(&mut f, GW_TEST_HOST_IP, SLOT_CAP));
+        assert!(!from_host(&mut f, GW_TEST_HOST_IP));
     }
 
     /// Ping naar 10.100.0.1: alleen de IP-checksum verandert.

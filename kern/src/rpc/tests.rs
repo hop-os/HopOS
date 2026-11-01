@@ -1382,7 +1382,7 @@ fn the_committer_commits_on_the_bell_of_a_stop() {
     let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
     let inbox: FsInbox<'_> = Mailbox::new();
     let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
-    let mut c = core::pin::pin!(committer(&svc, &inbox, &Frozen, 4));
+    let mut c = core::pin::pin!(committer(&svc, &inbox, &Frozen));
     start(&mut a, 2, 8, 1).unwrap();
     assert!(c.as_mut().poll(&mut cx).is_pending());
     assert!(inbox.try_recv().is_none(), "a start is no reason to commit");

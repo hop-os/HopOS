@@ -32,7 +32,7 @@ const EXPECT: u64 = 240_000; // 24 MHz maal 10 ms
 /// Een wereld met de kern-core en één slot, die elk sample een fractie
 /// idle zijn.
 struct World {
-    g: Governor<2>,
+    g: Governor,
     k: Knob2,
     now: u64,
     idle: [u64; 2],
@@ -288,7 +288,7 @@ impl Future for Once {
     }
 }
 
-impl Host<2> for FakeHost {
+impl Host for FakeHost {
     fn now(&self) -> u64 {
         self.now.get()
     }
@@ -299,17 +299,17 @@ impl Host<2> for FakeHost {
     fn expect(&self) -> u64 {
         EXPECT
     }
-    fn sample(&mut self, out: &mut [Sample; 2]) {
+    fn sample(&mut self, out: &mut Vec<Sample>) {
         let busy = self.now.get() >= self.busy_from;
         self.idle[0] += EXPECT;
         self.idle[1] += if busy { 0 } else { EXPECT };
-        for (i, s) in out.iter_mut().enumerate() {
-            *s = Sample {
+        for idle in self.idle {
+            out.push(Sample {
                 live: true,
-                idle: self.idle[i],
+                idle,
                 cores: 1,
                 running: true,
-            };
+            });
         }
     }
     fn temp_milli_c(&mut self) -> i32 {

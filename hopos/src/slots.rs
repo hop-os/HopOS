@@ -193,12 +193,13 @@ use crate::clock::ExecTimer;
 use crate::glue::{DevMem, KernConsole, SlotOutbox};
 use abi::layout::{CtxState, RING_DATA_CAP};
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use board::Board;
 use cage::SlotCores;
 use core::cell::Cell;
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::el2::{self, CoreState};
 use cpu::println;
@@ -207,8 +208,8 @@ use kern::nodecfg::NodeCfg;
 use kern::partmem::{Geometry, PartitionPool};
 use kern::pool::{Placement, Places};
 use kern::slots::{
-    Envelope, Lifecycle, Mount, Reply, Request, Response, Servicers, SlotStatus, StartSpec, call,
-    servicer_task,
+    Envelope, Lifecycle, Mount, Reply, Request, Response, ServicerCtl, Servicers, SlotStatus,
+    StartSpec, call, servicer_task,
 };
 use kern::system::Fail;
 use kern::{Region, Slot};
@@ -291,7 +292,7 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 pub(crate) fn start(
     exec: &'static Executor,
     staged: bool,
-    adopt: Option<Vec<kern::slots::SlotState>>,
+    adopt: Option<(Vec<kern::slots::SlotState>, Vec<kern::cageheap::Chunk>)>,
     cfg: NodeCfg<'static>,
     system: &'static crate::KernSystem,
 ) {
@@ -299,7 +300,7 @@ pub(crate) fn start(
     // FLIP: een geadopteerde Hop zit waar hij zat, met zijn groep en core.
     let carried = adopt
         .as_ref()
-        .and_then(|v| v.iter().find(|st| st.slot == HOP_SLOT));
+        .and_then(|(v, _)| v.iter().find(|st| st.slot == HOP_SLOT));
     init_hop_group(&cfg, carried);
     let hop_core = carried.map(|st| st.core);
     let plan = match os_plan() {
@@ -322,15 +323,18 @@ pub(crate) fn start(
             }
         },
     };
-    for st in adopt.iter().flatten() {
+    for st in adopt.iter().flat_map(|(v, _)| v) {
         let r = Slot::new(st.slot).map_or(Err(kern::cage::CageError { code: 0 }), |s| {
             // De SMP-breedte mee, anders vindt een revoke de secundaires
-            // van een SMP-app niet.
+            // van een SMP-app niet; het kooi-blok en de VMID van de vorige
+            // kern, want die liggen niet meer vast in het plan.
             cage.adopt_slot(
                 s,
                 Region::new(st.part_base, st.part_size),
                 st.core,
                 st.cores,
+                st.cage_block,
+                st.vmid,
             )
         });
         if let Err(e) = r {
@@ -343,14 +347,13 @@ pub(crate) fn start(
     }
     let sw = cage.isa().installed();
     println!(
-        "slots: cage up HOPOS_CAGE_UP region={:#x} switch={:#x}+{:#x} tramp={:#x} hash={:#x} app-cores={} max-slots={}",
+        "slots: cage up HOPOS_CAGE_UP region={:#x} switch={:#x}+{:#x} tramp={:#x} hash={:#x} app-cores={}",
         plan.vec_base_pa().0,
         sw.entry.0,
         sw.len,
         sw.tramp.0,
         sw.hash,
-        plan.app_cores(),
-        plan.max_slots()
+        plan.app_cores()
     );
     arch::start_waker(exec, &plan);
     // De eerste meting: na de init moet elke app-core koud staan (mailbox
@@ -380,7 +383,7 @@ pub(crate) fn start(
         link_window: cage::link_window,
         reserve: cage::reserve,
     };
-    let parts = match PartitionPool::new(&pool, own, geo, plan.max_slots()) {
+    let parts = match PartitionPool::new(&pool, own, geo) {
         Ok(p) => p,
         Err(e) => {
             println!("slots: partition pool: {e} HOPOS_SLOT_PLAN");
@@ -420,8 +423,8 @@ pub(crate) fn start(
     ));
     // Eerst alle eigendomsclaims terug, dan pas verzoeken: vóór de actor
     // zijn eerste bericht leest. De poorten pas als het net luistert.
-    if let Some(states) = &adopt {
-        match lc.adopt(states) {
+    if let Some((states, chunks)) = &adopt {
+        match lc.adopt(states, chunks) {
             Ok(n) => println!(
                 "HOPOS_FLIP_ADOPT {n} of {} resident(s) adopted, ownership restored before the first request",
                 states.len()
@@ -440,15 +443,6 @@ pub(crate) fn start(
     if let Err(e) = exec.spawn(actor) {
         println!("slots: lifecycle not spawned: {e:?} HOPOS_SLOT_SPAWN");
         return;
-    }
-    for i in 1..=plan.max_slots() {
-        let Some(slot) = Slot::new(i) else { continue };
-        let Some(ctx) = abi::layout::Slot::new(i).and_then(|s| plan.ctx_pa(s).ok()) else {
-            continue;
-        };
-        if let Err(e) = exec.spawn(servicer(exec, slot, ctx)) {
-            println!("slots: servicer {i} not spawned: {e:?} HOPOS_SLOT_SPAWN");
-        }
     }
     // Een geadopteerde Hop leeft nog; alleen de supervisor komt terug.
     let hop = HopNode {
@@ -483,26 +477,23 @@ fn hop_ports() -> Vec<u16> {
     v
 }
 
-/// De slots waarvan de bewoner de OS-core deelt, één bit per slot: de
-/// switch wacht niet op hun RX-ring ([`resident`]). Eén schrijver (de
-/// plaatsing van Hop), gelezen door de switch op dezelfde core.
-static OS_RESIDENTS: AtomicU64 = AtomicU64::new(0);
+/// Deelt Hop de OS-core? Dan wacht de switch niet op zijn RX-ring
+/// ([`resident`]). Eén schrijver (de plaatsing van Hop), gelezen door de
+/// switch op dezelfde core. Alleen Hop zet het: wie verder de OS-core deelt
+/// (een groep `system`), zette het ook vóór 01-11 niet.
+static HOP_ON_OS: AtomicBool = AtomicBool::new(false);
 
 /// Deelt de bewoner van `slot` de OS-core (Hop in slot 1)? De
 /// `resident` van de switch: zijn consument draait pas als de executor
 /// afgeeft, dus wachten op ruimte in zijn ring is stilstand (30-09).
 pub(crate) fn resident(slot: usize) -> bool {
-    slot < 64 && OS_RESIDENTS.load(Relaxed) & (1 << slot) != 0
+    slot == HOP_SLOT && HOP_ON_OS.load(Relaxed)
 }
 
-/// Zet of wist `slot` als bewoner van de OS-core.
+/// Zet of wist Hop (`slot`) als bewoner van de OS-core.
 fn set_resident(slot: usize, on: bool) {
-    if slot < 64 {
-        if on {
-            OS_RESIDENTS.fetch_or(1 << slot, Relaxed);
-        } else {
-            OS_RESIDENTS.fetch_and(!(1 << slot), Relaxed);
-        }
+    if slot == HOP_SLOT {
+        HOP_ON_OS.store(on, Relaxed);
     }
 }
 
@@ -532,18 +523,36 @@ pub(crate) static WAKER: WakerStats = WakerStats {
     rx: AtomicU64::new(0),
 };
 
-/// De servicer-taak van één slot, met zijn eigen recordbuffer.
-async fn servicer(exec: &'static Executor, slot: Slot, ctx: dev::Pa) {
+/// Spawnt de servicer-taak van één levensduur van `slot` (`Cage::serve`
+/// van de kooi), met zijn eigen recordbuffer: bij de plaatsing gemaakt, weg
+/// na zijn evict. Een buffer of taak die de heap niet geeft, is een
+/// weigering van de start.
+pub(crate) fn spawn_servicer(slot: Slot, ctx: dev::Pa, ctl: Rc<ServicerCtl>) -> Result<(), ()> {
     let mut buf: Vec<u8> = Vec::new();
     if buf.try_reserve_exact(SERVICE_BUF).is_err() {
         println!("slot {slot}: no servicer buffer HOPOS_SLOT_SPAWN");
-        return;
+        return Err(());
     }
     buf.resize(SERVICE_BUF, 0);
+    let exec = crate::EXEC.get();
+    exec.spawn(servicer(exec, slot, ctx, ctl, buf))
+        .map_err(|e| {
+            println!("slot {slot}: servicer not spawned: {e:?} HOPOS_SLOT_SPAWN");
+        })
+}
+
+/// De servicer-taak van één levensduur.
+async fn servicer(
+    exec: &'static Executor,
+    slot: Slot,
+    ctx: dev::Pa,
+    ctl: Rc<ServicerCtl>,
+    mut buf: Vec<u8>,
+) {
     let timer = ExecTimer(exec);
     servicer_task(
         slot,
-        SERVICERS,
+        ctl,
         |part| SlotOutbox::open(slot, part, ctx),
         &timer,
         &KernConsole,
@@ -1343,9 +1352,7 @@ async fn place(
 
 /// Eén meetregel: app-status, ctx-staat, mailbox en heartbeat.
 fn probe(plan: &abi::layout::Plan, slot: Slot, core: usize, st: &SlotStatus, dt: u64) {
-    let ctx = abi::layout::Slot::new(slot.get())
-        .and_then(|s| plan.ctx_pa(s).ok())
-        .and_then(el2::ctx_state);
+    let ctx = crate::kooi::ctx_of(slot).and_then(el2::ctx_state);
     let mbox = abi::layout::Core::new(core).and_then(|c| arch::core_state(plan, c).ok());
     println!(
         "slot {slot}: +{} ms app={} ctx={:?} mbox={:?} beat={} core_on={}",

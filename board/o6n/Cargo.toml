@@ -43,6 +43,9 @@ efi-rng = ["board-uefi/efi-rng"]
 default = []
 # De GOP-framebuffer van de firmware (board-uefi, gop.rs).
 gui = ["board-uefi/gui"]
+# De tien native xHCI's uit de DSDT (usb.rs): de bouwsteen van gui en
+# media.
+usb = ["board-uefi/usb"]
 # De VPU aanzetten (src/codec.rs): vensters uit de DSDT, stroom en klokken
 # via SCMI, de stroomcyclus bij een vastgelopen blok (docs/media.md).
 media = []

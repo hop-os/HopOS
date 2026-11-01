@@ -1,8 +1,8 @@
 //! De naad tussen board en dienst: de controllers zoals een board ze
 //! aanbiedt, en het opbrengen ervan.
 //!
-//! De boards zelf kennen `gui` niet (alleen de binary importeert gui terug),
-//! dus de bedrading gebeurt in de binary: die zet in een [`Registry`] wat
+//! De boards zelf kennen deze crate niet, dus de bedrading gebeurt in de
+//! binary: die zet in een [`Registry`] wat
 //! het board met `Board::usb_hosts` als xHCI aanbiedt (Go's
 //! `usb_<board>.go` met `Register`) en roept daarna [`Registry::bring_up`].
 //! Een `Registry` is gewone boot-staat in de binary, geen globale lijst:
@@ -16,7 +16,6 @@
 //! venster kon de O6N-hosts alleen via gedeelde staat voorbereiden (de open
 //! vraag van docs/gui.md).
 
-use crate::deliver::InputAddr;
 use crate::{MAX_HOSTS, Manager, Sink, Timer};
 use bounded::{BoundedVec, Full};
 use core::fmt;
@@ -102,10 +101,9 @@ impl Registry {
     /// schrijven in een stuk dat een ander net opbouwt (Go deed dit alleen
     /// voor de O6N, in een `prepare` met gedeelde staat, 18-09).
     ///
-    /// De binary opent de luisterpost pas als dit meer dan nul geeft, en dán
-    /// komt [`InputAddr`] in de fb-grant. Een display die het veld niet ziet
-    /// weet dus dat er niets te bellen valt, in plaats van in een
-    /// reconnect-lus te gaan zitten voor een toetsenbord dat niet bestaat.
+    /// Geeft dit nul, dan trekt de binary het invoeradres van de fb-grant
+    /// weer in: een display die het veld niet ziet, weet dat er niets te
+    /// bellen valt.
     pub async fn bring_up<T: Timer>(
         &self,
         mgr: &mut Manager<T>,
@@ -152,13 +150,7 @@ impl Registry {
             live += 1;
         }
         if live == 0 {
-            sink.log(format_args!(
-                "usb: no working controller on this node, input stays off"
-            ));
-        } else {
-            sink.log(format_args!(
-                "usb: {live} controller(s), input served on {InputAddr} (goes out with the fb grant)"
-            ));
+            sink.log(format_args!("usb: no working controller on this node"));
         }
         live
     }

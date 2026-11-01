@@ -448,7 +448,12 @@ pub fn regime() -> (u64, u64, u64, u64) {
 
 /// Zet `[lo, hi)` (4 KB-gealigneerd) er als Normal-NC bij, in dezelfde
 /// tabellen: het glas van de display-app. Geeft de bytes aan tabellen die
-/// de map daarna gebruikt.
+/// de map daarna gebruikt. Zonder `gui` vraagt niemand het (fb.rs), maar
+/// het blijft een stap van de MMU, met zijn tabellen.
+#[cfg_attr(
+    not(feature = "gui"),
+    expect(dead_code, reason = "alleen applib::fb (feature gui) mapt het glas")
+)]
 pub(crate) fn map_glass(lo: u64, hi: u64) -> Result<u64, MmuError> {
     let used = state()?;
     let used = hw::add_nc(used, lo, hi)?;

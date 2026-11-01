@@ -14,12 +14,10 @@
 
 mod bench; // de meetbanken achter hopos.nvmebench en hopos.idlestat (bench.rs)
 mod clock;
-mod codec; // het media-vlak (codec.rs); kaal een stub, feature `media`
 mod config;
 mod conport; // de console over TCP: de ring achter de UART (conport.rs)
 mod flip; // FLIP: de kern-flip (flip.rs)
 mod glue; // `DevMem`, `KernConsole` en de outbox van een slot (glue.rs)
-mod gui; // het gui-vlak (gui.rs); kaal no-ops, feature `gui`
 mod kooi; // de kooi als beleid, voor elke architectuur (kooi.rs)
 mod load; // de meetlat per slot: idle en wekken op de console (load.rs)
 #[cfg(all(
@@ -29,13 +27,32 @@ mod load; // de meetlat per slot: idle en wekken op de console (load.rs)
 ))]
 mod mem; // memcpy en memcmp met ongealigneerde ldp/stp (mem.rs)
 mod net;
-#[cfg(feature = "media")]
-mod optical;
 mod seed; // het zaad van de slots op hun control-page (seed.rs)
 mod slots;
 mod storage;
 mod telemetry; // de thermiek op tik en heartbeat, en het klokbeleid (telemetry.rs)
 mod watchdog; // de node-watchdog: kern::watchdog op de hardware (watchdog.rs)
+
+// De vlakken (docs/sequence-hopos.md §14.3): headless is zonder flag, `gui`
+// en `media` staan los en trekken elk de bouwsteen `usb` mee. Een vlak dat
+// er niet is, komt als stub uit off.rs.
+#[cfg(feature = "media")]
+mod codec;
+mod off; // de codec-dienst (codec.rs)
+#[cfg(not(feature = "media"))]
+use off::codec;
+#[cfg(feature = "gui")]
+mod gui; // het glas, de meetregels, de invoer naar de display-app (gui.rs)
+#[cfg(not(feature = "gui"))]
+use off::gui;
+#[cfg(feature = "media")]
+mod optical; // de optische drive over USB (optical.rs)
+#[cfg(all(feature = "usb", not(feature = "media")))]
+use off::optical;
+#[cfg(feature = "usb")]
+mod usb; // de USB-taak (usb.rs)
+#[cfg(not(feature = "usb"))]
+use off::usb;
 
 extern crate alloc;
 
@@ -438,11 +455,11 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
             }
         }
     }
-    // De USB-invoer na het netwerk (gui.rs): de stroom naar de display-app
-    // loopt over de switch.
+    // De USB na het netwerk (usb.rs): de invoer naar de display-app loopt
+    // over de switch.
     #[cfg(feature = "media")]
     optical::start(exec);
-    gui::start_usb_input(exec);
+    usb::start(exec);
 
     // De slots: de kooi-lijm, de lifecycle-actor en de servicers (slots.rs).
     // FLIP: na een landing adopteren de slots de bewoners in plaats van

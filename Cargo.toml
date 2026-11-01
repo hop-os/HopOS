@@ -50,6 +50,9 @@ members = [
     "driver/usb/xhci",
     "driver/usb/hid",
     "driver/usb/dwc3",
+    # De bus (de manager boven de xHCI: de scan, de opslag): de bouwsteen van gui en
+    # media, geen keuze op zich (docs/sequence-hopos.md §14.3).
+    "usb",
     "gui/fbgrant",
     "gui/usbin",
     "gui/rkscan",
@@ -138,6 +141,7 @@ default-members = [
     "driver/usb/xhci",
     "driver/usb/hid",
     "driver/usb/dwc3",
+    "usb",
     "gui/fbgrant",
     "gui/usbin",
     "gui/rkscan",

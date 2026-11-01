@@ -1,0 +1,22 @@
+[package]
+name = "usb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "De bus: bezit de USB-controllers, volgt in- en uitpluggen en bedient opslag op verzoek. Een bouwsteen van gui (HID) en media (de optische drive), geen keuze op zich."
+
+[dependencies]
+dev = { path = "../dev" }
+bounded = { path = "../bounded" }
+driver-xhci = { path = "../driver/usb/xhci" }
+# De HID-kant (feature `hid`, src/hid.rs): de toetsenbord- en muisrapporten
+# van de gui-smaak. Media zonder gui leest geen rapport.
+driver-hid = { path = "../driver/usb/hid", optional = true }
+
+[features]
+default = []
+hid = ["dep:driver-hid"]
+
+[lints]
+workspace = true

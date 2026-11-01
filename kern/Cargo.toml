@@ -28,7 +28,7 @@ driver-codec = { path = "../driver/codec", optional = true }
 default = []
 # De codec-ops van de system-API (src/codecabi.rs). Zonder deze feature
 # antwoorden ze "onbekende op", zoals de Go-kern buiten de media-smaak.
-media = ["dep:driver-codec"]
+media = ["dep:driver-codec", "abi/media"]
 
 [lints]
 workspace = true

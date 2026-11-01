@@ -23,8 +23,8 @@ driver-vcmail = { path = "../../driver/vcmail" }
 driver-rng200 = { path = "../../driver/rng200" }
 # Het contract van de klokknop (clock.rs); het beleid draait in de binary.
 driver-dvfs = { path = "../../driver/dvfs" }
-# De framebuffer-beschrijving van `Board::framebuffer` (vcfb.rs).
-driver-fb = { path = "../../driver/fb" }
+# De framebuffer-beschrijving van `Board::framebuffer` (vcfb.rs, `gui`).
+driver-fb = { path = "../../driver/fb", optional = true }
 
 [lints]
 workspace = true
@@ -33,4 +33,7 @@ workspace = true
 default = []
 # De framebuffer via de VideoCore (vcfb.rs): alleen de gui-smaak ontdekt
 # en mapt hem; kaal gebouwd is het board headless (docs/gui.md).
-gui = []
+gui = ["board/gui", "dep:driver-fb"]
+# Het USB-DMA-stuk en de VL805-handshake (usb.rs): de bouwsteen van gui
+# en media.
+usb = ["board/usb"]

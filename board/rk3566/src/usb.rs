@@ -28,8 +28,7 @@
 //! heeft. Een apparaat dat van de bus leeft, heeft op die poort een hub met
 //! eigen voeding nodig. De regel zegt het.
 //!
-//! Kaal is er niets: zonder de feature `gui` geeft [`hosts`] een lege lijst
-//! (handboek §7).
+//! Alleen met de bouwsteen `usb` (de gui- of de media-smaak).
 
 use crate::soc::{CRU, delay_us, hiword};
 use dev::Pa;
@@ -48,16 +47,6 @@ const _: () = {
 };
 
 pub(crate) use imp::hosts;
-
-#[cfg(not(feature = "gui"))]
-mod imp {
-    //! Kaal gebouwd: geen USB.
-
-    /// Geen controllers.
-    pub(crate) fn hosts() -> board::UsbHosts {
-        board::UsbHosts::new()
-    }
-}
 
 /// `CLKGATE_CON(10)`: de gates van beide DWC3's (actief-laag, 1 = uit).
 const CLKGATE10: u64 = 0x300 + 10 * 4;
@@ -152,7 +141,6 @@ pub fn power_otg() -> OtgPower {
     }
 }
 
-#[cfg(feature = "gui")]
 mod imp {
     use super::{DWC3_SIZE, USBDRD30, USBHOST30};
     use crate::USB_DMA;
@@ -213,7 +201,7 @@ mod imp {
     }
 }
 
-#[cfg(all(test, feature = "gui"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::USB_DMA;

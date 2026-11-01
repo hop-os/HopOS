@@ -5,8 +5,10 @@
 //! core-klassen, de thermometer, de klokknop), geeft haar [`Platform`].
 
 use crate::Uefi;
+#[cfg(feature = "usb")]
+use board::UsbHosts;
 use board::heap::Heap;
-use board::{Board, ClockKnob, CoreClass, Dispatched, Error, Plan, Thermal, UsbHosts, Watchdog};
+use board::{Board, ClockKnob, CoreClass, Dispatched, Error, Plan, Thermal, Watchdog};
 use core::sync::atomic::Ordering::Relaxed;
 use cpu::el2::Flavor;
 use executor::Executor;
@@ -45,6 +47,7 @@ pub trait Platform: Sync + Thermal + ClockKnob + 'static {
     fn wire_disk(&self, _disk: &mut Self::Disk) {}
 
     /// De USB-hostcontrollers; standaard die van het UEFI-board.
+    #[cfg(feature = "usb")]
     fn usb_hosts(&self, uefi: &Uefi) -> UsbHosts {
         uefi.usb_hosts()
     }
@@ -177,11 +180,13 @@ impl<P: Platform> Board for On<P> {
     }
 
     /// De GOP van de eigen firmware, zoals het UEFI-board hem las (alleen
-    /// in de gui-smaak; kaal `None`, docs/gui.md).
+    /// in de gui-smaak, docs/gui.md).
+    #[cfg(feature = "gui")]
     fn framebuffer(&self) -> Option<board::fb::Desc> {
         self.uefi.framebuffer()
     }
 
+    #[cfg(feature = "usb")]
     fn usb_hosts(&self) -> UsbHosts {
         self.p.usb_hosts(&self.uefi)
     }

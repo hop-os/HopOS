@@ -61,6 +61,7 @@ pub mod clock;
 #[cfg(feature = "media")]
 pub mod codec;
 pub mod ctrl;
+#[cfg(feature = "gui")]
 pub mod fb;
 pub mod heap;
 pub mod log;

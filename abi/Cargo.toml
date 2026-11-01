@@ -14,3 +14,11 @@ leancrypto = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.14" }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+# Het glas (src/glass.rs): de FB_*-env, de pixelregel, de invoerstroom.
+gui = []
+# Het media-vlak (src/hopabi/codec.rs, src/hopabi/device.rs): de payloads
+# van de codec-ops en van de optische drive.
+media = []

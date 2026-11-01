@@ -407,7 +407,7 @@ fn run(verbose: bool) -> Result<(), String> {
         buckets.add(&bucket, k, n);
     }
 
-    // De gui-laag: gemeenschappelijk (fbgrant, usbin, xhci, hid) versus
+    // De gui-laag: gemeenschappelijk (fbgrant, usbin, usb, xhci, hid) versus
     // board-eigen (rkscan en de scanout-bedrading alleen op de rk3566).
     let mut gui_total: BTreeMap<&str, Count> = BTreeMap::new();
     let mut gui_buckets: BTreeMap<String, Count> = BTreeMap::new();

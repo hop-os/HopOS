@@ -7,7 +7,7 @@ publish.workspace = true
 description = "Het beleid van de framebuffer-grant: wie het glas krijgt, de FB_*-env, de console van en terug op het scherm."
 
 [dependencies]
-abi = { path = "../../abi" }
+abi = { path = "../../abi", features = ["gui"] }
 kern = { path = "../../kern" }
 driver-fb = { path = "../../driver/fb" }
 

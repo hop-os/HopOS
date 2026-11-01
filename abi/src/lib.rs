@@ -17,8 +17,8 @@
 //!   [`ring::Reader`] als de twee kanten.
 //! - [`hopabi`]: de control-page en de payload van een system-call.
 //! - [`systemapi`]: het frame-protocol over TCP en de bevoegde operaties.
-//! - [`glass`]: het glas en de invoer van de display-app (de `FB_*`-env,
-//!   de pixelregel, de invoerstroom op poort 7879).
+//! - `glass` (feature `gui`): het glas en de invoer van de display-app (de
+//!   `FB_*`-env, de pixelregel, de invoerstroom op poort 7879).
 //! - [`checksum`]: de content-som die kern en app over hetzelfde bestand
 //!   rekenen.
 //! - [`place`]: de plaatsingstoets van een app-image.
@@ -46,6 +46,9 @@
 #![forbid(unsafe_code)]
 
 pub mod checksum;
+// Het contract van het glas (feature `gui`, docs/gui.md): headless kent het
+// niet.
+#[cfg(feature = "gui")]
 pub mod glass;
 pub mod hopabi;
 pub mod layout;

@@ -44,7 +44,7 @@ pub mod irq;
 // met wat de machine eigen heeft ernaast.
 mod on;
 // De framebuffer van de firmware (GOP), alleen in de gui-smaak; kaal een
-// stub met dezelfde signatuur (handboek §7, docs/gui.md).
+// stub voor de twee stappen van de boot (handboek §7, docs/gui.md).
 #[cfg(feature = "gui")]
 mod gop;
 #[cfg(not(feature = "gui"))]
@@ -55,10 +55,6 @@ mod gop {
 
     /// Niets te lezen.
     pub(crate) fn discover(_efi: &Efi) {}
-    /// Geen beeld.
-    pub(crate) fn framebuffer() -> Option<driver_fb::Desc> {
-        None
-    }
     /// Niets te mappen.
     pub(crate) fn map(_m: &mut Mmu) -> Result<(), mmu::Error> {
         Ok(())
@@ -68,8 +64,9 @@ mod memmap;
 mod mmu;
 pub mod pcie;
 pub mod slots;
-// De xHCI's op PCIe (usb.rs), alleen in de gui-smaak; het DMA-stuk ook
-// voor de O6N.
+// De xHCI's op PCIe (usb.rs), alleen met de bouwsteen `usb` (de gui- of
+// de media-smaak); het DMA-stuk ook voor de O6N.
+#[cfg(feature = "usb")]
 pub mod usb;
 pub mod watchdog;
 
@@ -530,6 +527,7 @@ impl Board for Uefi {
     /// switcher.
     const FLAVOR: Flavor = if el2::VHE { Flavor::Vhe } else { Flavor::Nvhe };
 
+    #[cfg(feature = "usb")]
     fn usb_hosts(&self) -> board::UsbHosts {
         usb::hosts()
     }
@@ -736,6 +734,7 @@ impl Board for Uefi {
         }
     }
 
+    #[cfg(feature = "gui")]
     fn framebuffer(&self) -> Option<board::fb::Desc> {
         gop::framebuffer()
     }

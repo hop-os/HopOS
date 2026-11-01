@@ -109,7 +109,7 @@ conntrack.
 | Waar | Wat | Kant |
 | --- | --- | --- |
 | `kern/src/system.rs` | `PrivOp::Flip` (n moet 0 zijn), `FlipBundle`, `FLIP_BUNDLE_JOB`, `MAX_FLIP_PATH` bij een start | de haak |
-| `abi/src/systemapi.rs` | `FLIP_BUNDLE_JOB`; `FLIP_COLD` alleen nog voor de import van Hop | de haak |
+| `abi/src/systemapi.rs` | `FLIP_BUNDLE_JOB` | de haak |
 | `abi/src/layout` | `FLIP_HANDOFF_LEN`, `HANDOFF_*_OFF`, `flip_handoff_pa` | adressen |
 | `board/*/src/slots.rs`, `board/uefi/src/flip.rs`, `facts.rs` | `FLIP_*`, `BLACK_BOX`, de feitenpagina van UEFI | adressen, ingang |
 | `board/*` | `flip_carry_config` (Apple), `flip_carry_seed` (UEFI) | vangst |

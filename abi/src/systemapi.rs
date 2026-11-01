@@ -395,11 +395,6 @@ pub const FLIP_BUNDLE_JOB: &[u8] = b"hopos.flip-bundle";
 /// van [`FLIP_BUNDLE_JOB`]).
 pub const HOP_IMAGE_JOB: &[u8] = b"hopos.hop-image";
 
-/// De vlag van de koude flip die er niet meer is (01-11): de kern weigert
-/// elke `n` behalve 0. Alleen nog omdat Hop hem importeert; weg zodra Hop
-/// zonder koude flip is (agent G).
-pub const FLIP_COLD: u64 = 1;
-
 /// Het laagste bevoegde opnummer.
 pub const PRIV_OP_FIRST: u8 = PrivOp::StartSlot as u8;
 /// Het hoogste bevoegde opnummer.

@@ -137,7 +137,7 @@ const RX_PBL_SHIFT: u32 = 16;
 const RX_RBSZ_SHIFT: u32 = 1;
 const RX_RBSZ_MASK: u32 = 0x7FFE;
 
-// De RX-interrupt van kanaal 0. Twee bit-indelingen bestaan er voor het
+// De interrupts van kanaal 0. Twee bit-indelingen bestaan er voor het
 // enable-register en dát is de valkuil (dwmac4_dma.h): tot core 4.00 is NIE
 // bit 16, vanaf 4.10 bit 15 (`DMA_CHAN_INTR_ENA_NIE_4_10`). Dit silicium is
 // een 4.20a en dus de 4.10-indeling. GEMETEN 20-09 op de Radxa: met bit 16
@@ -148,8 +148,12 @@ const RX_RBSZ_MASK: u32 = 0x7FFE;
 const INTR_NIE: u32 = 1 << 15;
 /// Receive interrupt enable.
 const INTR_RIE: u32 = 1 << 6;
+/// Transmit interrupt enable (`DMA_CHAN_INTR_ENA_TIE`).
+const INTR_TIE: u32 = 1 << 0;
 /// Status: receive interrupt.
 const STAT_RI: u32 = 1 << 6;
+/// Status: transmit interrupt (een descriptor met IOC is klaar).
+const STAT_TI: u32 = 1 << 0;
 /// Status: normal interrupt summary.
 const STAT_NIS: u32 = 1 << 15;
 
@@ -158,9 +162,11 @@ const DESC_SIZE: u64 = 16;
 /// Het vierde woord: OWN en het pakket (TDES3) of de status (RDES3).
 const DES3: u64 = 12;
 
-// TX (dwmac4_descs.h): TDES0/1 = bufferadres, TDES2 = bufferlengte, TDES3 =
-// pakket.
+// TX (dwmac4_descs.h): TDES0/1 = bufferadres, TDES2 = bufferlengte en IOC,
+// TDES3 = pakket.
 const TX_BUF_LEN_MASK: u32 = 0x3FFF;
+/// TDES2: TI als deze descriptor klaar is (`TDES2_INTERRUPT_ON_COMPLETION`).
+const TX_IOC: u32 = 1 << 31;
 const TX_PKT_LEN_MASK: u32 = 0x7FFF;
 const TX_LAST: u32 = 1 << 28;
 const TX_FIRST: u32 = 1 << 29;
@@ -241,13 +247,13 @@ const fn rx_control(cur: u32) -> u32 {
 }
 
 /// TDES2 en TDES3 voor één frame van `len` bytes (`1..=MAX_FRAME`): de
-/// bufferlengte in [13:0], en het pakket (eerste én laatste descriptor,
+/// bufferlengte in [13:0] met IOC, en het pakket (eerste én laatste descriptor,
 /// lengte in [14:0], OWN). Twee velden, dezelfde lengte: wie er één
 /// vergeet, krijgt een MAC die de verkeerde hoeveelheid bytes verstuurt.
 const fn tx_desc23(len: usize) -> (u32, u32) {
     let l = len as u32;
     (
-        l & TX_BUF_LEN_MASK,
+        TX_IOC | (l & TX_BUF_LEN_MASK),
         TX_OWN | TX_FIRST | TX_LAST | (l & TX_PKT_LEN_MASK),
     )
 }
@@ -294,8 +300,8 @@ impl Ops for Hw {
         read: 3 << 2,
         write: 1 << 2,
     };
-    const INTR_RX: u32 = INTR_NIE | INTR_RIE;
-    const STAT_RX: u32 = STAT_RI | STAT_NIS;
+    const INTR: u32 = INTR_NIE | INTR_RIE | INTR_TIE;
+    const STAT: u32 = STAT_RI | STAT_TI | STAT_NIS;
 
     fn version(r: &Regs) -> &Reg<u32> {
         &r.version

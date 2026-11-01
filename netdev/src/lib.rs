@@ -15,6 +15,12 @@
 //! een frame dat tussen de lege lees en het openen binnenkwam niet tot de
 //! vangrail blijft liggen (`napi_complete_done`, dan de irq aan, dan nog
 //! eens kijken).
+//!
+//! Op dezelfde lijn zit de TX-completion: een descriptor die de NIC
+//! vrijgeeft, trekt de lijn zoals een ontvangen frame, en de ack en de
+//! rearm nemen hem mee. Zo wekt een volle ring die leegloopt de pomp
+//! (Linux: de TX-clean in de NAPI-poll, `netif_wake_queue`). De blik na het
+//! openen doet de pomp voor TX zelf: hij zendt ná de RX-ronde.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -56,7 +62,8 @@ impl fmt::Display for Mac {
 /// Waarom een frame niet verzonden is.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TxError {
-    /// De TX-ring zit vol; probeer na een `flush` of een wek opnieuw.
+    /// De TX-ring zit vol; de TX-completion op de lijn wekt de pomp voor
+    /// een nieuwe poging.
     Full,
     /// Het frame past niet (langer dan [`MAX_FRAME`] of leeg).
     Size(usize),

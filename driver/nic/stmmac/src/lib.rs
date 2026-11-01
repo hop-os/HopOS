@@ -22,7 +22,12 @@
 //! anders: [`Mii`], Linux' `mii_regs`), de indeling van de regio (RX- en
 //! TX-descriptors onderin, de buffers vanaf [`Ops::BUF_OFF`]), de lengte-
 //! en foutcontrole van een RX-frame, en het ritme van de interrupt: masker
-//! dicht bij de claim, open als de pomp de ring leeg las.
+//! dicht bij de claim, open als de pomp de ring leeg las. Op de lijn zitten
+//! RX en TX (Linux `DMA_CHAN_INTR_NORMAL`: NIE, RIE en TIE), en elke
+//! TX-descriptor vraagt zijn interrupt (IOC): een vrijgekomen descriptor
+//! wekt de pomp. Linux zet IOC maar om de zoveel frames en ruimt de rest
+//! op met een timer (`tx_coal_frames`, `stmmac_tx_timer`); hier geen timer,
+//! dus op elk frame.
 //!
 //! De SoC-glue (klokken, pinmux, PHY-reset, de RGMII-deler) zit NIET hier
 //! maar in het board; de clause-22-PHY-logica komt uit `driver-mdio`, via
@@ -144,10 +149,10 @@ pub trait Ops: Copy + 'static {
     const RX_LIMIT: usize;
     /// De velden van het MDIO-adresregister.
     const MII: Mii;
-    /// De RX-interrupt in het enable-register.
-    const INTR_RX: u32;
-    /// De statusbits (W1C) die de RX-interrupt wissen.
-    const STAT_RX: u32;
+    /// De interrupts van de lijn (RX en TX) in het enable-register.
+    const INTR: u32;
+    /// De statusbits (W1C) die ze wissen.
+    const STAT: u32;
 
     /// Het VERSION-register.
     fn version(r: &Self::Regs) -> &Reg<u32>;
@@ -155,7 +160,7 @@ pub trait Ops: Copy + 'static {
     fn bus_mode(r: &Self::Regs) -> &Reg<u32>;
     /// Het MDIO-adres- en het MDIO-dataregister.
     fn mii(r: &Self::Regs) -> (&Reg<u32>, &Reg<u32>);
-    /// Het interrupt-enable- en het statusregister van de RX-DMA.
+    /// Het interrupt-enable- en het statusregister van de DMA.
     fn irq(r: &Self::Regs) -> (&Reg<u32>, &Reg<u32>);
 
     /// Kan deze MAC de onderhandelde snelheid? Gevraagd vóór de reset.
@@ -520,12 +525,12 @@ pub struct Stats {
     pub tx_full: u64,
     /// Doorbells: poll-demands of tail-pointers.
     pub doorbells: u64,
-    /// Keren dat de RX-interrupt weer open ging.
+    /// Keren dat de lijn weer open ging.
     pub rearms: u64,
 }
 
 /// Het interrupt-pad van de NIC: alleen het enable- en het statusregister
-/// van de RX-DMA, die niets met de ringen delen. `Copy`, zodat het board hem
+/// van de DMA, die niets met de ringen delen. `Copy`, zodat het board hem
 /// naast de driver houdt.
 #[derive(Clone, Copy)]
 pub struct IrqAck<O: Ops> {
@@ -543,7 +548,7 @@ impl<O: Ops> netdev::IrqAck for IrqAck<O> {
         // het enable- en statusregister delen niets met de ringen.
         let (ena, status) = O::irq(unsafe { dev::regs(self.base) });
         ena.write(0);
-        status.write(O::STAT_RX);
+        status.write(O::STAT);
     }
 }
 
@@ -615,8 +620,7 @@ impl<O: Ops> Stmmac<O> {
     }
 
     /// Hangt de bel van de NIC-interrupt aan de driver en zet de
-    /// RX-interrupt open. De RX-pomp wacht dan op de bel in plaats van te
-    /// pollen.
+    /// interrupts van de lijn open (RX en TX). De pomp wacht dan op de bel.
     pub fn set_irq(&mut self, bell: &'static Signal) {
         self.irq = Some(bell);
         self.rearm();
@@ -625,8 +629,8 @@ impl<O: Ops> Stmmac<O> {
     /// Status gewist, masker open.
     fn rearm(&mut self) {
         let (ena, status) = O::irq(self.regs());
-        status.write(O::STAT_RX);
-        ena.write(O::INTR_RX);
+        status.write(O::STAT);
+        ena.write(O::INTR);
         self.stats.rearms += 1;
     }
 

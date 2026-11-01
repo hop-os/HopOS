@@ -98,6 +98,11 @@ fn init_follows_the_hardware_counters_and_programs_the_mac() {
         0x0203,
         "TX PROD follows CONS"
     );
+    assert_eq!(
+        dev::read32(b.add(TX_DMA + 0x24)),
+        1,
+        "a TXDMA_MBDONE per frame"
+    );
     assert_eq!(dev::read32(b.add(0x80c)), 0x0248_0102);
     assert_eq!(dev::read32(b.add(0x810)), 0x0304);
     assert_eq!(dev::read32(b.add(0xe50)), (1 << 16) | (1 << 15));
@@ -242,28 +247,26 @@ fn link_decides_speed_and_duplex() {
 }
 
 /// De lijn (docs/sequence-hopos.md §14.1 O3): de ack sluit `RXDMA_MBDONE`
-/// in het masker en wist de status; `set_irq` en een lege ring met de lijn
-/// dicht zetten hem weer open (NAPI).
+/// en `TXDMA_MBDONE` in het masker en wist de status; `set_irq` en een lege
+/// ring met de lijn dicht zetten beide weer open (NAPI, de TX-completion
+/// erbij).
 #[test]
-fn the_ack_closes_rx_done_and_an_empty_ring_reopens_it() {
+fn the_ack_closes_rx_and_tx_done_and_an_empty_ring_reopens_them() {
     static BELL: Signal = Signal::new();
+    const BOTH: u32 = (1 << 13) | (1 << 16);
     let mut f = Fake::new();
     let b = f.base();
     let mut n = f.nic();
     let r = |off: u64| dev::read32(b.add(off));
     netdev::IrqAck::ack(&n.irq_ack());
-    assert_eq!((r(0x210), r(0x208)), (1 << 13, 1 << 13), "mask_set, clear");
+    assert_eq!((r(0x210), r(0x208)), (BOTH, BOTH), "mask_set, clear");
     dev::write32(b.add(0x208), 0);
     n.set_irq(&BELL);
-    assert_eq!(
-        (r(0x214), r(0x208)),
-        (1 << 13, 1 << 13),
-        "mask_clear, clear"
-    );
+    assert_eq!((r(0x214), r(0x208)), (BOTH, BOTH), "mask_clear, clear");
     assert!(n.irq().is_some());
     // De ack sloot hem (mask_status), de ring is leeg: open, en `None`.
     dev::write32(b.add(0x214), 0);
     dev::write32(b.add(0x20c), 1 << 13);
     assert_eq!(n.receive(&mut [0; 64]), None);
-    assert_eq!(r(0x214), 1 << 13, "an empty ring reopens the line");
+    assert_eq!(r(0x214), BOTH, "an empty ring reopens the line");
 }

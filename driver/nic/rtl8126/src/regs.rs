@@ -162,12 +162,16 @@ pub(crate) const OCP_FLAG: u32 = 0x8000_0000;
 // Interrupt-bits (32 bit op de 8125-familie; de lage 16 zijn de klassieke).
 pub(crate) const INT_RX_OK: u32 = 0x0001;
 pub(crate) const INT_RX_ERR: u32 = 0x0002;
+pub(crate) const INT_TX_OK: u32 = 0x0004;
+pub(crate) const INT_TX_ERR: u32 = 0x0008;
 pub(crate) const INT_RX_OVERFLOW: u32 = 0x0010;
 pub(crate) const INT_LINK_CHG: u32 = 0x0020;
 pub(crate) const INT_RX_FIFO_OVER: u32 = 0x0040;
-/// Wat de RX-pomp wekt.
+/// Wat de pomp wekt aan de ontvangstkant.
 pub(crate) const INT_RX: u32 =
     INT_RX_OK | INT_RX_ERR | INT_RX_OVERFLOW | INT_LINK_CHG | INT_RX_FIFO_OVER;
+/// En aan de zendkant: een descriptor is klaar (r8169 `TxOK | TxErr`).
+pub(crate) const INT_TX: u32 = INT_TX_OK | INT_TX_ERR;
 
 // Descriptor-bits (opts1).
 pub(crate) const DESC_OWN: u32 = 1 << 31;

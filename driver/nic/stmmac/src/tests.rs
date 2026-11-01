@@ -104,8 +104,8 @@ impl Ops for Fake {
         read: 3 << 2,
         write: 1 << 2,
     };
-    const INTR_RX: u32 = 0x41;
-    const STAT_RX: u32 = 0x41;
+    const INTR: u32 = 0x41;
+    const STAT: u32 = 0x41;
 
     fn version(r: &FakeRegs) -> &Reg<u32> {
         &r.version
@@ -464,16 +464,16 @@ fn the_irq_masks_on_ack_and_rearms_when_the_ring_is_empty() {
     assert_eq!(n.regs().intr_ena.read(), 0);
     n.set_irq(&BELL);
     let r = n.regs();
-    assert_eq!(r.intr_ena.read(), F::INTR_RX);
+    assert_eq!(r.intr_ena.read(), F::INTR);
     r.status.write(u32::MAX);
     n.irq_ack().ack();
-    assert_eq!(r.status.read(), F::STAT_RX, "W1C of the RX bits only");
+    assert_eq!(r.status.read(), F::STAT, "W1C of the line's bits only");
     assert_eq!(r.intr_ena.read(), 0, "ack leaves the line masked");
     // De pomp leest de ring leeg: het masker gaat weer open, één keer.
     let mut out = [0u8; 64];
     let rearms = n.stats.rearms;
     assert_eq!(n.receive(&mut out), None);
-    assert_eq!(r.intr_ena.read(), F::INTR_RX);
+    assert_eq!(r.intr_ena.read(), F::INTR);
     assert_eq!(n.receive(&mut out), None);
     assert_eq!(n.stats.rearms, rearms + 1);
     assert!(n.irq().is_some());

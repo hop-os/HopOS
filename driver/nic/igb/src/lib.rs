@@ -21,8 +21,9 @@
 //! De interrupt is optioneel en alleen MSI-X: het board zet de MSI-X-tabel
 //! (vector 0) en de capability aan, en daarna zet [`Igb::set_irq`] de NIC
 //! in de MSI-X-modus van Linux `igb_configure_msix`, met één vector voor
-//! RX-queue 0 (zie daar). Zonder `set_irq` blijft alles dicht en pollt het
-//! board.
+//! RX- en TX-queue 0, het queuepaar van één `q_vector` (zie daar): een
+//! ontvangen frame en een TX-writeback (RS staat op elke descriptor) trekken
+//! dezelfde lijn. Zonder `set_irq` blijft alles dicht.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -227,11 +228,11 @@ const GPIE_PBA: u32 = 1 << 31;
 pub const GPIE_MSIX: u32 = GPIE_MSIX_MODE | GPIE_PBA | GPIE_EIAME | GPIE_NSICR;
 /// `E1000_IVAR_VALID`: het allocatiebit naast het vectornummer.
 const IVAR_VALID: u32 = 0x80;
-/// De MSI-X-vector van RX-queue 0, en de enige: entry 0 van de MSI-X-tabel
+/// De MSI-X-vector van queue 0 (RX en TX), en de enige: entry 0 van de MSI-X-tabel
 /// (die het board zet), dus EventID 0 bij de ITS.
-pub const RX_VECTOR: u32 = 0;
-/// Het bit van [`RX_VECTOR`] in EICR/EIMS/EIMC/EIAC/EIAM/EICS.
-pub const RX_EIMS: u32 = 1 << RX_VECTOR;
+pub const Q_VECTOR: u32 = 0;
+/// Het bit van [`Q_VECTOR`] in EICR/EIMS/EIMC/EIAC/EIAM/EICS.
+pub const Q_EIMS: u32 = 1 << Q_VECTOR;
 
 /// Eén RX- of TX-buffer: de SRRCTL-eenheid, ruim boven 1522.
 pub const BUF_SIZE: usize = 2048;
@@ -358,13 +359,14 @@ impl fmt::Display for Error {
 /// De `Result` van deze crate.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
-/// IVAR0 met RX-queue 0 op `vector`: Linux `igb_write_ivar(hw, vector, 0,
-/// 0)`, gelijk op de I210 (rij-gewijs) en de 82576 (kolom-gewijs), want
-/// voor queue 0 is index en offset bij beide 0. De rest (TX-queue 0, de
-/// queues van 1) blijft staan.
+/// IVAR0 met RX- en TX-queue 0 op `vector`: Linux `igb_write_ivar(hw,
+/// vector, 0, 0)` en `(hw, vector, 0, 8)`, gelijk op de I210 (rij-gewijs)
+/// en de 82576 (kolom-gewijs), want voor queue 0 is de index bij beide 0
+/// en de offset 0 (RX) en 8 (TX). De rest (de queues van 1) blijft staan.
 #[must_use]
-pub const fn ivar_rx0(ivar: u32, vector: u32) -> u32 {
-    (ivar & !0xff) | ((vector & 0x1f) | IVAR_VALID)
+pub const fn ivar_q0(ivar: u32, vector: u32) -> u32 {
+    let v = (vector & 0x1f) | IVAR_VALID;
+    (ivar & !0xffff) | v | (v << 8)
 }
 
 /// Het interrupt-pad: alleen EIMC. `Copy`, zodat het board hem naast de
@@ -383,13 +385,13 @@ impl IrqAck {
 }
 
 impl netdev::IrqAck for IrqAck {
-    /// Masker van de RX-vector dicht, uit de dispatch vóór de EOI. EIAM
+    /// Masker van de vector dicht, uit de dispatch vóór de EOI. EIAM
     /// deed dat bij het bericht al (`GPIE.EIAME`); dit is dezelfde stand
     /// zonder op dat bit te leunen, één geposte schrijf. Pas de pomp
     /// heropent hem, bij een lege ring (`receive`), het ritme van NAPI
     /// (`igb_msix_ring`, dan `igb_poll`, dan `igb_ring_irq_enable`).
     fn ack(&self) {
-        self.regs().eimc.write(RX_EIMS);
+        self.regs().eimc.write(Q_EIMS);
     }
 }
 
@@ -498,7 +500,7 @@ impl Igb {
 
     /// Hangt de bel aan de driver en zet de NIC in de MSI-X-modus met één
     /// vector, `igb_configure_msix` plus `igb_irq_enable` voor één queue:
-    /// GPIE, IVAR0 voor RX-queue 0 op [`RX_VECTOR`], dan EIAC, EIAM en EIMS
+    /// GPIE, IVAR0 voor RX- en TX-queue 0 op [`Q_VECTOR`], dan EIAC, EIAM en EIMS
     /// voor die vector. Geen "other"-vector: de link-wissel en de rest van
     /// ICR blijven dicht (IMS 0, IVAR_MISC ongeldig), zoals gepold. Geen
     /// EITR: de reset-stand 0 is geen demping, de pomp is de demping (het
@@ -510,9 +512,9 @@ impl Igb {
     pub fn set_irq(&mut self, bell: &'static Signal) {
         let r = self.regs();
         r.gpie.write(GPIE_MSIX);
-        r.ivar0.update(|v| ivar_rx0(v, RX_VECTOR));
-        r.eiac.update(|v| v | RX_EIMS);
-        r.eiam.update(|v| v | RX_EIMS);
+        r.ivar0.update(|v| ivar_q0(v, Q_VECTOR));
+        r.eiac.update(|v| v | Q_EIMS);
+        r.eiam.update(|v| v | Q_EIMS);
         self.irq = Some(bell);
         self.rearm();
     }
@@ -525,12 +527,12 @@ impl Igb {
         let _ = self.regs().status.read(); // commit
     }
 
-    /// Vuurt de RX-vector met de hand (EICS), de zelftest van het board:
+    /// Vuurt de vector met de hand (EICS), de zelftest van het board:
     /// zo deed `igb_watchdog_task` het ("Cause software interrupt to ensure
     /// Rx ring is cleaned"). Komt hij niet aan, dan klopt de route
     /// (tabel, DeviceID, ITS) niet en kan het board terug naar pollen.
     pub fn fire_irq(&self) {
-        self.regs().eics.write(RX_EIMS);
+        self.regs().eics.write(Q_EIMS);
         let _ = self.regs().status.read(); // commit
     }
 
@@ -547,9 +549,9 @@ impl Igb {
         }
     }
 
-    /// Het masker van de RX-vector open (`igb_ring_irq_enable`).
+    /// Het masker van de vector open (`igb_ring_irq_enable`).
     fn rearm(&self) {
-        self.regs().eims.write(RX_EIMS);
+        self.regs().eims.write(Q_EIMS);
     }
 
     fn regs(&self) -> &'static Regs {

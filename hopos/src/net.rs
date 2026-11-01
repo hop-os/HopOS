@@ -378,7 +378,7 @@ pub(crate) fn start<D: Device + 'static>(
         &STATS,
     )
     .ok_or(Error::NoLine)?;
-    exec.spawn(async move { pump.run(exec).await })
+    exec.spawn(async move { pump.run().await })
         .map_err(|_| Error::Spawn("pump"))?;
     println!(
         "net: pump on the nic's irq line, uplink queues 2x{} HOPOS_NET_PUMP",

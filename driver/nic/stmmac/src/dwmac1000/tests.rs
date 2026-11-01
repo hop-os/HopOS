@@ -30,7 +30,11 @@ fn rx_cntl_reports_a_real_buffer_size_and_ring_end_on_the_last() {
 #[test]
 fn tx_cntl_sets_first_last_length_and_ring_end() {
     // Zonder FS+LS wacht de MAC op de rest van een frame dat niet komt.
-    assert_eq!(tx_cntl(64, false), TX_CNTL_FIRST | TX_CNTL_LAST | 64);
+    // Zonder IC geen TI, en dan wekt een vrijgekomen descriptor niemand.
+    assert_eq!(
+        tx_cntl(64, false),
+        TX_CNTL_IC | TX_CNTL_FIRST | TX_CNTL_LAST | 64
+    );
     assert_eq!(
         tx_cntl(1518, true) & (RING_END | CNTL_SIZE1_MASK),
         RING_END | 1518
@@ -43,7 +47,7 @@ fn descriptor_fields_sit_at_the_databook_positions() {
     // op 29/30 en in RDES0 op 9/8, de lengte in RDES0 [29:16].
     assert_eq!(DESC_OWN, 0x8000_0000);
     assert_eq!(RING_END, 0x0200_0000);
-    assert_eq!(TX_CNTL_FIRST | TX_CNTL_LAST, 0x6000_0000);
+    assert_eq!(TX_CNTL_IC | TX_CNTL_FIRST | TX_CNTL_LAST, 0xE000_0000);
     assert_eq!(RX_STS_FIRST | RX_STS_LAST, 0x300);
     assert_eq!(Hw::rx_raw_len(0xFFFF_FFFF), 0x3FFF);
     assert_eq!(Hw::rx_raw_len(1518 << 16 | DESC_OWN | 0xFFFF), 1518);
@@ -163,9 +167,9 @@ fn the_doorbells_are_poll_demands_and_the_irq_is_the_3x_layout() {
     n.transmit(&[1; 60]).unwrap();
     n.flush();
     assert_eq!(n.regs().tx_poll.read(), 1);
-    // De 3.x-indeling: NIE op bit 16, niet de 15 van de DWMAC4.
+    // De 3.x-indeling: NIE op bit 16, niet de 15 van de DWMAC4; RIE en TIE.
     n.set_irq(&BELL);
-    assert_eq!(n.regs().intr_ena.read(), 0x0001_0040);
+    assert_eq!(n.regs().intr_ena.read(), 0x0001_0041);
 }
 
 #[test]

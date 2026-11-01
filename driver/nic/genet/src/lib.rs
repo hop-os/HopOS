@@ -12,12 +12,14 @@
 //! geen HFB. Boardvast bewezen in de Go-kern op 11-07, één boot: v5-rev,
 //! MAC-reset, PHY op adres 1, autoneg, ring-16-DMA, DHCP-lease.
 //!
-//! De lijn (docs/sequence-hopos.md §14.1 O3; Linux `bcmgenet_isr0` en
-//! `bcmgenet_rx_ring16_int_enable`): ring 16 meldt een ontvangen frame als
-//! `RXDMA_MBDONE` in INTRL2_0 (GIC SPI 157 op de BCM2711), met een drempel
-//! van één frame. Het ritme is dat van NAPI ([`netdev`]): de ack zet het
-//! bit in het masker en wist de status, [`receive`](netdev::Device::receive)
-//! zet het masker weer open als de ring leeg is en kijkt dan nog één keer.
+//! De lijn (docs/sequence-hopos.md §14.1 O3; Linux `bcmgenet_isr0`,
+//! `bcmgenet_rx_ring16_int_enable` en `bcmgenet_tx_ring16_int_enable`):
+//! ring 16 meldt een ontvangen frame als `RXDMA_MBDONE` en een verzonden
+//! frame als `TXDMA_MBDONE` in INTRL2_0 (GIC SPI 157 op de BCM2711), elk met
+//! een drempel van één frame. Het ritme is dat van NAPI ([`netdev`]): de
+//! ack zet beide bits in het masker en wist de status,
+//! [`receive`](netdev::Device::receive) zet het masker weer open als de
+//! ring leeg is en kijkt dan nog één keer.
 //! ONGETOETST op ijzer: QEMU `raspi4b` heeft geen GENET.
 //!
 //! De valkuilen zitten als commentaar bij de code; de twee grootste: elke
@@ -165,7 +167,8 @@ struct TxDma {
     _start_hi: u32,
     end: Reg<u32>,
     _end_hi: u32,
-    _r0: u32,
+    /// DMA_MBUF_DONE_THRESH: na zoveel frames een `TXDMA_MBDONE`.
+    mbuf_done_thresh: Reg<u32>,
     flow: Reg<u32>,
     write_ptr: Reg<u32>,
     _wp_hi: u32,
@@ -217,6 +220,7 @@ const _: () = {
     assert!(offset_of!(RxDma, burst) == 0x4c);
     assert!(offset_of!(TxDma, cons) == 0x08);
     assert!(offset_of!(TxDma, prod) == 0x0c);
+    assert!(offset_of!(TxDma, mbuf_done_thresh) == 0x24);
     assert!(offset_of!(TxDma, flow) == 0x28);
     assert!(offset_of!(TxDma, write_ptr) == 0x2c);
     assert!(offset_of!(TxDma, ring_cfg) == 0x40);
@@ -248,6 +252,10 @@ const DMA_DISABLED: u32 = 1;
 const RING16_EN: u32 = 1 << 17;
 /// INTRL2_0: ring 16 ontving (`UMAC_IRQ_RXDMA_MBDONE`).
 const IRQ_RXDMA_DONE: u32 = 1 << 13;
+/// INTRL2_0: ring 16 verzond (`UMAC_IRQ_TXDMA_MBDONE`).
+const IRQ_TXDMA_DONE: u32 = 1 << 16;
+/// De bits van de lijn: ontvangen en verzonden, samen dicht en open.
+const IRQ_RING16: u32 = IRQ_RXDMA_DONE | IRQ_TXDMA_DONE;
 /// Hoe lang een DMA-stop mag duren.
 const DMA_STOP_NS: u64 = 5_000_000;
 /// Hoe lang een MDIO-transactie mag duren: ~25 µs typisch; de grens van
@@ -316,15 +324,15 @@ pub struct IrqAck {
 }
 
 impl netdev::IrqAck for IrqAck {
-    /// Laat de lijn los: `RXDMA_MBDONE` in het masker en de status gewist
-    /// (`bcmgenet_isr0`, `bcmgenet_rx_ring16_int_disable`). De driver zet
-    /// het masker weer open als de pomp de ring leeg las.
+    /// Laat de lijn los: `RXDMA_MBDONE` en `TXDMA_MBDONE` in het masker en
+    /// de status gewist (`bcmgenet_isr0`, de `ring16_int_disable` van RX en
+    /// TX). De driver zet het masker weer open als de pomp de ring leeg las.
     fn ack(&self) {
         // SAFETY: `base` kwam uit [`Genet::new`], dat een gemapt blok eiste;
         // het INTRL2-blok deelt niets met de ringen.
         let i: &Intrl2 = unsafe { dev::regs(self.base.add(INTRL2_0)) };
-        i.mask_set.write(IRQ_RXDMA_DONE);
-        i.clear.write(IRQ_RXDMA_DONE);
+        i.mask_set.write(IRQ_RING16);
+        i.clear.write(IRQ_RING16);
     }
 }
 
@@ -366,18 +374,19 @@ impl Genet {
         IrqAck { base: self.base }
     }
 
-    /// Hangt de bel van de lijn aan de driver en zet `RXDMA_MBDONE` open.
+    /// Hangt de bel van de lijn aan de driver en zet `RXDMA_MBDONE` en
+    /// `TXDMA_MBDONE` open.
     /// Na [`init`](Self::init); de RX-pomp wacht dan op de bel.
     pub fn set_irq(&mut self, bell: &'static Signal) {
         self.irq = Some(bell);
         self.rearm();
     }
 
-    /// Status gewist, masker open (`bcmgenet_rx_ring16_int_enable`).
+    /// Status gewist, masker open (de `ring16_int_enable` van RX en TX).
     fn rearm(&self) {
         let i: &Intrl2 = self.at(INTRL2_0);
-        i.clear.write(IRQ_RXDMA_DONE);
-        i.mask_clear.write(IRQ_RXDMA_DONE);
+        i.clear.write(IRQ_RING16);
+        i.mask_clear.write(IRQ_RING16);
     }
 
     /// Staat `RXDMA_MBDONE` in het masker (de ack sloot hem)?
@@ -599,6 +608,8 @@ impl Genet {
         tx.read_ptr.write(ptr);
         tx.write_ptr.write(ptr);
         tx.prod.write(self.tx_prod);
+        // Een `TXDMA_MBDONE` per frame (Linux `bcmgenet_init_tx_ring`).
+        tx.mbuf_done_thresh.write(1);
         tx.flow.write(0);
         tx.buf_size.write(((N_BD as u32) << 16) | BUF_SIZE as u32);
         tx.ring_cfg.write(1 << 16);

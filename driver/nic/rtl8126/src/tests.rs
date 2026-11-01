@@ -406,9 +406,12 @@ fn transmit_pads_batches_and_honours_ownership() {
         0,
         "last descriptor ends the ring"
     );
-    // Descriptor 0 is nog van de NIC: vol, en de driver belt nog eens.
+    // Descriptor 0 is nog van de NIC: vol, en de driver belt nog eens en
+    // wist de TX-bits, zodat de volgende TxOK een flank geeft.
+    dev::write32(at(m.base, 0x3c), 0);
     assert_eq!(n.transmit(&[1; 100]), Err(TxError::Full));
     assert_eq!(n.stats.doorbells, 2);
+    assert_eq!(dev::read32(at(m.base, 0x3c)), INT_TX, "W1C of TxOK, TxErr");
     dev::write32(tx(0), 0); // de NIC gaf hem terug
     n.transmit(&[1; 100]).unwrap();
     assert_eq!(n.transmit(&[]), Err(TxError::Size(0)));
@@ -420,7 +423,7 @@ fn the_irq_masks_on_ack_and_rearms_on_an_empty_ring() {
     let m = chip(0x649, false);
     let mut n = fake(&m);
     n.set_irq(&BELL);
-    assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX, "mask open");
+    assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX | INT_TX, "mask open");
     let ack = n.irq_ack();
     dev::write32(at(m.base, 0x3c), INT_RX_OK);
     ack.ack();
@@ -435,6 +438,6 @@ fn the_irq_masks_on_ack_and_rearms_on_an_empty_ring() {
     assert_eq!(dev::read32(at(m.base, 0x38)), 0, "not drained yet");
     // Leeg: het masker gaat weer open.
     assert_eq!(n.receive(&mut [0; 4096]), None);
-    assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX);
+    assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX | INT_TX);
     assert!(!BELL.take(), "the driver never rings the bell itself");
 }

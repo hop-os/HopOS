@@ -154,7 +154,7 @@ fn receive_takes_complete_frames_returns_the_rest_and_rearms() {
     n.set_irq(&BELL, || {
         REARMS.fetch_add(1, SeqCst);
     });
-    assert_eq!(dev::read32(b.add(0x028)), INT_RCOMP, "IER open");
+    assert_eq!(dev::read32(b.add(0x028)), INT_LINE, "IER open");
     let mut buf = [0u8; 2048];
     // Frame 0 zonder EOF (kapot), frame 1 compleet.
     dev::write32(d, dev::read32(d) | RX_OWNED);
@@ -209,8 +209,8 @@ fn ack_masks_and_clears_the_explicit_bit() {
     let b = f.base();
     // SAFETY: het nep-blok leeft de hele test.
     unsafe { ack_irq(b) };
-    assert_eq!(dev::read32(b.add(0x02c)), INT_RCOMP);
-    assert_eq!(dev::read32(b.add(0x024)), INT_RCOMP);
+    assert_eq!(dev::read32(b.add(0x02c)), INT_LINE);
+    assert_eq!(dev::read32(b.add(0x024)), INT_LINE);
 }
 
 #[test]

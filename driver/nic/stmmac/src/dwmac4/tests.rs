@@ -56,9 +56,9 @@ fn rx_control_carries_a_real_buffer_size() {
 
 #[test]
 fn the_descriptor_words_sit_where_dwmac4_descs_h_says() {
-    // TX: de lengte twee keer, in TDES2 en in TDES3.
+    // TX: de lengte twee keer, in TDES2 (met IOC) en in TDES3.
     let (d2, d3) = tx_desc23(1000);
-    assert_eq!(d2, 1000);
+    assert_eq!(d2, TX_IOC | 1000);
     assert_eq!(d3, TX_OWN | TX_FIRST | TX_LAST | 1000);
     // RX: de lengte in RDES3 [14:0]; de statusbits erboven lekken niet.
     assert_eq!(Hw::rx_raw_len(0xFFFF_8000 | 100), 100);
@@ -120,7 +120,7 @@ fn a_returned_descriptor_gets_its_buffer_address_back() {
     dev::write32(t, 0xdead_beef);
     Hw::tx_give(t, n.ring.tx_buf(0), 60, false);
     assert_eq!(dev::read32(t), lo(n.ring.tx_buf(0)));
-    assert_eq!(dev::read32(t.add(8)), 60);
+    assert_eq!(dev::read32(t.add(8)), TX_IOC | 60);
     assert!(!Hw::tx_free(t));
 }
 
@@ -192,9 +192,10 @@ fn the_doorbells_are_tails_and_the_irq_is_the_4_10_layout() {
     n.transmit(&[1; 60]).unwrap();
     n.flush();
     assert_eq!(n.regs().chan.tx_end.read(), lo(n.ring.tx(1)));
-    // NIE op bit 15 (4.10+), niet de 16 van de 3.x: 20-09 op de Radxa.
+    // NIE op bit 15 (4.10+), niet de 16 van de 3.x: 20-09 op de Radxa; RIE
+    // en TIE.
     n.set_irq(&BELL);
-    assert_eq!(n.regs().chan.intr_ena.read(), 0x0000_8040);
+    assert_eq!(n.regs().chan.intr_ena.read(), 0x0000_8041);
 }
 
 #[test]

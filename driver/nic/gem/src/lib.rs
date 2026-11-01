@@ -32,7 +32,10 @@
 //!
 //! De interrupt: [`ack_irq`] (masker dicht, latch gewist) is de device-ack
 //! van de dispatcher; de RX-pomp heropent hem als hij de ring leeg vindt
-//! (het rearm-ritme van `hopnet.rxLoop` in Go).
+//! (het rearm-ritme van `hopnet.rxLoop` in Go). Op de lijn: RCOMP, en de
+//! TX-kant zoals Linux' `MACB_TX_INT_FLAGS`: TCOMP (een frame ging de draad
+//! op, er is ring vrij) en TXUBR (de zender las een vrije descriptor en
+//! stopte; de herstart van [`Gem::tx_restart`] volgt in de pomp-ronde).
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -165,8 +168,14 @@ const MAN_MUST_BE_10: u32 = 0b10 << 16;
 /// RP1 (rp1.dtsi): cdns,ar2r-max-pipe = 8, aw2w-max-pipe = 8, use-aw2b-fill.
 const AMP_RP1: u32 = 8 | (8 << 8) | (1 << 16);
 
-/// Receive complete (MACB_RCOMP): de enige lijn die de RX-pomp wekt.
+/// Receive complete (MACB_RCOMP).
 const INT_RCOMP: u32 = 1 << 1;
+/// TX used bit read (MACB_TXUBR): de zender stopte op een vrije descriptor.
+const INT_TXUBR: u32 = 1 << 3;
+/// Transmit complete (MACB_TCOMP).
+const INT_TCOMP: u32 = 1 << 7;
+/// Wat de pomp wekt: ontvangen, verzonden, en de zender die stilviel.
+const INT_LINE: u32 = INT_RCOMP | INT_TXUBR | INT_TCOMP;
 
 /// Buffergrootte per descriptor (64-voud).
 pub const BUF: usize = 1536;
@@ -306,7 +315,7 @@ pub unsafe fn stop(base: Pa) {
 /// De device-ack van de dispatcher: masker dicht (IDR) en de latch gewist.
 ///
 /// Alleen wissen is niet genoeg: zolang de ring werk heeft, zet de GEM RCOMP
-/// meteen weer. En altijd het expliciete bit schrijven, nooit de
+/// meteen weer. En altijd de expliciete bits schrijven, nooit de
 /// teruggelezen waarde: de ISR van deze GEM is "clear on write" (RP1,
 /// DCFG1.IRQCOR=0); een gemaskeerd bit leest als 0 maar blijft gelatcht, en
 /// bij IER kwam de lijn meteen terug: 134k interrupts/s op een stille Pi 5
@@ -318,8 +327,8 @@ pub unsafe fn stop(base: Pa) {
 pub unsafe fn ack_irq(base: Pa) {
     // SAFETY: de voorwaarde van deze functie.
     let r = unsafe { regs(base) };
-    r.idr.write(INT_RCOMP);
-    r.isr.write(INT_RCOMP);
+    r.idr.write(INT_LINE);
+    r.isr.write(INT_LINE);
 }
 
 /// Eén GEM.
@@ -466,13 +475,13 @@ impl Gem {
 
     /// Hangt de NIC aan zijn lijn: `bell` is het signaal van de dispatcher,
     /// `rearm` de board-kant van het heropenen (RP1: IACK). Opent de
-    /// RX-interrupt.
+    /// interrupts van de lijn.
     pub fn set_irq(&mut self, bell: &'static Signal, rearm: fn()) {
         self.irq = Some(bell);
         self.rearm = Some(rearm);
         let r = self.r();
-        r.isr.write(INT_RCOMP);
-        r.ier.write(INT_RCOMP);
+        r.isr.write(INT_LINE);
+        r.ier.write(INT_LINE);
     }
 
     /// Latch gewist, de board-ack (met het masker nog dicht, zodat de RP1
@@ -480,9 +489,9 @@ impl Gem {
     fn rearm_irq(&self) {
         let Some(board) = self.rearm else { return };
         let r = self.r();
-        r.isr.write(INT_RCOMP);
+        r.isr.write(INT_LINE);
         board();
-        r.ier.write(INT_RCOMP);
+        r.ier.write(INT_LINE);
     }
 
     /// Linux' `macb_tx_restart`: staat de zender stil (TGO laag) terwijl de
@@ -490,9 +499,9 @@ impl Gem {
     /// TSTART. RP1-eigenaardigheid (macb_main.c, "TSTART write might get
     /// dropped"): over de PCIe-backed AXI kan de TSTART-schrijf verloren
     /// gaan terwijl de DMA net stopt. Linux doet dit op de TXUBR-interrupt;
-    /// hier bij een volle ring en bij elke lege RX-ronde van de pomp (de
-    /// vangrail van 10 ms is dus de langste stilstand). Elke volgende
-    /// TSTART haalt ook alles mee wat ervoor bleef liggen.
+    /// hier bij een volle ring en bij elke lege RX-ronde van de pomp, en
+    /// TXUBR zit op de lijn, dus de stilgevallen zender wekt die ronde zelf.
+    /// Elke volgende TSTART haalt ook alles mee wat ervoor bleef liggen.
     ///
     /// Tot 04-10 wachtte `transmit` hier per frame tot de descriptor terug
     /// was, in stappen van 10 µs: één frame tegelijk op de draad, 55 MB/s uit

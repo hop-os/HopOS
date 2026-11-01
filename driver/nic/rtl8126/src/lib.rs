@@ -23,7 +23,8 @@
 //! De interrupt heeft een eigen les, en die staat bij [`IrqAck::ack`] en
 //! `rearm`: masker dicht bij de ack, en pas weer open als de pomp de ring
 //! leeg las ([`receive`](netdev::Device::receive)), met een eigen blik op
-//! de ring.
+//! de ring. Op de lijn: RX en de TX-completion (r8169's `irq_mask` met
+//! TxOK en TxErr).
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -758,7 +759,7 @@ impl Rtl8126 {
     }
 
     /// Hangt de bel aan de driver en laat de NIC zijn lijn trekken op
-    /// RX-werk en link-wissel. Aanroepen nadat de lijn bij de controller
+    /// RX-werk, een verzonden frame en link-wissel. Aanroepen nadat de lijn bij de controller
     /// scherp staat; zonder blijft IMR 0 en pollt de pomp.
     pub fn set_irq(&mut self, bell: &'static Signal) {
         self.irq = Some(bell);
@@ -776,7 +777,7 @@ impl Rtl8126 {
     fn rearm(&self) {
         let r = self.regs();
         r.intr_status.write(u32::MAX);
-        r.intr_mask.write(INT_RX);
+        r.intr_mask.write(INT_RX | INT_TX);
         self.commit();
     }
 
@@ -841,6 +842,11 @@ impl netdev::Device for Rtl8126 {
     /// maakt de ring vol; dan eerst nog één keer bellen, want "TxPoll
     /// requests are lost when the Tx packets are too close" (mainline
     /// `rtl_tx`): goedkoper dan een vals "DMA stuck".
+    ///
+    /// Vol is wachten op TxOK, en die flank komt alleen als het bit niet
+    /// al stond (zie `rearm`): een completion tussen de W1C en het openen
+    /// van `rearm` liet hem staan. Daarom bij vol eerst de TX-bits wissen
+    /// en dan nog één blik op de descriptor, zoals `receive` doet voor RX.
     fn transmit(&mut self, frame: &[u8]) -> core::result::Result<(), TxError> {
         if frame.is_empty() || frame.len() > BUF_SIZE {
             return Err(TxError::Size(frame.len()));
@@ -849,8 +855,12 @@ impl netdev::Device for Rtl8126 {
         let d = self.tx_desc(i);
         if dev::read32(d) & DESC_OWN != 0 {
             self.ring_tx();
-            self.stats.tx_full += 1;
-            return Err(TxError::Full);
+            self.regs().intr_status.write(INT_TX);
+            self.commit();
+            if dev::read32(d) & DESC_OWN != 0 {
+                self.stats.tx_full += 1;
+                return Err(TxError::Full);
+            }
         }
         let buf = self.tx_bufs.add(u64::from(i) * BUF_SIZE as u64);
         dev::copy_in(buf, frame);

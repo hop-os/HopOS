@@ -15,7 +15,10 @@
 //! de lijn valt), en een `receive` die de ring leeg vindt heropent met de
 //! tag van het status-blok (`tg3_poll`, `tg3_int_reenable`), plus
 //! HOSTCC_MODE_NOW als er toch werk ligt: zonder dat bleef een los frame 10
-//! ms liggen (L83, 20-09).
+//! ms liggen (L83, 20-09). De TX-completion zit op dezelfde lijn, zoals in
+//! `tg3_poll`: de host coalescing werkt het status-blok ook bij als er een
+//! frame de draad op ging (HOSTCC_TXMAX_FRAMES 1, de tx-consumer in het
+//! blok), en een nieuwe tag na de heropening trekt de lijn.
 //!
 //! Wat deze driver NIET doet, en waarom dat mag: geen MSI (de doorbell van
 //! de Apple-poort is onbekend, 19-09), geen jumbo-frames, geen TSO of

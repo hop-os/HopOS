@@ -429,8 +429,10 @@ watchdog of de stroom, en de kaart start de oude kern.
   (0x0190_0000, PLIC-bron 101 in de vendor-DTS; Linux
   `drivers/mailbox/cv1800-mailbox.c`: `MBOX_EN_REG(cpu)`, dan `MBOX_SET_REG`
   0x60 met het kanaalbit, en de ontvanger wist met `MBOX_SET_CLR_REG`).
-  Tot die bewezen is, hoort de kern een app op de 300 µs-poll van de NIC
-  (`net::pump::NIC_POLL`).
+  Tot die bewezen is, hoort de kern een app na elke slaap van hooguit 2 ms
+  (`cpu::riscv::idle::WFI_CAP_NS`, docs/description.md §4.11). De 300
+  µs-poll van de pomp is weg (01-11): een vastgehouden frame wacht op de
+  TX-completion van de dwmac, op dezelfde lijn.
 - **De NIC-interrupt op de LicheeRV bestaat niet op de C906L.** De TRM
   (sophgo-doc, SG200X, "Interrupt number and Interrupt source mapping for
   Slave RISCV C906 @ 700Mhz") kent op de PLIC van de C906L geen ethernetbron

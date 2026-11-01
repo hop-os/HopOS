@@ -32,28 +32,15 @@ pub mod map;
 // De RNG200 als entropiebron van de kern (rng.rs).
 pub mod rng;
 pub mod slots;
-// De USB-invoer van de Pi's (usb.rs): het DMA-stuk, de VL805-handshake.
+// De USB-hosts van de Pi's (usb.rs): het DMA-stuk, de VL805-handshake.
+// Alleen met de bouwsteen `usb` (de gui- of de media-smaak).
+#[cfg(feature = "usb")]
 pub mod usb;
 // De PM-watchdog (watchdog.rs), voor de watchdog-taak van de kern.
 pub mod watchdog;
-// De framebuffer via de VideoCore: alleen in de gui-smaak (docs/gui.md);
-// kaal een stub met dezelfde signatuur (handboek §7).
+// De framebuffer via de VideoCore: alleen in de gui-smaak (docs/gui.md).
 #[cfg(feature = "gui")]
 mod vcfb;
-#[cfg(not(feature = "gui"))]
-mod vcfb {
-    //! Kaal gebouwd: geen framebuffer.
-    use core::cell::RefCell;
-    use driver_vcmail::Mbox;
-
-    /// Altijd headless.
-    pub(crate) fn framebuffer(
-        _mbox: &RefCell<Option<Mbox>>,
-        _tables: Option<crate::map::Tables>,
-    ) -> Option<driver_fb::Desc> {
-        None
-    }
-}
 
 #[cfg(test)]
 mod tests;
@@ -128,7 +115,8 @@ pub trait Soc: 'static {
     /// Vindt en initialiseert de NIC. `Ok(None)` = geen NIC.
     fn probe_nic(ctx: &NicCtx) -> Result<Option<Self::Nic>, Error>;
     /// De USB-hostcontrollers, met hun PCIe-link en firmware-handshake
-    /// gedaan (usb.rs). Alleen gevraagd in de gui-smaak; standaard geen.
+    /// gedaan (usb.rs). Alleen met de bouwsteen `usb`; standaard geen.
+    #[cfg(feature = "usb")]
     fn usb_hosts(ctx: &usb::UsbCtx) -> board::UsbHosts {
         let _ = ctx;
         board::UsbHosts::new()
@@ -542,11 +530,13 @@ impl<S: Soc> Board for Raspi<S> {
         }
     }
 
+    #[cfg(feature = "gui")]
     fn framebuffer(&self) -> Option<driver_fb::Desc> {
-        // De ene ontdekking van deze boot (vcfb.rs); kaal altijd `None`.
+        // De ene ontdekking van deze boot (vcfb.rs).
         vcfb::framebuffer(&MBOX, S::tables())
     }
 
+    #[cfg(feature = "usb")]
     fn usb_hosts(&self) -> board::UsbHosts {
         usb::hosts::<S>()
     }

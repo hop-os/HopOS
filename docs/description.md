@@ -35,6 +35,7 @@ het beleid.
  hopos/          de binary: kiest één board, spawnt alle taken, de lijm
  kern/  net/     lifecycle, system-API, hopfs, flip  |  switch, NAT, pomp
  gui/  media/    fb-grant, USB-invoer, VOP2  |  VPU-driver, optisch
+ usb/            de bus: de bouwsteen van gui en media
  board/          het Board-contract + 11 boards
  driver/         één crate per device (± 35)
  cpu/  fw/       boot, vectoren, kooi, switcher, OS-core  |  FDT, ACPI, ADT
@@ -416,7 +417,7 @@ nooit een panic.
 | Geen driver | `dvfs` (klokbeleid), `codec` (het videocodec-contract) |
 
 Een NIC is van de RX-pomp, een blokdriver van de hopfs-actor via
-`blkdev::Queue`, xhci van de usbin-taak, de firmwarekanalen van de
+`blkdev::Queue`, xhci van de USB-taak, de firmwarekanalen van de
 thermiek-taak.
 
 ### 5.4 board
@@ -465,20 +466,25 @@ In `net/` verder: `flows` (conntrack, 4096 flows, 512 per slot), `host`
 De binary (11k): `main.rs` (kmain, setup, tick), en de lijm die de traits
 van kern invult en de taken spawnt: `slots`, `kooi`, `cage`/`cage_riscv`,
 `glue`, `config`, `net`, `storage`, `flip`, `codec`, `optical`, `gui`,
-`conport`, `watchdog`, `telemetry`, `seed`, `clock`, `load`, `bench`,
-`mem`.
+`usb`, `off`, `conport`, `watchdog`, `telemetry`, `seed`, `clock`,
+`load`, `bench`, `mem`.
 Features buiten het board: `gui`, `media`, `vhe`, en de meetkernen
-`nvmebench`, `wdtest` en `hopcost`.
+`nvmebench`, `wdtest` en `hopcost`. Headless is zonder flag; `gui` en
+`media` staan los en trekken elk de interne bouwsteen `usb` mee; wat een
+build niet heeft, staat als stub in `off.rs`.
 
-### 5.7 gui en media
+### 5.7 gui, media en usb
 
+- `usb`: de bouwsteen van beide: bezit de xHCI-hosts, volgt in- en
+  uitpluggen en bedient bulk-opslag voor optical; met `usb/hid` (alleen
+  gui) de rapporten van toetsenbord en muis.
 - `gui/fbgrant`: wie het glas krijgt (`GUI=display` of `FB=1`), de
   `FB_*`-env, en de kernconsole van het scherm af en terug.
-- `gui/usbin`: bezit de xHCI-hosts, zet HID om naar JSON-regels voor de
-  houder van het glas (poort 7879), en bedient bulk-opslag voor optical.
+- `gui/usbin`: zet HID om naar JSON-regels voor de houder van het glas
+  (poort 7879).
 - `gui/rkscan`: VOP2 en DW-HDMI van de RK3566 (nog niet op ijzer).
 - `media/mve`: de Linlon V8-VPU van de O6N als `driver_codec::Engine`.
-- `media/optical`: BOT en MMC READ(10) over usbin.
+- `media/optical`: BOT en MMC READ(10) over `usb`.
 
 ### 5.8 Apps
 

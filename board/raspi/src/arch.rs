@@ -15,7 +15,9 @@ pub(crate) fn tables_changed() {
 /// EL2 laat ISR_EL1 de fysieke lijn zien (ARM ARM, ISR_EL1.A). De kern
 /// draait met PSTATE.A dicht, dus een asynchrone external abort (een
 /// PCIe-toegang die fout ging) blijft hier staan tot de eerste ERET naar
-/// EL1 hem neemt; deze lezing zegt vóór die tijd welke stap hem gaf.
+/// EL1 hem neemt; deze lezing zegt vóór die tijd welke stap hem gaf. Alleen
+/// de VL805-keten vraagt het (usb.rs, de bouwsteen `usb`).
+#[cfg(feature = "usb")]
 pub(crate) fn serror_pending() -> bool {
     imp::isr() & (1 << 8) != 0
 }
@@ -29,6 +31,7 @@ pub(crate) fn stage_slice(start: u64, len: u64) -> Option<&'static [u8]> {
 mod imp {
     use core::arch::asm;
 
+    #[cfg(feature = "usb")]
     pub(super) fn isr() -> u64 {
         let v: u64;
         // SAFETY: ISR_EL1 lezen heeft geen neveneffect; het neemt geen
@@ -67,6 +70,7 @@ mod imp {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 mod imp {
     //! Host-stubs.
+    #[cfg(feature = "usb")]
     pub(super) fn isr() -> u64 {
         0
     }

@@ -1231,7 +1231,7 @@ async fn capture_and_jump(exec: &'static Executor, p: Prepared, frozen: &mut Fro
     // link-reset van de nieuwe kern heen zouden schrijven (30-09, de Pi 5:
     // vijf flips vanuit de koud gebootte gui-kern, en de RP1 kreeg daarna
     // niets meer naar de host, geen descriptor en geen MSI).
-    crate::gui::quiesce_usb(exec).await;
+    crate::usb::quiesce(exec).await;
     // 3. Het laatste `.await` van deze kern: de bewoners.
     let slots: Vec<SlotState> =
         match kern::slots::call(&crate::LIFECYCLE, &REPLY, Request::Snapshot).await {
@@ -1267,7 +1267,7 @@ async fn cold_jump(exec: &'static Executor, p: Prepared) -> JumpError {
     // het glas nodig, de USB is zijn invoer), en een stop of CPU_OFF die
     // faalt laat een kern achter die doordraait mét toetsenbord; een
     // gestopte USB-taak komt in deze kern niet meer terug.
-    crate::gui::quiesce_usb(exec).await;
+    crate::usb::quiesce(exec).await;
     println!(
         "flip: cold flip, {stopped} resident(s) stopped and {off} app core(s) powered off, nothing to hand over HOPOS_FLIP_COLD stopped={stopped} cores_off={off}"
     );

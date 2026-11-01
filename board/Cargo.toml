@@ -15,11 +15,11 @@ cpu = { path = "../cpu" }
 netdev = { path = "../netdev" }
 executor = { path = "../executor" }
 sync = { path = "../sync" }
-# De beschrijving van een framebuffer (`Board::framebuffer`); de console
-# zelf linkt alleen de binary met de feature `gui`.
-driver-fb = { path = "../driver/fb" }
-# De lijst van `Board::usb_hosts`: begrensd, zonder heap.
-bounded = { path = "../bounded" }
+# De beschrijving van een framebuffer (`Board::framebuffer`, feature `gui`);
+# de console zelf linkt alleen de binary.
+driver-fb = { path = "../driver/fb", optional = true }
+# De lijst van `Board::usb_hosts` (feature `usb`): begrensd, zonder heap.
+bounded = { path = "../bounded", optional = true }
 # Het blokcontract van `NoDisk`, de schijf van een board zonder schijf.
 blkdev = { path = "../blkdev" }
 # De lezer van `hopos.cfg` (`Board::boot_param`): één parser voor elk
@@ -30,3 +30,10 @@ driver-dvfs = { path = "../driver/dvfs" }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+# Het scherm (`Board::framebuffer`): alleen de gui-smaak.
+gui = ["dep:driver-fb"]
+# De USB-hosts (`Board::usb_hosts`): de bouwsteen van gui en media.
+usb = ["dep:bounded"]

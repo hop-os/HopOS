@@ -9,9 +9,7 @@
 //! noemen we geen controller: een toegang op een dood PCIe-venster is op
 //! de BCM2712 geen nette 0xffffffff maar een gok.
 
-use crate::{RP1, RP1_BUS_OFF, rc_bare};
-use board::{Region, UsbHost, UsbHosts, UsbKind, usb_dma_slice};
-use board_raspi::usb::UsbCtx;
+use crate::RP1;
 use dev::Pa;
 
 /// De eerste USB3-hostcontroller van de RP1 (datasheet §5; Linux-DT
@@ -19,44 +17,72 @@ use dev::Pa;
 pub(crate) const RP1_USB0: Pa = Pa(RP1 + 0x20_0000);
 /// De tweede (`xhci@300000`).
 pub(crate) const RP1_USB1: Pa = Pa(RP1 + 0x30_0000);
-/// Het venster van elk: 1 MB.
-const RP1_USB_SIZE: u64 = 0x10_0000;
 
-/// De twee controllers achter de RP1, met elk de helft van het DMA-stuk.
-///
-/// `bus_off`: de RP1 is een PCIe-master; wat hij een adres noemt, gaat door
-/// het inbound-venster van de BCM2712-RC, en dat legt PCIe 0x10_0000_0000
-/// op DRAM 0 (dezelfde term als de GEM). Zonder die term zoekt de
-/// controller zijn ringen 64 GB naast het DRAM, en dat geeft geen
-/// foutmelding, alleen stilte (Go, 06-08).
-pub(crate) fn hosts(ctx: &UsbCtx) -> UsbHosts {
-    let mut out = UsbHosts::new();
-    let (phy, dl) = rc_bare(ctx.now).link_status();
-    if !(phy && dl) {
-        cpu::println!(
-            "usb: the RP1 link is down (phy {phy}, dl {dl}): the NIC probe trains it, no USB HOPOS_USB_NONE"
-        );
-        return out;
+#[cfg(feature = "usb")]
+pub(crate) use hosts::hosts;
+
+/// De hosts zelf: alleen met de bouwsteen `usb` (de gui- of de
+/// media-smaak). De halt hieronder is er altijd: een kale kern die een
+/// gui-kern opvolgt, erft lopende DMA-masters.
+#[cfg(feature = "usb")]
+mod hosts {
+    use super::{RP1_USB0, RP1_USB1};
+    use crate::{RP1_BUS_OFF, rc_bare};
+    use board::{Region, UsbHost, UsbHosts, UsbKind, usb_dma_slice};
+    use board_raspi::usb::UsbCtx;
+
+    /// Het venster van elk: 1 MB.
+    const RP1_USB_SIZE: u64 = 0x10_0000;
+
+    /// De twee controllers achter de RP1, met elk de helft van het DMA-stuk.
+    ///
+    /// `bus_off`: de RP1 is een PCIe-master; wat hij een adres noemt, gaat door
+    /// het inbound-venster van de BCM2712-RC, en dat legt PCIe 0x10_0000_0000
+    /// op DRAM 0 (dezelfde term als de GEM). Zonder die term zoekt de
+    /// controller zijn ringen 64 GB naast het DRAM, en dat geeft geen
+    /// foutmelding, alleen stilte (Go, 06-08).
+    pub(crate) fn hosts(ctx: &UsbCtx) -> UsbHosts {
+        let mut out = UsbHosts::new();
+        let (phy, dl) = rc_bare(ctx.now).link_status();
+        if !(phy && dl) {
+            cpu::println!(
+                "usb: the RP1 link is down (phy {phy}, dl {dl}): the NIC probe trains it, no USB HOPOS_USB_NONE"
+            );
+            return out;
+        }
+        for (i, (name, base)) in [("rp1-usb0", RP1_USB0), ("rp1-usb1", RP1_USB1)]
+            .into_iter()
+            .enumerate()
+        {
+            let _ = out.push(UsbHost {
+                name,
+                kind: UsbKind::Xhci,
+                regs: Region {
+                    base,
+                    size: RP1_USB_SIZE,
+                },
+                // De lijnen lopen via de RP1-MSI-X en de MIP; de driver pollt,
+                // dus die bedrading komt pas als hij dat niet meer doet.
+                irq: None,
+                bus_off: RP1_BUS_OFF,
+                dma: usb_dma_slice(ctx.dma, i, 2),
+            });
+        }
+        out
     }
-    for (i, (name, base)) in [("rp1-usb0", RP1_USB0), ("rp1-usb1", RP1_USB1)]
-        .into_iter()
-        .enumerate()
-    {
-        let _ = out.push(UsbHost {
-            name,
-            kind: UsbKind::Xhci,
-            regs: Region {
-                base,
-                size: RP1_USB_SIZE,
-            },
-            // De lijnen lopen via de RP1-MSI-X en de MIP; de driver pollt,
-            // dus die bedrading komt pas als hij dat niet meer doet.
-            irq: None,
-            bus_off: RP1_BUS_OFF,
-            dma: usb_dma_slice(ctx.dma, i, 2),
-        });
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_rp1_windows_are_in_gigabyte_124() {
+            assert_eq!(RP1_USB0.0, 0x1f_0020_0000);
+            assert_eq!(RP1_USB1.0 >> 30, 124);
+            let d = board_raspi::usb::USB_DMA;
+            assert_eq!(usb_dma_slice(d, 1, 2).base.0, d.base.0 + d.size / 2);
+        }
     }
-    out
 }
 
 /// USBCMD (de eerste operationele register, op CAPLENGTH): Run/Stop.
@@ -92,14 +118,6 @@ fn halt(base: Pa, now: fn() -> u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_rp1_windows_are_in_gigabyte_124() {
-        assert_eq!(RP1_USB0.0, 0x1f_0020_0000);
-        assert_eq!(RP1_USB1.0 >> 30, 124);
-        let d = board_raspi::usb::USB_DMA;
-        assert_eq!(usb_dma_slice(d, 1, 2).base.0, d.base.0 + d.size / 2);
-    }
 
     static NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 

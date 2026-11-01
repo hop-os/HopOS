@@ -29,7 +29,9 @@ leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.14", optio
 [features]
 default = []
 # De codec-client (src/codec.rs, docs/media.md).
-media = ["dep:driver-codec"]
+media = ["dep:driver-codec", "abi/media"]
+# Het glas en de invoer van de display-app (src/fb.rs, docs/gui.md).
+gui = ["abi/gui"]
 # De `TcpConn`-brug tussen `appnet::TcpStream` en leanhttp (src/tcp.rs).
 http = ["dep:leanhttp"]
 

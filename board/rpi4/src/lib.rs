@@ -36,7 +36,8 @@ use dev::Pa;
 use driver_genet::Genet;
 use driver_pl011::Pl011;
 
-// De VL805 achter de PCIe-brug (usb.rs), alleen in de gui-smaak.
+// De VL805 achter de PCIe-brug (usb.rs), alleen met de bouwsteen `usb`.
+#[cfg(feature = "usb")]
 mod usb;
 
 /// De PL011 UART0 op GPIO14/15 (header-pin 8/10); de Pi 4 heeft geen
@@ -85,6 +86,7 @@ impl Soc for Bcm2711 {
     const RNG200: Pa = RNG200;
     const PM: Pa = PM;
 
+    #[cfg(feature = "usb")]
     fn usb_hosts(ctx: &board_raspi::usb::UsbCtx) -> board::UsbHosts {
         usb::hosts(ctx)
     }

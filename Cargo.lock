@@ -637,9 +637,7 @@ version = "3.0.20"
 dependencies = [
  "abi",
  "bounded",
- "dev",
  "driver-hid",
- "driver-xhci",
  "sync",
 ]
 
@@ -670,7 +668,6 @@ dependencies = [
  "driver-codec",
  "driver-dwc3",
  "driver-fb",
- "driver-hid",
  "driver-xhci",
  "executor",
  "fw",
@@ -684,6 +681,7 @@ dependencies = [
  "net",
  "netdev",
  "sync",
+ "usb",
 ]
 
 [[package]]
@@ -781,6 +779,16 @@ name = "syncprobe"
 version = "3.0.20"
 dependencies = [
  "applib",
+]
+
+[[package]]
+name = "usb"
+version = "3.0.20"
+dependencies = [
+ "bounded",
+ "dev",
+ "driver-hid",
+ "driver-xhci",
 ]
 
 [[package]]

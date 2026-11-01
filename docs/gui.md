@@ -26,8 +26,14 @@ Wat HopOS v3 met een scherm, een toetsenbord en een muis doet, en wat niet.
 `--features gui` naast het board, bijvoorbeeld
 `cargo build --release --target aarch64-unknown-none-softfloat -p hopos --features board-rk3566,gui`.
 De feature zet `gui` aan op het gekozen board (`board-x?/gui`) en linkt
-`driver-fb`, `gui-fbgrant` en de USB-invoer (`gui-usbin`, `driver-xhci`,
-`driver-hid`, `driver-dwc3`).
+`driver-fb`, `gui-fbgrant`, de invoer naar het glas (`gui-usbin`) en de
+bouwsteen `usb` met zijn HID-kant (`usb/hid`, `driver-hid`).
+
+De bouwsteen `usb` (de crate `usb`, `driver-xhci`, `driver-dwc3`,
+`hopos/src/usb.rs` en de `usb`-feature van het board) is geen keuze op
+zich: `gui` trekt hem mee voor toetsenbord en muis, `media` voor de
+optische drive, zonder de ander (docs/sequence-hopos.md §14.3). Wat een
+build niet heeft, staat als stub in `hopos/src/off.rs`.
 
 | Crate | Wat het bezit |
 | --- | --- |
@@ -35,11 +41,13 @@ De feature zet `gui` aan op het gekozen board (`board-x?/gui`) en linkt
 | `kern::grants` | het `DeviceGrant`-primitief: één venster, één houder, `WindowMap` naar de stage-2, de adoptie na een flip, de haken (`Grants`) |
 | `gui/fbgrant` (`gui-fbgrant`) | het beleid: wie het glas krijgt, de `FB_*`-env, de console eraf en terug |
 | `gui/rkscan` (`gui-rkscan`) | de RK3566-keten: PD_VO, VOP2, DW-HDMI |
-| `driver/usb/xhci`, `driver/usb/hid`, `gui/usbin` | de USB-invoer: host, enumeratie, boot-HID, de bezorging aan de display-app |
+| `driver/usb/xhci`, `usb` | de bus (bouwsteen `usb`): host, enumeratie, de scan, de opslag; met `usb/hid` de rapporten van boot-HID (`driver/usb/hid`) |
+| `gui/usbin` (`gui-usbin`) | de bezorging van toetsen en muis aan de display-app: de rij, de cursor, de JSON-regels |
 | `driver/usb/dwc3` (`driver-dwc3`) | een Synopsys DWC3-core in hostmodus (de RK3566), vóór de xHCI |
 | `board/<x>/src/usb.rs`, `Board::usb_hosts` | welke controllers een board heeft: venster, lijn, soort (xHCI of DWC3), en een eigen stuk DMA-geheugen; PCIe en firmware-handshake zijn dan gedaan |
-| `hopos/src/gui.rs` | de bedrading: console op het glas, meetregels, de USB-taak (`usb`), de grant-haken |
-| `hopos/src/net.rs` (`input`) | de input-listener op `10.100.0.1:7879`: de regels naar de houder van het glas |
+| `hopos/src/gui.rs` | de bedrading: console op het glas, meetregels, de invoer van de USB-taak (`UsbInput`), de grant-haken |
+| `hopos/src/usb.rs` | de USB-taak (bouwsteen `usb`): de controllers, de ronde van de manager, de stop voor een flip |
+| `hopos/src/net/input.rs` (`net::input`) | de input-listener op `10.100.0.1:7879`: de regels naar de houder van het glas |
 | `applib/src/fb.rs` (`applib::fb`) | de app-kant: de `FB_*`-env, het venster Normal-NC in de stage-1 van de app (`applib::mmu`), de regellezer van `INPUT_ADDR` |
 | `apps/display` | de display-app: achtergrond, klok, de laatste invoer en de cursor op het glas |
 
@@ -209,18 +217,18 @@ vinden, en controleert hij op accept (en per regel opnieuw) dat de beller
 het slot van de houder is (de switch weigert een frame met andermans
 bron-MAC, 06-08).
 
-De keten, na het netwerk (`hopos::gui::start_usb_input`):
+De keten, na het netwerk (`hopos::usb::start`):
 
 1. `Board::usb_hosts` noemt de controllers: het venster, de lijn (nog
    ongebruikt: de driver pollt), het soort (xHCI of DWC3) en een eigen stuk
    DMA-geheugen (Normal-NC, buiten de kern-RAM). PCIe-link, BAR's en
-   firmware-handshake zijn dan al gedaan. Kaal is de lijst leeg.
+   firmware-handshake zijn dan al gedaan. Kaal bestaat de vraag niet.
 2. Het invoeradres gaat meteen in de grant (`FbGrant::use_input`), vóór
    de USB-taak spawnt en dus vóór de eerste plaatsing: de bring-up slaapt
    op de executor, en een display-app die intussen het glas kreeg, moet
    het adres al hebben. Komt er geen controller op, dan trekt de taak het
    weer in (`stop_input`, `HOPOS_USB_NONE`).
-3. De USB-taak bezit de `gui_usbin::Manager`. `Registry::bring_up` zet
+3. De USB-taak bezit de `usb::Manager`. `Registry::bring_up` zet
    eerst élke controller stil (probe, reset) en start ze pas daarna, zodat
    een controller van de firmware of van de vorige kern nooit schrijft in
    een stuk dat een ander net opbouwt; een DWC3 gaat eerst in hostmodus
@@ -232,7 +240,8 @@ De keten, na het netwerk (`hopos::gui::start_usb_input`):
    executor, `executor::ExecTimer`). Tot 29-09 spinde de driver op de klok en hield een
    insteek de hele executor van de kern vast.
 5. Wat de taak leest, gaat als waarde door een SPSC-rij (256, vol is
-   weggooien en tellen) naar de input-listener in `net.rs`. Die luistert
+   weggooien en tellen, `gui::UsbInput`) naar de input-listener in
+   `net/input.rs`. Die luistert
    op `10.100.0.1:7879` zodra de node-stack er is, laat alleen de houder
    binnen, laat een nieuwe verbinding van de houder de oude verdringen, en
    schrijft elke regel met een deadline van 1 s. Zonder verbinding vallen

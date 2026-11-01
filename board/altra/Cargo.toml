@@ -40,6 +40,8 @@ workspace = true
 default = []
 # De GOP-framebuffer van de firmware (board-uefi, gop.rs), zoals op de O6N.
 gui = ["board-uefi/gui"]
+# De xHCI's op PCIe (board-uefi, usb.rs): de bouwsteen van gui en media.
+usb = ["board-uefi/usb"]
 # Het kernvenster op 0xA000_0000 (board-uefi `WINDOW_PA`): Go koos B000
 # (13-07; 0x9000_0000 bezet, en dat ligt in het O6N-venster
 # 0x8800_0000+320 MB), maar de firmware van 03-10 houdt B000 bezet. De

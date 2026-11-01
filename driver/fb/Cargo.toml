@@ -9,7 +9,7 @@ description = "De tekst-console op een lineaire framebuffer van de firmware: de 
 [dependencies]
 dev = { path = "../../dev" }
 # De pixelregel van het glas (`abi::glass::encode`), gedeeld met de app.
-abi = { path = "../../abi" }
+abi = { path = "../../abi", features = ["gui"] }
 
 [lints]
 workspace = true

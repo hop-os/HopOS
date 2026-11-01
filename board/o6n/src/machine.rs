@@ -222,7 +222,8 @@ impl Platform for Cix {
         classes(uefi).of(&facts_of(uefi, core))
     }
 
-    /// De native xHCI's die de firmware aanzette (usb.rs; kaal geen).
+    /// De native xHCI's die de firmware aanzette (usb.rs).
+    #[cfg(feature = "usb")]
     fn usb_hosts(&self, uefi: &Uefi) -> board::UsbHosts {
         crate::usb::hosts(uefi)
     }

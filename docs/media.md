@@ -3,9 +3,11 @@
 De hardwaredecoder van de Orion O6N (Arm China Linlon V8, "mve") en de
 codec-dienst waarmee een app een stream door de decoder haalt, in v3.
 
-Alles zit achter de feature `media` (op `hopos`, `kern`, `applib` en
-`board-o6n`). Kaal kent de kern de codec-ops niet en antwoordt hij
-"onbekende op".
+Alles zit achter de feature `media` (op `hopos`, `kern`, `applib`, `abi`
+en `board-o6n`). Kaal kent de kern de codec-ops niet en antwoordt hij
+"onbekende op". `media` trekt `gui` niet mee: de optische drive loopt over
+de bouwsteen `usb` (zonder HID en zonder de ronde van 4 ms), en een
+media-node is headless zoals lumen (docs/sequence-hopos.md §14.3).
 
 ## De vorm
 

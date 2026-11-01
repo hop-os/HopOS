@@ -41,7 +41,9 @@ pub mod codec;
 mod machine;
 pub mod probe;
 pub mod thermal;
-// De tien native xHCI's uit de DSDT (usb.rs), alleen in de gui-smaak.
+// De tien native xHCI's uit de DSDT (usb.rs), alleen met de bouwsteen
+// `usb` (de gui- of de media-smaak).
+#[cfg(feature = "usb")]
 mod usb;
 
 pub use machine::{Cix, LINK_TIMEOUT_NS, O6n, is_cix};

@@ -27,8 +27,8 @@ driver-virtionet = { path = "../../driver/virtionet" }
 driver-virtioblk = { path = "../../driver/virtioblk" }
 # De NVMe van de O6N en de Altra (pcie.rs `probe_nvme`).
 driver-nvme = { path = "../../driver/nvme" }
-# De framebuffer-beschrijving van `Board::framebuffer` (gop.rs).
-driver-fb = { path = "../../driver/fb" }
+# De framebuffer-beschrijving van `Board::framebuffer` (gop.rs, `gui`).
+driver-fb = { path = "../../driver/fb", optional = true }
 
 [lints]
 workspace = true
@@ -47,7 +47,10 @@ window-8000 = []
 # (HOPOS_UEFI_WINDOW). Wint van `window-8000`.
 window-a000 = []
 # De GOP-framebuffer (gop.rs): alleen de gui-smaak leest en mapt hem.
-gui = []
+gui = ["board/gui", "dep:driver-fb"]
+# De xHCI's op PCIe en het USB-DMA-stuk (usb.rs): de bouwsteen van gui en
+# media.
+usb = ["board/usb"]
 # De kern onder E2H = 1 (src/el2.rs): HCR, TCR, SCTLR, CPTR en CNTHCTL in
 # de VHE-vorm, PXN in de map. Hoort bij de switcher-smaak `Vhe` van de
 # binary (hopos/src/cage.rs `FLAVOR`, getoetst bij het bouwen). De O6N zet

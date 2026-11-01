@@ -4,14 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "De invoerdienst: bezit de USB-controllers, volgt in- en uitpluggen, levert toetsen en muis als KVM-JSON af en bedient opslag op verzoek."
+description = "De USB-invoer naar het glas: toetsen en muis als KVM-JSON naar de houder van de framebuffer-grant. De bus zelf is van de bouwsteen `usb`."
 
 [dependencies]
-dev = { path = "../../dev" }
-abi = { path = "../../abi" }
+abi = { path = "../../abi", features = ["gui"] }
 bounded = { path = "../../bounded" }
 sync = { path = "../../sync" }
-driver-xhci = { path = "../../driver/usb/xhci" }
 driver-hid = { path = "../../driver/usb/hid" }
 
 [lints]

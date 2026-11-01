@@ -65,17 +65,39 @@ board-licheerv = ["dep:board-licheerv"]
 # gelinkt op 1 TiB + 4 GB (build.rs).
 board-apple = ["dep:board-apple"]
 
+# De drie builds (docs/sequence-hopos.md §14.3): headless is zonder flag (het
+# hok, het netwerk, opslag; geen regel scherm, media of USB), `gui` en
+# `media` staan los en trekken geen van beide de ander mee. Wat een build
+# niet heeft, komt als stub uit off.rs.
+#
+# De bouwsteen `usb` (usb.rs): de bus, de xHCI en de DWC3, de scan en de
+# opslag, met de USB-hosts van het gekozen board. Geen keuze voor de
+# gebruiker: `gui` en `media` zetten hem aan.
+usb = [
+    "dep:usb",
+    "dep:driver-xhci",
+    "dep:driver-dwc3",
+    "board/usb",
+    "board-qemuvirt?/usb",
+    "board-rpi4?/usb",
+    "board-rpi5?/usb",
+    "board-rk3566?/usb",
+    "board-uefi?/usb",
+    "board-o6n?/usb",
+    "board-altra?/usb",
+]
+
 # Het gui-vlak (gui.rs, docs/gui.md): de console op het glas als het board
-# een framebuffer geeft, de meetregels naast de bunny, en de
-# framebuffer-grant aan de display-app. Kaal linkt er geen regel van mee.
-# De `?`-vorm zet de gui van alleen het gekozen board aan.
+# een framebuffer geeft, de meetregels naast de bunny, de framebuffer-grant
+# aan de display-app, en toetsenbord en muis van de USB (`usb/hid`) naar
+# die app. De `?`-vorm zet de gui van alleen het gekozen board aan.
 gui = [
+    "usb",
+    "usb/hid",
     "dep:driver-fb",
     "dep:gui-fbgrant",
     "dep:gui-usbin",
-    "dep:driver-xhci",
-    "dep:driver-hid",
-    "dep:driver-dwc3",
+    "board/gui",
     "board-qemuvirt?/gui",
     "board-rpi4?/gui",
     "board-rpi5?/gui",
@@ -85,11 +107,13 @@ gui = [
     "board-altra?/gui",
 ]
 
-# Het media-vlak (codec.rs, docs/media.md): de codec-ops van de system-API
-# en de VPU-driver; op de O6N zet `board-o6n?/media` het aanzetten van de
-# VPU aan. Kaal antwoorden de codec-ops "onbekende op".
+# Het media-vlak (codec.rs, optical.rs, docs/media.md): de codec-ops van de
+# system-API en de VPU-driver, en de optische drive over de bouwsteen
+# `usb`; op de O6N zet `board-o6n?/media` het aanzetten van de VPU aan.
+# Zonder gui: lumen bewijst media zonder scherm.
 media = [
-    "gui",
+    "usb",
+    "abi/media",
     "dep:media-optical",
     "kern/media",
     "dep:driver-codec",
@@ -135,11 +159,11 @@ board-apple = { path = "../board/apple", optional = true }
 # Het gui-vlak (feature `gui`): de console en het grant-beleid.
 driver-fb = { path = "../driver/fb", optional = true }
 gui-fbgrant = { path = "../gui/fbgrant", optional = true }
-# De USB-invoer (gui.rs `usb`, net.rs `input`): de manager en de bezorging,
-# de xHCI, de HID-gebeurtenissen en de DWC3 van de RK3566.
+# De invoer naar het glas (gui.rs `UsbInput`, net/input.rs): de bezorging.
 gui-usbin = { path = "../gui/usbin", optional = true }
+# De bouwsteen `usb` (usb.rs): de manager, de xHCI en de DWC3 van de RK3566.
+usb = { path = "../usb", optional = true }
 driver-xhci = { path = "../driver/usb/xhci", optional = true }
-driver-hid = { path = "../driver/usb/hid", optional = true }
 driver-dwc3 = { path = "../driver/usb/dwc3", optional = true }
 # Het media-vlak (feature `media`): het contract en de VPU-driver.
 driver-codec = { path = "../driver/codec", optional = true }

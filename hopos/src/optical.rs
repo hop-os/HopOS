@@ -6,10 +6,10 @@ use abi::hopabi::{
 };
 use alloc::vec::Vec;
 use executor::Executor;
-use gui_usbin::storage::{BulkError, BulkId, BulkInfo, BulkOp, BulkReq};
 use kern::{Error, Result, deviceabi, rpc::FsCall};
 use media_optical::{Data, UsbError, asynchronous::Transport, mmc::Drive};
 use sync::{LocalCell, mpsc::Mailbox};
+use usb::storage::{BulkError, BulkId, BulkInfo, BulkOp, BulkReq};
 pub(crate) static WAKE: sync::Signal = sync::Signal::new();
 
 pub(crate) static INBOX: deviceabi::Inbox<'static> = Mailbox::new();

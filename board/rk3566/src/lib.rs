@@ -37,6 +37,10 @@
 extern crate alloc;
 
 pub mod clock;
+// De beeldketen (display.rs) alleen in de gui-smaak: een kale node linkt
+// geen regel display-code en er tekent geen logconsole in een buffer die
+// niemand uitleest (Go: "geen dood gewicht", Derek 06-08). De fb-regio in
+// het plan blijft in béíde smaken: één plan is goedkoper dan twee.
 #[cfg(feature = "gui")]
 mod display;
 pub mod i2c;
@@ -46,21 +50,11 @@ mod rng;
 pub mod slots;
 pub mod soc;
 pub mod tsadc;
-// De twee DWC3-cores als USB-host (usb.rs).
+// De twee DWC3-cores als USB-host (usb.rs), alleen met de bouwsteen `usb`
+// (de gui- of de media-smaak).
+#[cfg(feature = "usb")]
 pub mod usb;
 pub mod watchdog;
-
-/// Zonder de feature `gui`: geen beeldketen aan boord, dus headless. Een
-/// kale node linkt geen regel display-code en er tekent geen logconsole in
-/// een buffer die niemand uitleest (Go: "geen dood gewicht", Derek 06-08).
-/// De fb-regio in het plan blijft in béíde smaken: één plan is goedkoper
-/// dan twee.
-#[cfg(not(feature = "gui"))]
-mod display {
-    pub(crate) fn framebuffer(_clock: fn() -> u64) -> Option<driver_fb::Desc> {
-        None
-    }
-}
 
 #[cfg(test)]
 mod tests;
@@ -586,12 +580,14 @@ impl Board for Rk3566 {
         cpu::idle::now
     }
 
+    #[cfg(feature = "usb")]
     fn usb_hosts(&self) -> board::UsbHosts {
         usb::hosts()
     }
 
-    /// De buffer uit het plan ([`FB_RAM`]); met `gui` start de eerste
-    /// aanroep de scanout naar HDMI, zonder is het board headless (`None`).
+    /// De buffer uit het plan ([`FB_RAM`]): de eerste aanroep start de
+    /// scanout naar HDMI.
+    #[cfg(feature = "gui")]
     fn framebuffer(&self) -> Option<driver_fb::Desc> {
         display::framebuffer(cpu::idle::now)
     }

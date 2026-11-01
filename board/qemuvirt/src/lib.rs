@@ -25,23 +25,15 @@
 )]
 
 mod mmu;
-// `-device ramfb` over fw_cfg (ramfb.rs), alleen in de gui-smaak; kaal een
-// stub met dezelfde signatuur (handboek §7, docs/gui.md).
+// `-device ramfb` over fw_cfg (ramfb.rs), alleen in de gui-smaak
+// (docs/gui.md).
 #[cfg(feature = "gui")]
 mod ramfb;
-#[cfg(not(feature = "gui"))]
-mod ramfb {
-    //! Kaal gebouwd: geen beeld.
-
-    /// Altijd headless.
-    pub(crate) fn framebuffer() -> Option<driver_fb::Desc> {
-        None
-    }
-}
 pub mod slots;
-// De PCIe-host (pcie.rs), met de qemu-xhci (usb.rs, alleen in de
-// gui-smaak) en de i6300esb (wdt.rs) erop.
+// De PCIe-host (pcie.rs), met de qemu-xhci (usb.rs, alleen met de
+// bouwsteen `usb`) en de i6300esb (wdt.rs) erop.
 mod pcie;
+#[cfg(feature = "usb")]
 mod usb;
 pub mod wdt;
 
@@ -429,10 +421,12 @@ impl Board for QemuVirt {
         }
     }
 
+    #[cfg(feature = "usb")]
     fn usb_hosts(&self) -> board::UsbHosts {
         usb::hosts()
     }
 
+    #[cfg(feature = "gui")]
     fn framebuffer(&self) -> Option<board::fb::Desc> {
         ramfb::framebuffer()
     }

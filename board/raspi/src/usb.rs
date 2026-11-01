@@ -6,9 +6,8 @@
 //! ([`map_device_gb`]). Welke controllers er zijn, weet de SoC
 //! (`Soc::usb_hosts`: de RP1 op de Pi 5, de VL805 op de Pi 4).
 //!
-//! Kaal is er niets: zonder de feature `gui` geeft het board een lege
-//! lijst en wordt `Soc::usb_hosts` nooit gevraagd (handboek §7,
-//! docs/gui.md).
+//! Alleen met de bouwsteen `usb` (de gui- of de media-smaak); kaal kent
+//! het board geen USB.
 
 use crate::Soc;
 use board::{Region, UsbHosts};
@@ -43,39 +42,10 @@ pub struct UsbCtx {
 
 /// De controllers van dit board (`Board::usb_hosts`).
 pub(crate) fn hosts<S: Soc>() -> UsbHosts {
-    imp::hosts::<S>()
-}
-
-#[cfg(not(feature = "gui"))]
-mod imp {
-    //! Kaal gebouwd: geen USB.
-
-    use crate::Soc;
-    use board::UsbHosts;
-
-    // Dezelfde signatuur als de gui-smaak, waar `S` de controllers noemt;
-    // de cfg bepaalt of hij gebruikt wordt (handboek §10).
-    #[allow(
-        clippy::extra_unused_type_parameters,
-        reason = "kaal vraagt niemand de SoC; de gui-smaak wel"
-    )]
-    pub(super) fn hosts<S: Soc>() -> UsbHosts {
-        UsbHosts::new()
-    }
-}
-
-#[cfg(feature = "gui")]
-mod imp {
-    use super::{USB_DMA, UsbCtx};
-    use crate::Soc;
-    use board::UsbHosts;
-
-    pub(super) fn hosts<S: Soc>() -> UsbHosts {
-        S::usb_hosts(&UsbCtx {
-            dma: USB_DMA,
-            now: cpu::idle::now,
-        })
-    }
+    S::usb_hosts(&UsbCtx {
+        dma: USB_DMA,
+        now: cpu::idle::now,
+    })
 }
 
 /// De property-tag die de VideoCore de firmware van de VL805 laat laden

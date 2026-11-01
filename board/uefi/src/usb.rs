@@ -5,19 +5,18 @@
 //! op PCIe maar als platformapparaten in de DSDT (board/o6n/src/usb.rs);
 //! wat hij hier leent, is [`USB_DMA`].
 //!
-//! Kaal is er niets: zonder de feature `gui` geeft [`hosts`] een lege lijst
-//! (handboek §7, docs/gui.md).
+//! Alleen met de bouwsteen `usb` (de gui- of de media-smaak).
 //!
 //! De firmware wees de BAR toe; wij zetten alleen memory-decode en
 //! bus-mastering aan (EDK2 laat bus-master bij ExitBootServices vaak uit).
 //! Loopt de controller nog van de firmware, dan zet de bring-up van
-//! `gui-usbin` hem eerst stil, vóór er één stuk DMA-geheugen gewist wordt.
-
-pub use imp::hosts;
+//! `usb` hem eerst stil, vóór er één stuk DMA-geheugen gewist wordt.
 
 use crate::BLK_DMA;
-use board::Region;
+use board::{MAX_USB_HOSTS, Region, UsbHost, UsbHosts, UsbKind};
+use cpu::println;
 use dev::Pa;
+use driver_pcie::{Bar, Ecam, Function};
 
 /// Het USB-DMA-stuk: de bovenste 2 MB van de schijf-helft van de
 /// DMA-regio (Normal-NC, buiten de kern-RAM). virtio-blk gebruikt daar
@@ -34,106 +33,86 @@ const _: () = {
     assert!(USB_DMA.base.0 + USB_DMA.size == BLK_DMA.base.0 + BLK_DMA.size);
 };
 
-#[cfg(not(feature = "gui"))]
-mod imp {
-    //! Kaal gebouwd: geen USB.
+/// Klasse 0x0c0330: serial bus, USB, xHCI.
+const CLASS_XHCI: u32 = 0x0c_0330;
 
-    /// Geen controllers.
-    #[must_use]
-    pub fn hosts() -> board::UsbHosts {
-        board::UsbHosts::new()
+/// De namen van de controllers in volgorde van de scan; de logregels
+/// hebben een `&'static str` nodig.
+const NAMES: [&str; MAX_USB_HOSTS] = [
+    "xhci0", "xhci1", "xhci2", "xhci3", "xhci4", "xhci5", "xhci6", "xhci7", "xhci8", "xhci9",
+];
+
+/// Elke xHCI op de PCIe-segmenten van de firmware, met BAR 0 als
+/// venster en een gelijk stuk van [`USB_DMA`]. Een functie zonder
+/// bruikbare BAR is één regel.
+#[must_use]
+pub fn hosts() -> UsbHosts {
+    let mut found: [Option<(Ecam, Function)>; MAX_USB_HOSTS] = [None; MAX_USB_HOSTS];
+    let mut n = 0;
+    for (e, _seg, start) in crate::ecams() {
+        driver_pcie::walk(&e, start, |f| {
+            if f.class == CLASS_XHCI
+                && let Some(slot) = found.get_mut(n)
+            {
+                *slot = Some((e, *f));
+                n += 1;
+            }
+            n < MAX_USB_HOSTS
+        });
     }
+    let mut out = UsbHosts::new();
+    for (i, (e, f)) in found.iter().flatten().enumerate() {
+        let Some(regs) = bar0(e, f) else {
+            continue;
+        };
+        f.enable(e);
+        let name = NAMES.get(i).copied().unwrap_or("xhci");
+        println!(
+            "usb: {name}: xHCI {:04x}:{:04x} at {} on PCIe, registers {:#x}+{:#x}",
+            f.vendor, f.device, f.bdf, regs.base.0, regs.size
+        );
+        let _ = out.push(UsbHost {
+            name,
+            kind: UsbKind::Xhci,
+            regs,
+            irq: None,
+            bus_off: 0,
+            dma: board::usb_dma_slice(USB_DMA, i, n),
+        });
+    }
+    if out.is_empty() {
+        println!("usb: no xHCI on the PCIe segments of the firmware HOPOS_USB_NONE");
+    }
+    out
 }
 
-#[cfg(feature = "gui")]
-mod imp {
-    use super::USB_DMA;
-    use board::{MAX_USB_HOSTS, Region, UsbHost, UsbHosts, UsbKind};
-    use cpu::println;
-    use dev::Pa;
-    use driver_pcie::{Bar, Ecam, Function};
-
-    /// Klasse 0x0c0330: serial bus, USB, xHCI.
-    const CLASS_XHCI: u32 = 0x0c_0330;
-
-    /// De namen van de controllers in volgorde van de scan; de logregels
-    /// hebben een `&'static str` nodig.
-    const NAMES: [&str; MAX_USB_HOSTS] = [
-        "xhci0", "xhci1", "xhci2", "xhci3", "xhci4", "xhci5", "xhci6", "xhci7", "xhci8", "xhci9",
-    ];
-
-    /// Elke xHCI op de PCIe-segmenten van de firmware, met BAR 0 als
-    /// venster en een gelijk stuk van [`USB_DMA`]. Een functie zonder
-    /// bruikbare BAR is één regel.
-    #[must_use]
-    pub fn hosts() -> UsbHosts {
-        let mut found: [Option<(Ecam, Function)>; MAX_USB_HOSTS] = [None; MAX_USB_HOSTS];
-        let mut n = 0;
-        for (e, _seg, start) in crate::ecams() {
-            driver_pcie::walk(&e, start, |f| {
-                if f.class == CLASS_XHCI
-                    && let Some(slot) = found.get_mut(n)
-                {
-                    *slot = Some((e, *f));
-                    n += 1;
-                }
-                n < MAX_USB_HOSTS
-            });
-        }
-        let mut out = UsbHosts::new();
-        for (i, (e, f)) in found.iter().flatten().enumerate() {
-            let Some(regs) = bar0(e, f) else {
-                continue;
-            };
-            f.enable(e);
-            let name = NAMES.get(i).copied().unwrap_or("xhci");
-            println!(
-                "usb: {name}: xHCI {:04x}:{:04x} at {} on PCIe, registers {:#x}+{:#x}",
-                f.vendor, f.device, f.bdf, regs.base.0, regs.size
-            );
-            let _ = out.push(UsbHost {
-                name,
-                kind: UsbKind::Xhci,
-                regs,
-                irq: None,
-                bus_off: 0,
-                dma: board::usb_dma_slice(USB_DMA, i, n),
-            });
-        }
-        if out.is_empty() {
-            println!("usb: no xHCI on the PCIe segments of the firmware HOPOS_USB_NONE");
-        }
-        out
-    }
-
-    /// BAR 0 zoals de firmware hem toewees, en boven 1 TB in de
-    /// identiteitsmap gezet (de Altra legt BAR's daar).
-    fn bar0(e: &Ecam, f: &Function) -> Option<Region> {
-        match f.bar(e, 0) {
-            Ok(Bar::Mem { addr, size, .. }) if addr != 0 => {
-                if !crate::map_device(addr, size) {
-                    println!(
-                        "usb: xHCI at {}: window {addr:#x}+{size:#x} unmappable HOPOS_USB_NONE",
-                        f.bdf
-                    );
-                    return None;
-                }
-                Some(Region {
-                    base: Pa(addr),
-                    size,
-                })
-            }
-            Ok(_) => {
+/// BAR 0 zoals de firmware hem toewees, en boven 1 TB in de
+/// identiteitsmap gezet (de Altra legt BAR's daar).
+fn bar0(e: &Ecam, f: &Function) -> Option<Region> {
+    match f.bar(e, 0) {
+        Ok(Bar::Mem { addr, size, .. }) if addr != 0 => {
+            if !crate::map_device(addr, size) {
                 println!(
-                    "usb: xHCI at {} has no memory BAR 0 from the firmware HOPOS_USB_NONE",
+                    "usb: xHCI at {}: window {addr:#x}+{size:#x} unmappable HOPOS_USB_NONE",
                     f.bdf
                 );
-                None
+                return None;
             }
-            Err(err) => {
-                println!("usb: xHCI at {}: {err} HOPOS_USB_NONE", f.bdf);
-                None
-            }
+            Some(Region {
+                base: Pa(addr),
+                size,
+            })
+        }
+        Ok(_) => {
+            println!(
+                "usb: xHCI at {} has no memory BAR 0 from the firmware HOPOS_USB_NONE",
+                f.bdf
+            );
+            None
+        }
+        Err(err) => {
+            println!("usb: xHCI at {}: {err} HOPOS_USB_NONE", f.bdf);
+            None
         }
     }
 }

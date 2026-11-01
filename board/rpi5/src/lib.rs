@@ -41,7 +41,8 @@ use driver_gem::Gem;
 use driver_pcie::{self as pcie, Bdf, Config as _};
 use driver_pl011::Pl011;
 
-// De twee xHCI's in de RP1 (usb.rs).
+// De twee xHCI's in de RP1 (usb.rs): hun hosts alleen met de bouwsteen
+// `usb`, hun halt bij de overname altijd.
 mod usb;
 
 /// De debug-UART (PL011, de 3-pins JST-SH-connector; Linux ttyAMA10). De
@@ -124,6 +125,7 @@ impl Soc for Bcm2712 {
         slots::core_of(mpidr)
     }
 
+    #[cfg(feature = "usb")]
     fn usb_hosts(ctx: &board_raspi::usb::UsbCtx) -> board::UsbHosts {
         usb::hosts(ctx)
     }

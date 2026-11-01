@@ -820,7 +820,8 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
                         if pool.as_mut().push(work(tree, job)).is_err() {
                             // `admit` liet hem alleen toe met een vrije
                             // plaats: dit is een gebroken invariant.
-                            desk.log.fatal(format_args!("hopfs: no room for an admitted call"));
+                            desk.log
+                                .fatal(format_args!("hopfs: no room for an admitted call"));
                         }
                     }
                 }
@@ -1064,7 +1065,8 @@ impl<L: Console> Desk<'_, L> {
     /// zijn plek. Een blokfout is het ijzer: `fatal` (de module-doc).
     fn land(&mut self, job: Job<'_>, r: Result<(u64, usize)>) {
         if let Err(Error::Io { lba }) = r {
-            self.log.fatal(format_args!("hopfs: block I/O failed at LBA {lba}"));
+            self.log
+                .fatal(format_args!("hopfs: block I/O failed at LBA {lba}"));
         }
         match job {
             Job::Call {

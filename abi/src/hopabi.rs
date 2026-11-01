@@ -291,6 +291,9 @@ pub const EXIT_CONFIG: u64 = 4;
 /// Een interne invariant brak: een taak die niet spawnt, een poort die niet
 /// bindt, een staat die niet te lezen is.
 pub const EXIT_INTERNAL: u64 = 5;
+/// De klok kwam er niet: de eerste SNTP-meting bij de start lukte niet, en
+/// zonder tijd geen node (Hop).
+pub const EXIT_CLOCK: u64 = 6;
 
 /// De bit in [`CTRL_RX_DOOR`] die de drempel wapent; een byte-index haalt
 /// dat bit nooit.

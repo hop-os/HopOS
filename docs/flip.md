@@ -58,9 +58,9 @@ open en antwoordde de nieuwe SYN met een RST, en Hop kwam niet meer terug
 bevriest niet binnen 2 s, `snapshot` weigert, bijvoorbeeld bij een lopende
 stroom, het blob past niet), of een landing die een stuk niet terugkrijgt
 (het blob, de cage, een bewoner, de NIC): `HOPOS_FATAL`, en de koude boot
-meldt waar het stopte (`HOPOS_FLIP_LAST`). Tot de `fatal()` van het
-fundament er is, is dat `main::fatal` (PSCI-reset, anders de watchdog op
-zijn kortst, anders parkeren). Wat vooraf te toetsen is, toetst de haak:
+meldt waar het stopte (`HOPOS_FLIP_LAST`). Dat is de `fatal()` van het
+fundament, `cpu::fatal!`: één regel, de core parkeert, de pets stoppen en
+de watchdog reset. Wat vooraf te toetsen is, toetst de haak:
 de som, de bundel, de switch-code, de maat, de staging en de indeling van
 de sprong (`Jump::check`).
 
@@ -121,9 +121,8 @@ conntrack.
 | `kern/src/slots.rs` | `snapshot`, `validate_adoption`, `adopt`, `republish`, `Life::adopted` | hok |
 | `kern/src/partmem.rs`, `pool.rs`, `grants.rs`, `gui/fbgrant` | `adopt` | hok |
 | `hopos/src/slots.rs`, `kooi.rs`, `cage.rs`, `cage_riscv.rs` | `start(adopt)`, `adopt_slot`, `cage::adopt`, `supervise(Some)` | hok |
-| `hopos/src/main.rs` | `setup` deelt de stukken uit, `hop_adopted`, `fatal` | de reeks |
-| `hopos/src/watchdog.rs`, `kern/src/watchdog.rs` | `flip::generation() > 1` wapent de boot-guard | **nog**: de ene guard (agent D) |
-| `kern/src/rpc.rs` | `Freeze`, `Thaw` (`Thaw` zonder gebruiker sinds deze ronde) | opslag (agent D) |
+| `hopos/src/main.rs` | `setup` deelt de stukken uit, `hop_adopted` | de reeks |
+| `kern/src/rpc.rs` | `Freeze` | opslag |
 
 ## De ene ingang (O6): nog niet gebouwd
 
@@ -288,7 +287,6 @@ beginnen opnieuw, hopfs houdt hun volumes):
 | `HOPOS_FLIP_BLOB_BAD` | kern B: het paar was geldig maar het blob niet |
 | `HOPOS_FLIP_ADOPT_FAIL` | kern B: de cage, een bewoner of de lifecycle weigert de adoptie |
 | `HOPOS_NIC_FAIL`, `HOPOS_NET_FAIL` | kern B: het net komt niet terug |
-| `HOPOS_FLIP_GUARD` | kern B: geen luisterend net binnen 120 s |
 
 En verder:
 
@@ -338,11 +336,13 @@ op 64 bytes ligt.
 
 ## De boot-guard
 
-Een geflipte kern moet binnen twee minuten (`flip::GRACE`) een luisterend
-net hebben (`net::NET_READY`: de lease, de stack en de system-listener).
-Dan `HOPOS_FLIP_SETTLED`, en gaat de vluchtrecorder leeg. Zo niet, dan
-`HOPOS_FLIP_GUARD` en `HOPOS_FATAL`. Tijdelijk: de ene boot-guard van 120 s
-in de watchdog (O1, agent D) neemt dit over, voor elke boot.
+De flip heeft geen eigen guard meer: de ene guard van 120 s van de
+watchdog (O1, `kern::watchdog::GUARD_SECS`) geldt voor elke boot, ook na
+een landing. Komt kern B niet tot een levensteken (een self-dial die
+verbindt, en Hop die slaat), dan houdt de watchdog zijn pets in
+(`HOPOS_BOOT_GUARD_EXPIRED`) en reset de node koud. Luistert het net
+(`net::NET_READY`: de lease, de stack en de system-listener), dan zegt
+`flip::settle` `HOPOS_FLIP_SETTLED` en gaat de vluchtrecorder leeg.
 
 ## Toetsen
 

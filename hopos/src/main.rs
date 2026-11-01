@@ -432,11 +432,11 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     };
     match board.probe_nic() {
         Ok(Some(nic)) => nic_up(exec, board, system, nic, carried),
-        Ok(None) if carried.is_some() => fatal(format_args!(
-            "net: the previous kernel had a NIC, this one has none"
-        )),
+        Ok(None) if carried.is_some() => {
+            cpu::fatal!("net: the previous kernel had a NIC, this one has none")
+        }
         Ok(None) => println!("net: no NIC on this board HOPOS_NIC_NONE"),
-        Err(e) if carried.is_some() => fatal(format_args!("net: {e} HOPOS_NIC_FAIL")),
+        Err(e) if carried.is_some() => cpu::fatal!("net: {e} HOPOS_NIC_FAIL"),
         Err(e) => {
             println!("net: {e} HOPOS_NIC_FAIL");
             if matches!(e, board::Error::Nic(_)) {
@@ -494,7 +494,7 @@ fn nic_up(
         // Een NIC zonder lijn is het board dat faalt (§14.1 O3): de pomp
         // pollt niet, dus zonder lijn geen net.
         Err(e @ net::Error::NoLine) => cpu::fatal!("net: {e}"),
-        Err(e) if landed => fatal(format_args!("net: {e} HOPOS_NET_FAIL")),
+        Err(e) if landed => cpu::fatal!("net: {e} HOPOS_NET_FAIL"),
         Err(e) => println!("net: {e} HOPOS_NET_FAIL"),
     }
 }
@@ -544,28 +544,6 @@ async fn nic_retry(exec: &'static Executor, board: &'static Machine, system: &'s
         }
         attempt = attempt.saturating_add(1);
     }
-}
-
-/// Hard falen (§13.2): één regel `HOPOS_FATAL <reden>`, en de koude weg
-/// terug. PSCI SYSTEM_RESET; zonder PSCI (Apple, riscv64), of als de reset
-/// terugkeert, de watchdog op zijn kortst en dan parkeren: een geparkeerde
-/// core aait niet meer. Zonder watchdog blijft het bij parkeren, met een
-/// regel die dat zegt.
-///
-/// Tijdelijk hier, voor de flip: de `fatal()` van het fundament (agent D)
-/// vervangt dit.
-pub(crate) fn fatal(why: core::fmt::Arguments<'_>) -> ! {
-    println!("HOPOS_FATAL {why}");
-    if <Machine as Board>::PSCI {
-        let _ = cpu::psci::smc(cpu::psci::SYSTEM_RESET, 0, 0, 0);
-    }
-    println!("fatal: resetting through the watchdog at its shortest alarm HOPOS_FLIP_RESET_WDT");
-    if !watchdog::fire() {
-        println!(
-            "fatal: no PSCI reset and no watchdog on this board: this core parks and the node stays down until a power cycle HOPOS_FLIP_RESET_PARK"
-        );
-    }
-    cpu::boot::park()
 }
 
 /// Meetlat van de IRQ-dispatch: timer-, NIC- en onbekende interrupts.

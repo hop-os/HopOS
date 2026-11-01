@@ -38,8 +38,10 @@
 //!    koude boot.
 //! 4. De nieuwe kern: [`land`] als eerste in `setup`. Een overdracht is
 //!    `HOPOS_FLIP_BOOT gen=N` en een [`Landing`]; `setup` geeft elk stuk
-//!    aan zijn onderdeel. Een stuk dat niet terugkomt, is `HOPOS_FATAL`. De
-//!    guard ([`guard`]) eist binnen [`GRACE`] een luisterend net.
+//!    aan zijn onderdeel. Een stuk dat niet terugkomt, is `HOPOS_FATAL`.
+//!    Een kern die niet tot een luisterend net komt, vangt de ene guard van
+//!    de watchdog (`kern::watchdog::GUARD_SECS`), net als bij elke boot;
+//!    [`settle`] ruimt na het net de recorder op.
 //!
 //! De adressen zijn die van het board (`vboard::slots::FLIP_*`): de
 //! staging, de recorder, de trampoline en het blob liggen buiten het
@@ -84,7 +86,7 @@ use kern::kernflip::{
 };
 use kern::slots::{Reply, Request, Response, SlotState};
 use kern::system::FlipBundle;
-use sync::{Either, Local, Signal, select};
+use sync::{Local, Signal};
 use vboard::slots::{
     BOOT_SCRATCH_PA, FLIP_RECORDER_PA, FLIP_TRAMP_PA, STAGE_HDR_PA, STAGE_MAX, STAGE_PA,
 };
@@ -105,11 +107,6 @@ const JUMP_DELAY: Duration = Duration::from_millis(500);
 /// die in twee seconden niet antwoordt, is een kern die niet overgedragen
 /// hoort te worden: `HOPOS_FATAL`.
 const ACTOR_WAIT: Duration = Duration::from_secs(2);
-
-/// De gratie van een geflipte kern: binnen deze tijd moet zijn net
-/// luisteren, anders komt de node koud terug. Twee minuten, de les van de
-/// Go-kern. Tijdelijk: de ene boot-guard van de watchdog (O1) neemt dit over.
-pub(crate) const GRACE: Duration = Duration::from_secs(120);
 
 /// Kan deze kern flippen? Op riscv64 niet: de switch-code draait daar uit
 /// het kern-image, en de nieuwe kern zou hem onder de app-harts
@@ -321,9 +318,9 @@ pub(crate) fn land(x0: u64) -> Option<Landing> {
             report_cold(&mut mem, &p);
             None
         }
-        Err(e) => crate::fatal(format_args!(
+        Err(e) => cpu::fatal!(
             "flip: the handoff blob does not decode: {e}; resetting cold HOPOS_FLIP_BLOB_BAD"
-        )),
+        ),
     }
 }
 
@@ -361,24 +358,15 @@ fn report_cold(mem: &mut DevMem, p: &FlipPlan) {
     }
 }
 
-/// De flip-boot-guard: een geflipte kern moet binnen [`GRACE`] een
-/// luisterend net hebben (`net::NET_READY`: lease, uplink, stack en de
-/// system-listener). Zo niet, dan `HOPOS_FATAL`: een halve kern met levende
-/// bewoners is erger dan een koude boot. Lukt het, dan gaat de recorder
-/// leeg (een latere koude boot is geen mislukte flip). Een adoptie die
-/// faalt, wacht niet op de guard: die is meteen `HOPOS_FATAL`.
-///
-/// Tijdelijk: de ene boot-guard van 120 s in de watchdog (O1) neemt dit
-/// over, voor elke boot.
-async fn guard(exec: &'static Executor) {
-    let generation = generation();
-    if let Either::Right(()) = select(crate::net::NET_READY.wait(), exec.after(GRACE)).await {
-        crate::fatal(format_args!(
-            "flip: generation {generation} has no listening net within {} s, resetting cold HOPOS_FLIP_GUARD",
-            GRACE.as_secs()
-        ));
-    }
-    let (mut mem, p) = (DevMem, plan());
+/// Na een landing: zodra het net luistert (`net::NET_READY`: lease,
+/// uplink, stack en de system-listener) gaat de vluchtrecorder leeg, want
+/// een latere koude boot is dan geen mislukte flip. Komt het net niet, dan
+/// wacht dit voorgoed en reset de ene guard van de watchdog de node
+/// (docs/sequence-hopos.md §14.1 O1); tot 01-11 had de flip daarvoor een
+/// eigen guard met een eigen klok.
+async fn settle() {
+    crate::net::NET_READY.wait().await;
+    let (generation, mut mem, p) = (generation(), DevMem, plan());
     kernflip::stage(&mut mem, &p, Stage::NetUp, generation);
     let _ = kernflip::take_last_flip(&mut mem, &p);
     println!("flip: generation {generation} settled, net up HOPOS_FLIP_SETTLED");
@@ -605,15 +593,15 @@ fn check_switch_code(bundle: &Bundle<'_>) -> Result<(), Refused> {
     Ok(())
 }
 
-/// Spawnt de flip-taak en, na een landing, de guard. Aangeroepen vóór de
+/// Spawnt de flip-taak en, na een landing, [`settle`]. Aangeroepen vóór de
 /// executor draait.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor, landed: bool) {
     if let Err(e) = exec.spawn(run(exec)) {
         println!("flip: task not spawned: {e:?} HOPOS_FLIP_SPAWN");
     }
-    if landed && let Err(e) = exec.spawn(guard(exec)) {
-        println!("flip: guard not spawned: {e:?}, no grace check HOPOS_FLIP_SPAWN");
+    if landed && let Err(e) = exec.spawn(settle()) {
+        println!("flip: settle not spawned: {e:?}, the recorder stays HOPOS_FLIP_SPAWN");
     }
 }
 
@@ -632,9 +620,7 @@ async fn run(exec: &'static Executor) {
         };
         exec.after(JUMP_DELAY).await;
         let e = capture_and_jump(exec, p).await;
-        crate::fatal(format_args!(
-            "flip: not jumped after the 202: {e} HOPOS_FLIP_FAIL"
-        ));
+        cpu::fatal!("flip: not jumped after the 202: {e} HOPOS_FLIP_FAIL");
     }
 }
 

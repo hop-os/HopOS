@@ -259,10 +259,6 @@ impl board::Watchdog for Apple {
     /// 30 s (Go `wdtTimeout`): de ANS en de SMC blokkeren bij hun opstart
     /// tot seconden (RTKit `POWER_TIMEOUT_NS`).
     const WD_TIMEOUT_MS: u64 = wdt::WDT_TIMEOUT_MS;
-    /// Het kortste alarm (`alarm_ticks` klemt op een seconde). Go resette
-    /// hier door de pets in te houden; dit is dezelfde weg, zonder 30 s te
-    /// wachten.
-    const WD_FIRE_MS: u64 = 0;
 
     fn arm(&self, timeout_ms: u64) -> Result<wdt::Desc, &'static str> {
         wdt::arm(timeout_ms)

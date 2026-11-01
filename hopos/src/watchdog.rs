@@ -85,15 +85,6 @@ pub(crate) fn pet_now() {
     BOARD.pet_now();
 }
 
-/// De reset van de flip op een board zonder PSCI (`flip::reset`): de
-/// watchdog opnieuw gewapend op een kort alarm, daarna aait niemand meer
-/// (de aanroeper parkeert). Ook met `hopos.wd=off`: dit is een gevraagde
-/// reset, geen bewaking. `false` als het board er geen heeft of hij niet
-/// wapent.
-pub(crate) fn fire() -> bool {
-    BOARD.fire()
-}
-
 /// Vraagt een gecontroleerde herstart via de watchdog (Go:
 /// `requestNodeReset`, gehangen aan `hopnet.AddressLost`): de stack kan
 /// niet van adres wisselen, dus HOP-leven = node-leven. De taak houdt zijn

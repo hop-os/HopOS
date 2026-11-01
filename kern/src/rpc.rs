@@ -320,11 +320,10 @@ pub enum FsMsg {
     /// Leg de boom vast als hij veranderde.
     Commit(CommitWhy),
     /// De kern-flip: leg de boom vast en neem daarna geen call meer aan
-    /// (elke call krijgt [`Error::Busy`], luid) tot [`FsMsg::Thaw`]. Het
-    /// antwoord draagt de vastgelegde generatie als `size`.
+    /// (elke call krijgt [`Error::Busy`], luid): na de 202 is er geen weg
+    /// terug (§13.7). Het antwoord draagt de vastgelegde generatie als
+    /// `size`.
     Freeze,
-    /// De flip ging niet door: de actor neemt weer calls aan.
-    Thaw,
     /// Een lezing voor de kern zelf ([`kern_read`]); het antwoord is een
     /// [`FsDone`] met het pad in `buf`, de data vooraan in `out` en als
     /// uitkomst `(bestandsmaat, gelezen bytes)`.
@@ -412,7 +411,7 @@ fn busy(msg: FsMsg) -> FsDone {
     let (buf, out) = match msg {
         FsMsg::Call(c) => (c.buf, c.out),
         FsMsg::KernRead(r) => (r.path, r.out),
-        FsMsg::Commit(_) | FsMsg::Freeze | FsMsg::Thaw => (Vec::new(), Vec::new()),
+        FsMsg::Commit(_) | FsMsg::Freeze => (Vec::new(), Vec::new()),
     };
     FsDone {
         buf,
@@ -458,18 +457,6 @@ pub async fn read_file<'a>(
         return Err(Error::Corrupt { at: n });
     }
     Ok(d.out)
-}
-
-/// Ontdooit de actor na een flip die niet doorging. Vuur-en-vergeet: een
-/// volle brievenbus is `false`, en dan zegt de aanroeper het luid.
-#[must_use]
-pub fn thaw(inbox: &FsInbox<'_>) -> bool {
-    inbox
-        .try_send(FsEnvelope {
-            msg: FsMsg::Thaw,
-            reply: None,
-        })
-        .is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -926,15 +913,6 @@ impl<L: Console> Desk<'_, L> {
             }
             msg @ FsMsg::Freeze => Admit::Wait(FsEnvelope { msg, reply }),
             FsMsg::KernRead(r) => self.admit_kern(t, r, reply),
-            FsMsg::Thaw => {
-                self.frozen = false;
-                self.log.log(format_args!(
-                    "hopfs: thawed, the flip did not go through ({} call(s) were refused) HOPOS_FS_THAWED",
-                    self.frozen_calls
-                ));
-                self.frozen_calls = 0;
-                Admit::Done
-            }
         }
     }
 

@@ -262,10 +262,6 @@ pub trait Watchdog {
 
     /// De timeout die de kern vraagt (Go: 12 s).
     const WD_TIMEOUT_MS: u64 = 12_000;
-    /// Het alarm van een gevraagde reset ([`Watchdog::fire`]): kort, maar
-    /// ruim boven de proef van 2 ms op de Pi's, die zelf niet de reset mag
-    /// zijn.
-    const WD_FIRE_MS: u64 = 1_000;
 
     /// Wapent de watchdog op `timeout_ms` (of wat het ijzer daarvan kan).
     /// `Ok` met wat er staat, of waarom niet.
@@ -288,12 +284,6 @@ pub trait Watchdog {
     /// vorige kern wapende). `false` = er was niets uit te zetten.
     fn disarm(&self) -> bool {
         false
-    }
-
-    /// De reset van de flip op een board zonder PSCI: opnieuw gewapend op
-    /// [`Watchdog::WD_FIRE_MS`], daarna aait niemand meer.
-    fn fire(&self) -> bool {
-        self.arm(Self::WD_FIRE_MS).is_ok()
     }
 }
 

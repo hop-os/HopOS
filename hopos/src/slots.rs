@@ -322,11 +322,8 @@ pub(crate) fn start(
     // Een geadopteerd hok krijgt geen byte in de plan-regio: er draaien
     // cores in de switch-code (`cpu::el2::adopt` eist de som).
     let mut cage = match &adopt {
-        Some(_) => cage::adopt(plan.clone()).unwrap_or_else(|e| {
-            crate::fatal(format_args!(
-                "slots: cage adoption: {e} HOPOS_FLIP_ADOPT_FAIL"
-            ))
-        }),
+        Some(_) => cage::adopt(plan.clone())
+            .unwrap_or_else(|e| cpu::fatal!("slots: cage adoption: {e} HOPOS_FLIP_ADOPT_FAIL")),
         None => match cage::new(plan.clone()) {
             Ok(c) => c,
             Err(e) => {
@@ -347,10 +344,11 @@ pub(crate) fn start(
             )
         });
         if let Err(e) = r {
-            crate::fatal(format_args!(
+            cpu::fatal!(
                 "slots: slot {} not re-attached: cage code {} HOPOS_FLIP_ADOPT_FAIL",
-                st.slot, e.code
-            ));
+                st.slot,
+                e.code
+            );
         }
     }
     let sw = cage.isa().installed();
@@ -438,9 +436,7 @@ pub(crate) fn start(
                 "HOPOS_FLIP_ADOPT {n} of {} resident(s) adopted, ownership restored before the first request",
                 states.len()
             ),
-            Err(e) => crate::fatal(format_args!(
-                "slots: adoption refused: {e} HOPOS_FLIP_ADOPT_FAIL"
-            )),
+            Err(e) => cpu::fatal!("slots: adoption refused: {e} HOPOS_FLIP_ADOPT_FAIL"),
         }
     }
     let adopted = adopt.is_some();

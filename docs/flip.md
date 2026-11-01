@@ -23,7 +23,7 @@ bundel), de `FLIP_*`-blokken in `board/*/src/slots.rs` (de adressen) en
 | De volumes (hopfs) | Vóór de sprong legt de actor de boom vast en neemt hij niets meer aan (`HOPOS_FS_FROZEN generation=N`); de nieuwe kern mount precies die generatie (`HOPOS_FS_UP fresh=0 generation=N`). |
 | De switch-code van de app-cores | Blijft staan; de nieuwe kern adopteert haar alleen bij een gelijke som, en die som toetst de oude kern al vóór de sprong. |
 | De config (`hopos.cfg`) | Staat op elk board in het venster van het kern-image (`board/src/cfgwin.rs`, [boards.md](boards.md)). Een bundel met een leeg venster krijgt dat van de draaiende kern vóór de sprong (`HOPOS_FLIP_CFG`); een bundel met een gevuld venster (`CFG=` van `image/flip-bundle.sh`, of `hop image`) houdt het zijne (`HOPOS_FLIP_CFG_OWN`). Een kern van vóór het venster geeft niets mee; de terugval (de ESP, de bootargs, de initrd, 0xF000 op de M4) blijft dan tellen, behalve op de LicheeRV: daar `CFG=`. |
-| Niet: de staat van Hop in de kern (`STATE_PUT`) | Dat blob leeft in de heap van de system-API en sterft met kern A, zoals de fdstore van systemd met de manager. Hop draait door en hoeft het niet terug te lezen, maar tot zijn volgende `STATE_PUT` ligt er op kern B niets: een herstart van Hop in dat venster begint met een lege staat (`HOPOS_HOP_STATE kept=0`). Daarom hoort Hop zijn staat opnieuw te schrijven zodra zijn system-client de nieuwe kern bereikt (een nieuwe verbinding na de flip), niet pas bij de volgende wijziging. Het handoff-blob draagt het niet mee: het is een vaste staart van een paar KiB, het blob tot 1 MiB. |
+| Niet: de staat van Hop in de kern (`STATE_PUT`) | Dat blob leeft in de heap van de system-API en sterft met kern A, zoals de fdstore van systemd met de manager. Hop draait door en hoeft het niet terug te lezen, maar tot zijn volgende `STATE_PUT` ligt er op kern B niets: een herstart van Hop in dat venster begint met een lege staat (`HOPOS_HOP_STATE kept=0`). Daarom hoort Hop zijn staat opnieuw te schrijven zodra zijn system-client de nieuwe kern bereikt (een nieuwe verbinding na de flip), niet pas bij de volgende wijziging. Het handoff-blob draagt het niet mee: dat is een vaste staart van 256 KiB (`kern/src/kernflip.rs` `HANDOFF_TAIL`, vooral de conntrack), de staat van Hop tot 1 MiB (`HOP_STATE_MAX`). |
 | Niet: een image dat Hop voor zijn herstart gaf (`HOP_RESTART`) | Ook dat lag in de heap van kern A. Een herstart met hetzelfde image op kern B plaatst het gestagede (`HOPOS_HOP_IMAGE_STAGED`); is de staging naar de flip gegaan (`HOPOS_FLIP_STAGE_SHARED`), dan is er geen (`HOPOS_HOP_IMAGE_NONE`) en kan een herstart alleen met een nieuw image. Een Hop die faalt, laat de kern op elke generatie liggen: de watchdog reset de node en de koude boot start de Hop van het bootmedium. |
 | Niet: de system-API-verbindingen | Die zijn van de kern; Hop's system-client bouwt ze opnieuw op. |
 | Niet: file calls tussen bevriezing en sprong | Die krijgen `Busy` (`HOPOS_FS_FROZEN_CALL`); de aanroeper doet ze opnieuw op de nieuwe kern. |
@@ -102,6 +102,7 @@ opties).
 | Radxa Zero 3E | `flip-bundle.sh radxa` | `0x0221_0000` (link-rk3566.ld) | het staging-venster op `0x0780_0000`, de recorder op `FLIP_SCRATCH_PA`, de trampoline op de bovenste pagina van de kern-RAM | bundel gebouwd; de ingang is `_start`, dezelfde als virt (`OSCORE=1`); nog niet op ijzer |
 | QEMU virt riscv64 | `flip-bundle.sh virt-riscv` | `0x8000_0000` (link-riscv.ld) | achter Hop in de staging van QEMU op `0xA820_0000`; recorder, trampoline en de uit-stub van hart 1 op de boot-scratch (`0xA800_1000`, `+0x2000`, `+0x3000`) | alleen koud: `sh tools/qemu-riscv-test-flip.sh` (02-10) |
 | LicheeRV Nano | `flip-bundle.sh licheerv` (Hop en desgewenst `CFG=` in het image) | `0x8400_0000` (RUNADDR) | de staging op `0x8690_0000` (13 MB, tussen de DMA-regio van 1 MB en pool C); recorder en trampoline op de staart (`0x8FE0_1000`, `+0x2000`) | alleen koud; bundel gebouwd (9,2 MB beeld); nog niet op ijzer |
+| Mac mini M4 | `flip-bundle.sh apple` | `0x101_0000_0000` (link-apple.ld `KERN_BASE`, het RAM-venster) | de staging in de loader-regio (`LOADER` + 2 MB) met het blob vlak onder de stagingkop; de recorder op `ADMIN` + `0xc0_0000`, buiten de boot-scratch (iBoot legt het bootobject daar bij elke boot terug); de trampoline op de bovenste pagina van de kern-RAM (`board/apple/src/slots.rs`) | alleen warm: zonder EL3 geen PSCI, dus een koude flip weigert vóór de staging (`HOPOS_FLIP_COLD_NO_PSCI`, Hop krijgt `HOPOS_COLD_FLIP=no`); op ijzer warm geflipt tot 3.0.20 (24-10, ALLES.md) |
 
 Wat per board eerst te kijken is, morgen op het ijzer:
 
@@ -144,9 +145,11 @@ Wat per board eerst te kijken is, morgen op het ijzer:
   De trampoline staat in de kern-RAM (de bovenste heap-pagina):
   het enige uitvoerbare RAM buiten de pool. `cpu::el2::chain` staat dat toe
   zolang het beeld hem niet raakt. Eerst bewijzen dat de heap die pagina op
-  het moment van de flip niet gebruikt (de heap is een bump-allocator; een
-  node die zijn heap vol heeft, weigert de flip niet maar overschrijft dan
-  zijn eigen laatste pagina vlak voor de sprong, wat niemand meer leest).
+  het moment van de flip niet gebruikt. De heap heeft sinds 29-09 vrije
+  lijsten en vult een gat vóór de staart ([heap.md](heap.md),
+  `holes_are_reused_before_the_tail`), dus die pagina raakt hij pas als
+  zijn gebied bijna vol is; ook dan weigert de flip niet, maar overschrijft
+  hij die pagina vlak voor de sprong, en daarna leest niemand hem meer.
 
 ## De faalmodi
 
@@ -228,9 +231,13 @@ geen cache.
 | Mac mini M4 | ADMIN + `0xc0_8000` (`slots::BLACK_BOX`, 32 KiB) | idem, naast de recorder; niet op de boot-scratch, want iBoot legt daar het bootobject terug (01-09) |
 | riscv64 | geen (`HOPOS_FLIP_BLACKBOX_NONE`) | nog geen plek die bewezen een reset overleeft |
 
-De plek staat per board in `hopos/src/flip.rs` (`mod black_box`), met een
-`const`-assertie dat hij niet in de trampoline, de feitenpagina of het blob
-valt.
+De plek staat per board in zijn `slots.rs` (`BLACK_BOX`), met daar de
+`const`-asserties: op virt en de Pi's boven de trampoline en de recorder,
+op UEFI boven de feitenpagina, op de M4 achter de recorder en binnen het
+kooi-venster, op de Radxa binnen zijn structuurvenster. Op virt, de Pi's
+en UEFI ligt hij per constructie direct onder het blob (het blob min 32
+KiB). `hopos/src/flip.rs` (`mod black_box`) leest die plek en toetst
+alleen dat de doos past en op 64 bytes ligt.
 
 ## De boot-guard
 

@@ -1,9 +1,9 @@
 //! De console over TCP (`kern::conport`; Go: `kern/conport` en
-//! `driver/conlog`): een ring van 64 KiB achter de UART-sink, waar
-//! `nc node 5555` eerst de bewaarde console uit krijgt en daarna live
-//! meeleest. Op een headless board (de Pi 4, de Radxa, de O6N zonder
-//! UART aan de Mac) is dit de enige plek waar de kern zijn redenering
-//! kwijt kan; Derek noemde hem op 30-09 "killer" toen hij ontbrak.
+//! `driver/conlog`): een ring van 256 KiB ([`RING_BYTES`]) achter de
+//! UART-sink, waar `nc node 5555` eerst de bewaarde console uit krijgt en
+//! daarna live meeleest. Op een headless board (de Pi 4, de Radxa, de O6N
+//! zonder UART aan de Mac) is dit de enige plek waar de kern zijn
+//! redenering kwijt kan; Derek noemde hem op 30-09 "killer" toen hij ontbrak.
 //!
 //! Dit bezit de ring, de tee en de lezersplaatsen; de listener en de
 //! lezertaken staan in net.rs (de node-stack), en de aan/uit-keuze komt uit

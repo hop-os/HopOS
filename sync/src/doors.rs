@@ -21,6 +21,10 @@ struct Door<T> {
 /// neemt [`hand`](Self::hand). Elke deur en de bel hebben één wachter:
 /// werker `i` de zijne, de acceptor die van de vrije deuren.
 ///
+/// Kwamen er minder werkers op dan deuren (een OOM bij het spawnen), dan
+/// zegt [`staffed`](Self::staffed) dat vóór de eerste overdracht: de deuren
+/// zonder werker blijven dan bezet, en geen job komt er terecht.
+///
 /// Alles op de executor van één core: de deuren staan in een [`Local`].
 pub struct Doors<T, const N: usize> {
     doors: Local<[Door<T>; N]>,
@@ -41,6 +45,18 @@ impl<T, const N: usize> Doors<T, N> {
                 }; N],
             ),
             freed: Signal::new(),
+        }
+    }
+
+    /// Alleen de eerste `n` deuren hebben een werker: de rest blijft
+    /// voorgoed bezet, dus [`hand`](Self::hand) en [`place`](Self::place)
+    /// leggen er nooit een job achter (die zou daar hangen met alles wat
+    /// hij vasthoudt). Te roepen vóór de eerste overdracht, door wie de
+    /// werkers spawnde; een werker roept [`free`](Self::free) alleen met
+    /// zijn eigen deur, dus een dichte deur gaat nooit meer open.
+    pub fn staffed(&self, n: usize) {
+        for d in self.doors.iter().skip(n) {
+            d.busy.set(true);
         }
     }
 
@@ -116,6 +132,34 @@ mod tests {
         // Een werker zonder deur wacht voor altijd.
         let mut none = core::pin::pin!(d.take(2));
         assert_eq!(poll_once(&mut none, &w), Poll::Pending);
+    }
+
+    #[test]
+    fn a_door_without_a_worker_never_gets_a_job() {
+        // Drie deuren, maar de spawn stopte na één werker (F10): de job
+        // moet bij deur 0 komen of terug, nooit achter deur 1 of 2.
+        let d: Doors<u32, 3> = Doors::new();
+        let (_, w) = waker();
+        d.staffed(1);
+        assert_eq!(d.hand(1), Ok(()));
+        assert_eq!(d.hand(2), Err(2));
+        let mut t0 = core::pin::pin!(d.take(0));
+        assert_eq!(poll_once(&mut t0, &w), Poll::Ready(1));
+        assert_eq!(d.hand(2), Err(2));
+        d.free(0);
+        assert_eq!(d.hand(2), Ok(()));
+        let mut t0 = core::pin::pin!(d.take(0));
+        assert_eq!(poll_once(&mut t0, &w), Poll::Ready(2));
+        for i in 1..3 {
+            let mut t = core::pin::pin!(d.take(i));
+            assert_eq!(poll_once(&mut t, &w), Poll::Pending);
+        }
+        // Met alle deuren bemand verandert er niets.
+        let all: Doors<u32, 2> = Doors::new();
+        all.staffed(2);
+        assert_eq!(all.hand(1), Ok(()));
+        assert_eq!(all.hand(2), Ok(()));
+        assert_eq!(all.hand(3), Err(3));
     }
 
     #[test]

@@ -171,10 +171,12 @@ pub fn build(block: Pa, ipa_base: u64, pa_base: u64, size: u64) -> Result<Pa, Er
 /// cacheable: (1) de nullen schrijven, (2) clean+invalidate zodat een
 /// her-walk nullen uit DRAM leest (andersom kon de walker tussen veeg en
 /// nullen de oude tabel opnieuw cachen: de app overleefde de kill op echt
-/// silicium, QEMU verhult dat), (3) pas dan de TLBI via de HVC.
+/// silicium, QEMU verhult dat), (3) pas dan de TLBI (`tlbi alle1is`, ter
+/// plekke op EL2: in Go was dat een HVC naar de revoke-vector, vandaar de
+/// naam `hvc_revoke` in `super::arch`).
 ///
 /// EERLIJKE GRENS: een WFE-slaper doet geen toegangen en overleefde de
-/// intrekking (verbrande core, 19-07); daarom eindigt de revoke-handler met
+/// intrekking (verbrande core, 19-07); daarom eindigt de intrekking met
 /// een SEV. Resteert de self-branch-lus uit een loop-buffer: per silicium
 /// te meten.
 pub fn revoke(block: Pa) {

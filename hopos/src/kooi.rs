@@ -627,6 +627,13 @@ impl<I: Isa> Cage for Kooi<I> {
     }
 
     fn detach(&mut self, slot: Slot) -> impl Future<Output = ()> {
+        // De control-page uit de tabel van de klok, nu en niet pas in de
+        // future: de lifecycle roept dit bij elke stop (stil of ingetrokken)
+        // en op de faalpaden na de bouw, vóór de partitie vrijkomt. Tot 24-10
+        // stond het alleen in `revoke`, dus na een stille stop schreven de
+        // telemetrie (temperatuur, zaad) en `clock::set` elke seconde in een
+        // vrijgegeven partitie, ook als die al van een ander was (F1).
+        crate::clock::detach(slot);
         detach(slot)
     }
 }

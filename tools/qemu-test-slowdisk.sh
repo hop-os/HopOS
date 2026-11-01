@@ -7,8 +7,9 @@
 # executor van de OS-core. Op macOS is een FLUSH van QEMU een F_FULLFSYNC van
 # 3 tot 786 ms; met 2,5 s per verzoek nagebootst was dat een stilte van 7 s
 # (`late_ms=6611` op de tik), en zolang geen tik, geen verkeer. Sinds 30-09
-# is schijf-I/O een submit plus een await (blkdev::InFlight, de bel van de
-# IRQ-lijn), en deze toets houdt dat zo.
+# is schijf-I/O een submit plus een await, sinds 04-10 een ticket in de
+# wachtrij met een await op de eigen completion (blkdev::Queue, de bel van
+# de IRQ-lijn), en deze toets houdt dat zo.
 #
 # QEMU krijgt een null-co met $DISKLAT nanoseconden per verzoek (standaard
 # 1,5 s; image/qemu-run.sh DISKLAT), de kern Hop (slot 1, op de OS-core),

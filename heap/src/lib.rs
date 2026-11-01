@@ -24,9 +24,11 @@
 //!   niet op het begin van een vrij blok, dan wordt de voorkant als eigen
 //!   vrij blok afgesplitst. Een rest achter het blok die groot genoeg is,
 //!   gaat ook terug de lijst in.
-//! - Het plafond geldt voor de bytes in gebruik (kop inbegrepen), los van
-//!   de maat van het gebied, zodat een app een lagere grens kan krijgen dan
-//!   zijn RAM toelaat.
+//! - Het plafond geldt voor de bytes in gebruik (kop inbegrepen) en is de
+//!   maat van het gebied: `init` zet het, en er is geen lagere grens. Tot
+//!   01-10 kon `set_ceiling` het onder het gebied leggen (e97b4fc, met
+//!   `cpu::memlimit` weg); de grens van een app is nu zijn partitie, die de
+//!   kern bij de plaatsing kiest.
 //!
 //! Heap is voor koude paden (handboek §6); `alloc` en `free` zijn daarom
 //! eenvoudig en niet snel, maar wel begrensd: een lijstwandeling stopt na

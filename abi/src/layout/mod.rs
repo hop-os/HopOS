@@ -439,11 +439,17 @@ pub const SCHED_MBOX_PC: u64 = 8;
 /// Vier werkregisters van de getrapte app (ARM x0..x3 in de vector-thunks;
 /// RISC-V x5..x7).
 pub const SCHED_SCRATCH: u64 = 16;
-/// Welk slot er nu draait (0 = geen); alleen RISC-V, want ARM leest het
-/// VMID uit VTTBR.
+/// Welke context er nu draait (een slot, of een SMP-context boven
+/// [`SLOT_CAP`]; 0 = geen). Op beide architecturen: de dispatch en de
+/// OS-core schrijven het, de switcher leest er bij een yield de bewoner
+/// uit (op ARM niet uit het VMID, dat een secundaire core met zijn
+/// primaire deelt, 03-09), en de kern leest er de vasthouder van een core
+/// uit (`hopos/src/kooi.rs` `holder`).
 pub const SCHED_CURRENT: u64 = 48;
-/// De laatst gedispatchte lijst-index (RISC-V). Een eigen veld en niet
-/// [`SCHED_CURSOR`], want dat ligt in de regels van de kern.
+/// De laatst gedispatchte lijst-index. Alleen de RISC-V-switcher leest
+/// hem; de dispatch zet hem op beide architecturen op 0 bij een start. Een
+/// eigen veld en niet [`SCHED_CURSOR`], want dat ligt in de regels van de
+/// kern.
 pub const SCHED_ROTOR: u64 = 56;
 /// De periode van de kill-tick in timebase-tikken (0 = geen tick). Geen
 /// preemptie: een tick hervat dezelfde bewoner en kijkt alleen of de kern
@@ -505,9 +511,9 @@ pub struct SchedBlock {
     pub mbox_pc: u64,
     /// Werkregisters.
     pub scratch: [u64; 4],
-    /// Het lopende slot (RISC-V).
+    /// De lopende context ([`SCHED_CURRENT`]).
     pub current: u64,
-    /// De rotor (RISC-V).
+    /// De rotor ([`SCHED_ROTOR`]).
     pub rotor: u64,
     /// De kill-tick-periode.
     pub tick_ticks: u64,

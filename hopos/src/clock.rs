@@ -89,7 +89,9 @@ pub(crate) fn ctrl_page(i: usize) -> Option<dev::Pa> {
     }
 }
 
-/// De kooi van `slot` is ingetrokken: zijn page is niet meer van hem.
+/// De kooi van `slot` is ingetrokken of losgelaten (`Kooi::revoke`,
+/// `Cage::detach` bij elke stop): zijn page is niet meer van hem, en niemand
+/// schrijft of leest er nog via deze tabel.
 pub(crate) fn detach(slot: Slot) {
     if let Some(c) = CTRL.get(slot.get()) {
         c.store(0, Relaxed);

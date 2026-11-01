@@ -15,8 +15,10 @@
 //! daarin haar eigen call- en antwoordbuffer (handboek §1.2); de actor leest
 //! de data uit de ene, schrijft het antwoord in de andere en geeft beide
 //! terug via de [`Reply`] van de verbinding. Er leeft dus geen lening over
-//! een `.await`, en er wordt per call niets gealloceerd (de kern-heap is een
-//! bump-allocator: wat terugkomt uit het midden lekt).
+//! een `.await`, en er wordt per call niets gealloceerd: een bestandscall is
+//! een heet pad, en de heap is voor koude paden (handboek §6; zijn vrije
+//! lijsten zijn begrensd, niet snel, en een vol plafond hoort geen call
+//! halverwege te laten falen).
 //!
 //! De I/O loopt buiten de boom: een call wordt synchroon gepland (pad,
 //! node, een verse run) en doet daarna zijn blok-I/O als future op de
@@ -324,7 +326,8 @@ pub enum FsMsg {
 /// Een lezing voor de kern zelf: een hopfs-pad, zonder slot en generatie.
 /// De buffers gaan als waarde heen en terug (handboek §1.2), zodat een
 /// aanroeper die in stukken leest (de teststream) nooit per stuk alloceert:
-/// de kern-heap is een bump-allocator.
+/// een lus van stukken is een heet pad, en de heap is voor koude paden
+/// (handboek §6).
 #[derive(Debug)]
 pub struct KernRead {
     /// Het absolute hopfs-pad (`/firmware/hevcdec.fwb`).
@@ -965,7 +968,12 @@ impl<L: Console> Desk<'_, L> {
             Busy::Reads(_) => !reads,
             Busy::Other => true,
         };
-        let fresh = live && self.prepared.get(i).copied().flatten() != Some(c.generation);
+        // Een nieuwe levensduur wist zijn root en geeft daarmee nodes en
+        // blokken vrij: dat wacht op een lege pool. Een geadopteerde (de
+        // warme flip) houdt zijn root en geeft niets vrij.
+        let fresh = live
+            && self.prepared.get(i).copied().flatten() != Some(c.generation)
+            && !self.svc.root_kept(c.slot, c.generation);
         let wait = busy
             || ((fresh || matches!(c.op, OP_REMOVE | OP_TRUNCATE)) && !idle)
             || (c.op == OP_SYNC && self.committing);
@@ -1206,17 +1214,26 @@ impl<L: Console> Desk<'_, L> {
     /// Zet root en volumes klaar voor een nieuwe levensduur (Go:
     /// `startImage`): de root van de vorige bewoner gaat weg, een verse lege
     /// komt ervoor in de plaats, en de gedeelde mappen bestaan.
+    ///
+    /// Een levensduur die bij een warme flip geadopteerd werd
+    /// ([`Servicers::root_kept`]), is dezelfde app op een nieuwe kern: zijn
+    /// root blijft zoals hij was, alleen het bestaan van root en volumes
+    /// wordt verzekerd. De lifecycle-actor schreef dat gegeven bij de
+    /// adoptie in de servicer-tabel; hier wordt het alleen gelezen.
     fn prepare<D: BlockIo>(&mut self, t: &Tree<D>, slot: Slot, generation: u32) -> Result {
         let i = slot.get();
         if self.prepared.get(i).copied().flatten() == Some(generation) {
             return Ok(());
         }
+        let kept = self.svc.root_kept(slot, generation);
         let mut fs = t.borrow_mut();
         self.path.clear();
         push_root(slot, &mut self.path)?;
-        match fs.remove(self.path.as_bytes(), true) {
-            Ok(()) | Err(Error::NoEnt) => {}
-            Err(e) => return Err(e),
+        if !kept {
+            match fs.remove(self.path.as_bytes(), true) {
+                Ok(()) | Err(Error::NoEnt) => {}
+                Err(e) => return Err(e),
+            }
         }
         fs.mkdir_all(self.path.as_bytes())?;
         let path = &mut self.path;
@@ -1231,6 +1248,11 @@ impl<L: Console> Desk<'_, L> {
             .ok_or(Error::Denied)??;
         if let Some(p) = self.prepared.get_mut(i) {
             *p = Some(generation);
+        }
+        if kept {
+            self.log.log(format_args!(
+                "hopfs: slot {slot} keeps its root over the kernel flip HOPOS_FS_ROOT_KEPT"
+            ));
         }
         Ok(())
     }

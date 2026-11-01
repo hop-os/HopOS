@@ -3,8 +3,12 @@
 //!
 //! Dit bezit alleen getallen en twee losse instructies: de waarden van
 //! HCR_EL2, SCTLR_EL2, TCR_EL2, CPTR_EL2 en CNTHCTL_EL2 die de ingang
-//! (`crate::entry`, `crate::boot`) schrijft, en het herstel van de timertoegang van EL1 na
-//! `cpu::idle::ArmSleeper::new`. Niet van hier: welke switcher-smaak de
+//! (`crate::entry`, `crate::boot`) schrijft, en het herstel van de
+//! timertoegang van EL1 na `cpu::idle::ArmSleeper::new`. Eén uitzondering:
+//! HCR, SCTLR en CPTR schrijft de nVHE-tak van `crate::entry` als
+//! letterlijke waarden (byte voor byte de ingang van vóór VHE); alleen de
+//! VHE-tak laadt de constanten. De nVHE-constanten hieronder lezen dus
+//! alleen de toetsen, die ze gelijk houden aan die letterlijke waarden. Niet van hier: welke switcher-smaak de
 //! app-cores krijgen (`hopos/src/cage.rs` `FLAVOR`); die moet wel met deze
 //! vorm overeenkomen, en de binary toetst dat bij het bouwen.
 //!
@@ -55,7 +59,7 @@ mod imp {
     /// AMO: fysieke IRQ, FIQ en SError komen naar EL2.
     #[cfg_attr(
         not(all(target_arch = "aarch64", target_os = "none")),
-        allow(dead_code) // alleen de ingang (entry.rs) gebruikt hem, en de tests
+        allow(dead_code) // de toetsen lezen hem; entry.rs schrijft hem letterlijk
     )]
     pub(crate) const HCR: u64 = (1 << 31) | (7 << 3);
 
@@ -63,14 +67,14 @@ mod imp {
     /// WXN en EE uit (geen uitlijncontrole, little-endian).
     #[cfg_attr(
         not(all(target_arch = "aarch64", target_os = "none")),
-        allow(dead_code) // alleen de ingang (entry.rs) gebruikt hem, en de tests
+        allow(dead_code) // de toetsen lezen hem; entry.rs schrijft hem letterlijk
     )]
     pub(crate) const SCTLR: u64 = 0x30c5_0830 | 1 | (1 << 2) | (1 << 3) | (1 << 12);
 
     /// CPTR_EL2 zonder traps (nVHE): de RES1-bits met TFP = 0.
     #[cfg_attr(
         not(all(target_arch = "aarch64", target_os = "none")),
-        allow(dead_code) // alleen de ingang (entry.rs) gebruikt hem, en de tests
+        allow(dead_code) // de toetsen lezen hem; entry.rs schrijft hem letterlijk
     )]
     pub(crate) const CPTR: u64 = 0x33ff;
 

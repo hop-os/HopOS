@@ -384,7 +384,8 @@ pub static IRQ_PENDING: Signal = Signal::new();
 /// De ingang voor de IRQ-vector van HOP's core: zet de vlag en wekt de
 /// dispatcher. Verder niets: geen claim, geen allocatie, geen logica.
 ///
-/// De vector keert daarna terug met I gemaskeerd (SPSR_EL1.I gezet): de
+/// De vector keert daarna terug met I gemaskeerd (SPSR_EL2.I gezet, de
+/// kern draait op EL2; op riscv blijft de `mie`-bit van de bron dicht): de
 /// lijn staat nog tot de dispatcher hem claimt, en met I open werd dat een
 /// storm. De dispatch-taak opent I weer na zijn ronde ([`unmask`]).
 pub fn on_irq() {

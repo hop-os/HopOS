@@ -383,10 +383,19 @@ extern "C" fn secondary_main(k: u64) -> ! {
 /// (`CtrlIdle` is de idle-tijd van álle cores van de app; de dvfs van de
 /// kern deelt door `CtrlCores`).
 ///
-/// Is de app weg (de primaire zette `Exited`, of de kern vraagt de stop),
-/// dan gaat deze core ook: HVC #0, en de switcher meldt zijn context dood
-/// en parkeert de core. Zo bevestigt een gewone stop élke core zonder
-/// intrekking.
+/// Is de app weg (de primaire zette `Exited`), dan gaat deze core ook:
+/// HVC #0, en de switcher meldt zijn context dood en parkeert de core. Zo
+/// bevestigt een gewone stop élke core zonder intrekking.
+///
+/// Het stopverzoek alleen (de kill-vlag) is nog geen reden: de primaire
+/// krijgt dan zijn gratie om `main` af te ronden en [`App::shutdown`] te
+/// doen, en een taak op deze core hoort die gratie ook te krijgen. Tot
+/// 24-10 parkeerde een secundaire al bij de vlag (uit 04-10, van vóór de
+/// nette stop van 05-10) en liet zo zijn taak halverwege staan (F11). De
+/// stop eindigt toch: de primaire zet `Exited` langs elke weg (de nette
+/// exit, de geforceerde na de gratie in [`crate::rt::watch`], een paniek,
+/// een fault in de vector van `crate::mmu`), en wie nooit terugkomt, velt de kern na de termijn met de
+/// intrekking van de hele kooi.
 pub struct CoreSleeper<I: crate::sleep::Idle> {
     ctrl: Ctrl,
     idle: I,
@@ -468,9 +477,10 @@ impl<I: crate::sleep::Idle> CoreSleeper<I> {
     }
 }
 
-/// Is de app weg (de primaire zette `Exited`, of de kern vraagt de stop)?
+/// Is de app weg: zette de primaire `Exited`? Het stopverzoek telt niet
+/// (zie [`CoreSleeper`]).
 fn gone(ctrl: &Ctrl) -> bool {
-    ctrl.kill_requested() || ctrl.status() == Some(AppStatus::Exited)
+    ctrl.status() == Some(AppStatus::Exited)
 }
 
 impl<I: crate::sleep::Idle> Sleeper for CoreSleeper<I> {
@@ -748,7 +758,8 @@ mod tests {
     }
 
     // Zonder deadline slaapt een secundaire in WFE tot er werk is of tot
-    // zijn app weggaat; geen ronde per 10 ms om dat te zien.
+    // zijn app weggaat; geen ronde per 10 ms om dat te zien. Het
+    // stopverzoek alleen wekt hem niet: de app is pas weg bij `Exited`.
     #[test]
     fn a_secondary_without_a_timer_wakes_for_work_or_a_stop() {
         let p = Page::new();
@@ -767,9 +778,20 @@ mod tests {
             if n.get() == 3_000 {
                 ctrl.set(CTRL_KILL, 1);
             }
+            n.get() > 6_000
+        });
+        // De vlag kwam na 2 998 WFE's; hij sliep door tot het werk.
+        assert_eq!((s.idle().wfes, s.naps), (4_999 + 5_999, 2));
+        assert!(!s.app_gone());
+        let n = Cell::new(0u32);
+        s.sleep(0, None, &|| {
+            n.set(n.get() + 1);
+            if n.get() == 3_000 {
+                ctrl.set(CTRL_STATUS, AppStatus::Exited as u64);
+            }
             false
         });
-        assert_eq!((s.idle().wfes, s.naps), (4_999 + 2_998, 2));
+        assert_eq!((s.idle().wfes, s.naps), (4_999 + 5_999 + 2_998, 3));
         assert!(s.app_gone());
     }
 
@@ -807,11 +829,11 @@ mod tests {
         let mut p = Page::new();
         let s = CoreSleeper::new(p.ctrl(), Fake::default(), 1);
         assert!(!s.app_gone());
+        // Het stopverzoek: de primaire rondt nog af, deze core ook (F11).
         p.put(CTRL_KILL, 1);
-        assert!(s.app_gone());
-        let mut p = Page::new();
+        assert!(!s.app_gone());
         p.put(CTRL_STATUS, AppStatus::Exited as u64);
-        assert!(CoreSleeper::new(p.ctrl(), Fake::default(), 1).app_gone());
+        assert!(s.app_gone());
     }
 
     #[test]

@@ -244,8 +244,23 @@ static SERVICERS: &Servicers = &crate::SERVICERS;
 /// schrijven er elke app-regel in (via [`LogTee`]), de listener leest.
 pub(crate) static LOGS: SlotLogs = SlotLogs::new();
 
-/// De antwoordplek van de boot-plaatsing (één aanroeper).
+/// De antwoordplek van de supervisor van Hop ([`HopNode::supervise`]) en
+/// van de boot-plaatsing ([`place_first`]): `ask`, `status`, `stop`,
+/// `place` en `drop_streams`. Eén aanroeper tegelijk: de twee sluiten
+/// elkaar uit (de rol, of een meegekomen Hop), en elk van beide is één taak
+/// die op zijn antwoord wacht vóór de volgende vraag. Een andere taak die
+/// de actor iets vraagt, krijgt een eigen plek ([`REPUBLISH_REPLY`]): een
+/// [`Reply`] kent één wachter, en een tweede `recv` verdringt de waker van
+/// de eerste, die dan voorgoed wacht.
 static BOOT_REPLY: Reply = Reply::new();
+
+/// De antwoordplek van de late her-publicatie ([`republish`]), los van
+/// [`BOOT_REPLY`]: hij loopt naast de supervisor van Hop (een warme flip
+/// met een NIC die pas bij een retry opkwam). Tot 24-10 deelden ze er één,
+/// en viel de her-publicatie samen met een `status` van de supervisor, dan
+/// kon die voorgoed hangen, en daarmee elke volgende HOP_RESTART. Eén
+/// aanroeper: [`REPUBLISH`] laat hem hoogstens één keer los.
+static REPUBLISH_REPLY: Reply = Reply::new();
 
 /// De partitie van de eerste plaatsing: 32 MB, staart inbegrepen. Ruim voor
 /// appspike (een half MB image, 256 KB stack, een kleine heap).
@@ -553,7 +568,7 @@ pub(crate) fn republish(exec: &'static Executor) {
         return;
     }
     let ask_once = async {
-        if let Err(e) = ask(Request::Republish).await {
+        if let Err(e) = ask_at(&REPUBLISH_REPLY, Request::Republish).await {
             println!("slots: ports after the late NIC: {e} HOPOS_SLOT_PUBLISH_FAIL");
         }
     };
@@ -633,9 +648,16 @@ async fn servicer(exec: &'static Executor, slot: Slot, ctx: dev::Pa) {
     .await;
 }
 
-/// Stuurt één verzoek naar de actor.
+/// Stuurt één verzoek naar de actor, met het antwoord op [`BOOT_REPLY`]
+/// (de supervisor en de boot-plaatsing).
 async fn ask(req: Request) -> kern::Result<Response> {
-    match call(INBOX, &BOOT_REPLY, req).await {
+    ask_at(&BOOT_REPLY, req).await
+}
+
+/// Stuurt één verzoek naar de actor, met het antwoord op `reply`: een plek
+/// met op dit moment geen andere wachter.
+async fn ask_at(reply: &'static Reply, req: Request) -> kern::Result<Response> {
+    match call(INBOX, reply, req).await {
         Ok(Response::Failed(e)) | Err(e) => Err(e),
         Ok(r) => Ok(r),
     }

@@ -23,7 +23,8 @@
 //!    de sprong (`cpu::el2::chain::chain`). Na de bewoners staat er geen
 //!    `.await` meer: niemand kan er nog iets aan veranderen. Gaat er
 //!    onderweg iets mis, dan ontdooien hopfs en de NAT weer.
-//! 4. De nieuwe kern: [`land`] als eerste na de heap. Een overdracht is
+//! 4. De nieuwe kern: [`land`] als eerste in `setup`, na de heap,
+//!    `discover` en de verhuizing naar de OS-core. Een overdracht is
 //!    `HOPOS_FLIP_BOOT gen=N`; de NAT houdt de node-poorten van de oude
 //!    flows vast vóór de switch zijn eerste ronde draait, de slots
 //!    adopteren hun bewoners (`slots::start`, `HOPOS_FLIP_ADOPT`), daarna
@@ -241,9 +242,24 @@ struct Prepared {
 /// blob erna (`abi::NatState`, dezelfde vorm aan beide kanten).
 type Nat = abi::NatState<Vec<abi::FlowState>>;
 
-/// De klaargelegde flip, van de haak naar de flip-taak. Beide draaien op
-/// de executor van de OS-core.
-static PENDING: Local<Cell<Option<Prepared>>> = Local::new(Cell::new(None));
+/// Waar een flip staat: de haak legt hem klaar, de flip-taak voert hem uit.
+#[derive(Copy, Clone, Debug)]
+enum Phase {
+    /// Geen flip: een FLIP wordt getoetst en klaargelegd.
+    Idle,
+    /// Aangenomen (Hop kreeg zijn `Ok`), de flip-taak heeft hem nog niet.
+    Pending(Prepared),
+    /// De flip-taak wacht [`JUMP_DELAY`], bevriest, vangt of springt.
+    Jumping,
+}
+
+/// De flip, van de haak naar de flip-taak. Beide draaien op de executor van
+/// de OS-core. Alleen in [`Phase::Idle`] neemt de haak een FLIP aan: de
+/// staging is er één, en tot 24-10 legde een tweede FLIP tijdens de
+/// [`JUMP_DELAY`] of het vangen opnieuw plat in dezelfde staging terwijl de
+/// flip-taak de eerste nog ging uitvoeren. De flip-taak zet hem terug op
+/// `Idle` na een sprong die niet doorging (na [`Frozen::thaw`]).
+static FLIP: Local<Cell<Phase>> = Local::new(Cell::new(Phase::Idle));
 /// De conntrack uit het blob, van de landing naar de herstel-taak.
 static LANDED_NAT: Local<Cell<Option<Nat>>> = Local::new(Cell::new(None));
 /// De bel van de flip-taak.
@@ -422,7 +438,9 @@ pub(crate) fn jumped() -> bool {
     cfg!(target_arch = "riscv64") || cpu::boot::FLIP_ENTERED.load(Relaxed)
 }
 
-/// De landing, als eerste na de heap: een overdracht is er, of niet.
+/// De landing, als eerste in `setup` (in `kmain` gaan alleen de heap,
+/// `discover` en de verhuizing naar de OS-core ervóór): een overdracht is
+/// er, of niet.
 ///
 /// Alleen na een sprong ([`jumped`]): een firmware-boot die nog een paar
 /// vindt, wist het en boot koud (`HOPOS_FLIP_STALE`). Na een harde reset
@@ -688,6 +706,14 @@ pub(crate) fn prepare(b: &FlipBundle, sha256: &[u8; 32]) -> kern::Result {
 }
 
 fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
+    // Eerst: een flip die al aangenomen is, houdt de staging. Deze toets
+    // leest geen byte van de bundel, dus hij mag vóór de som.
+    if !matches!(FLIP.get().get(), Phase::Idle) {
+        println!(
+            "flip: a flip is already under way (accepted, not jumped and not given up); this one is refused, the staging stays HOPOS_FLIP_BUSY"
+        );
+        return Err(refuse("a flip is already under way", kern::Error::Busy));
+    }
     let len = usize::try_from(b.len).map_err(|_| kern::Error::TooLarge {
         len: usize::MAX,
         max: 0,
@@ -832,7 +858,7 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
         bundle.link_load,
         if cold { ", cold" } else { "" }
     );
-    PENDING.set(Some(Prepared {
+    FLIP.set(Phase::Pending(Prepared {
         len: flat,
         entry,
         sum: sum64,
@@ -1009,8 +1035,8 @@ fn hold_ports(state: &Nat) {
             state.flows.len()
         );
     }
-    // 'static voor de brievenbus: de heap is een bump-allocator, en dit is
-    // één keer per boot.
+    // 'static voor de brievenbus: het commando draagt een `&'static`-slice.
+    // Hij lekt bewust, één keer per boot en hooguit [`MAX_ADOPT`] poorten.
     let ports: &'static [u16] = Box::leak(ports.into_boxed_slice());
     let cmd = Command::HoldAdoption {
         ports,
@@ -1106,13 +1132,21 @@ async fn send_and_wait(
 async fn run(exec: &'static Executor) {
     loop {
         BELL.wait().await;
-        let Some(p) = PENDING.take() else { continue };
+        let p = match FLIP.replace(Phase::Jumping) {
+            Phase::Pending(p) => p,
+            other => {
+                FLIP.set(other);
+                continue;
+            }
+        };
         exec.after(JUMP_DELAY).await;
         let e = jump(exec, p).await;
         println!("flip: not jumped: {e}; this kernel keeps running HOPOS_FLIP_FAIL");
         // Niet gesprongen is geen mislukte flip voor een latere boot: de
         // recorder gaat leeg (Go: `stageClear`).
         let _ = kernflip::take_last_flip(&mut DevMem, &plan());
+        // Ontdooid en opgegeven: een volgende FLIP mag weer.
+        FLIP.set(Phase::Idle);
     }
 }
 
@@ -1209,11 +1243,11 @@ async fn capture_and_jump(exec: &'static Executor, p: Prepared, frozen: &mut Fro
 }
 
 /// De koude weg na de bevriezing: elke bewoner die niet op de OS-core
-/// woont stoppen, de app-cores uit, en springen met een blob zonder
-/// bewoners. Wat hier misgaat, laat een kern achter die gewoon doordraait:
-/// gestopte bewoners blijven gestopt (Hop plaatst ze opnieuw), en een
-/// uitgezette core staat op "koud", dus de volgende dispatch is weer een
-/// PSCI CPU_ON.
+/// woont stoppen, de app-cores uit, de USB stil, en springen met een blob
+/// zonder bewoners. Wat hier misgaat, laat een kern achter die gewoon
+/// doordraait: gestopte bewoners blijven gestopt (Hop plaatst ze opnieuw),
+/// en een uitgezette core staat op "koud", dus de volgende dispatch is weer
+/// een PSCI CPU_ON.
 async fn cold_jump(exec: &'static Executor, p: Prepared) -> JumpError {
     let stopped = match stop_residents(exec).await {
         Ok(n) => n,
@@ -1223,6 +1257,17 @@ async fn cold_jump(exec: &'static Executor, p: Prepared) -> JumpError {
         Ok(n) => n,
         Err(e) => return e,
     };
+    // De USB-controllers stil, zoals op de warme weg (stap 2b in
+    // `capture_and_jump`): ook kern B na een koude flip doet de link-reset,
+    // en de xHCI's zijn DMA-masters op de RP1. Op de Pi 5 is koud toegestaan
+    // zolang er geen app-core draaide, en tot 24-10 sprong deze weg met
+    // draaiende controllers: het geval van fc66084. Als laatste `.await`,
+    // na de bewoners en de cores: een bewoner die stopt mag zijn laatste
+    // invoer of optische lezing nog krijgen (de display-app heeft alleen
+    // het glas nodig, de USB is zijn invoer), en een stop of CPU_OFF die
+    // faalt laat een kern achter die doordraait mét toetsenbord; een
+    // gestopte USB-taak komt in deze kern niet meer terug.
+    crate::gui::quiesce_usb(exec).await;
     println!(
         "flip: cold flip, {stopped} resident(s) stopped and {off} app core(s) powered off, nothing to hand over HOPOS_FLIP_COLD stopped={stopped} cores_off={off}"
     );

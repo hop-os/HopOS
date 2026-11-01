@@ -266,8 +266,10 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
 /// Los zijn het buren: de diepste boot is daar 156 KB, warm en koud.
 #[inline(never)]
 fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleeper {
-    // FLIP: de landing, als eerste na de heap. Een overdracht van een
-    // vorige kern draagt de bewoners; die adopteren de slots straks.
+    // FLIP: de landing, als eerste in `setup`. Daarvóór gingen in `kmain`
+    // alleen de heap, `discover` (het board) en de verhuizing naar de
+    // OS-core. Een overdracht van een vorige kern draagt de bewoners; die
+    // adopteren de slots straks.
     let landing = flip::land(dtb);
     // De watchdog van de vertrekkende kern loopt door: meteen herladen, vóór
     // het framebuffer-geduld en de rest van de boot (de Pi 5, 30-09).
@@ -339,7 +341,10 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     let hop_adopted = landing
         .as_ref()
         .is_some_and(|h| h.slots.iter().any(|st| st.slot == slots::HOP_SLOT));
-    let privilege = if role == Ok(StagedRole::Hop) || hop_adopted {
+    // Of er een Hop is, één keer beslist: het token en de watchdog (die
+    // bewaakt dan zijn hartslag) kijken naar hetzelfde (24-10, F6).
+    let hop_here = role == Ok(StagedRole::Hop) || hop_adopted;
+    let privilege = if hop_here {
         kern::Slot::new(slots::HOP_SLOT).and_then(Privilege::boot)
     } else {
         None
@@ -385,7 +390,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     exec.spawn(hopcost(exec)).expect("spawn hopcost");
     // De node-watchdog (op een flip-boot meteen met de boot-guard) en de
     // telemetrie: thermiek en klokbeleid.
-    watchdog::start(exec);
+    watchdog::start(exec, hop_here);
     telemetry::start(exec);
     load::start(exec); // de meetlat per slot (docs/apps.md)
     gui::start_screen_status(exec); // de meetregels naast de bunny

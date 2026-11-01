@@ -153,11 +153,11 @@ const DHCP_RETRY: Duration = Duration::from_secs(5);
 /// looptijd eroverheen.
 const DHCP_PROBE: (u32, u32, u32) = (60, 1, 2);
 
-/// Het bufferbudget van de node-stack. De Go-kern nam 1/8 van het RAM-raam
-/// (30 MB op QEMU), maar de heap is hier nog een bump-allocator: wat een
-/// verbinding teruggeeft, lekt. 8 MB is dus het plafond op wat tegelijk
-/// leeft, niet op wat er in totaal verdwijnt; een echte allocator heft dat
-/// op.
+/// Het bufferbudget van de node-stack: het plafond op wat de TCP-ringen
+/// tegelijk vasthouden. De Go-kern nam 1/8 van het RAM-raam (30 MB op
+/// QEMU). De kernheap heeft sinds 01-10 vrije lijsten (heap/src/lib.rs),
+/// dus wat een gesloten verbinding teruggeeft, is weer bruikbaar; 8 MB
+/// begrenst alleen wat tegelijk leeft.
 const NET_BUDGET: usize = 8 << 20;
 
 /// De antwoordbuffer van een system-verbinding: de kop plus één I/O-brok,
@@ -900,7 +900,10 @@ struct Job {
 
 /// De deuren van de pool, één per verbindingstaak: de listener geeft een
 /// verbinding aan de eerste vrije taak (en weigert als alle bezet zijn),
-/// de taak meldt zich vrij na de verbinding.
+/// de taak meldt zich vrij na de verbinding. Kwamen er minder taken op
+/// dan deuren, dan blijven de deuren zonder taak dicht
+/// ([`Doors::staffed`]): een verbinding daar hing voorgoed, met haar
+/// plaats bij het slot.
 static DOORS: Doors<Job, SYSTEM_WORKERS> = Doors::new();
 
 /// De listener op [`PORT`] (Go: `ServeSystem`): per verbinding `admit`
@@ -917,6 +920,7 @@ async fn system_listener(exec: &'static Executor, ip: Ipv4Addr, api: SystemApi) 
         }
     };
     let workers = spawn_workers(exec, &api);
+    DOORS.staffed(workers);
     if workers == 0 {
         println!("system: no connection tasks, listener closed HOPOS_SYSTEM_FAIL");
         io(|st| {
@@ -967,7 +971,7 @@ async fn system_listener(exec: &'static Executor, ip: Ipv4Addr, api: SystemApi) 
                 full = full.wrapping_add(1);
                 if full <= LOUD_REFUSALS {
                     println!(
-                        "system: {} refused, all {SYSTEM_WORKERS} connection tasks busy, {full} so far, {served} served HOPOS_SYSTEM_FULL",
+                        "system: {} refused, all {workers} connection tasks busy, {full} so far, {served} served HOPOS_SYSTEM_FULL",
                         Ipv4Addr::from(job.remote)
                     );
                 }
@@ -1075,8 +1079,10 @@ async fn console_reader(
     }
 }
 
-/// Spawnt de verbindingstaken, elk met haar eigen buffers (boot: de heap
-/// geeft ze eenmalig) en haar eigen antwoordplek. Geeft hoeveel er draaien.
+/// Spawnt de verbindingstaken, elk met haar eigen buffers (de heap geeft
+/// ze eenmalig, als de listener na de lease opkomt) en haar eigen
+/// antwoordplek. Geeft hoeveel er draaien: de eerste OOM of mislukte spawn
+/// stopt de rij, en de listener sluit de deuren daarachter.
 fn spawn_workers(exec: &'static Executor, api: &SystemApi) -> usize {
     let mut n = 0;
     for (i, reply) in api.replies.iter().enumerate() {

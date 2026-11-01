@@ -29,12 +29,15 @@
 //! de node, niet voor de app.
 //!
 //! Wie vóór de executor iets met de schijf doet (de mount bij de boot, de
-//! meetbank), draait precies die futures af met [`block_on`] en een
-//! [`Pace`] die pollt ([`Spin`]): dezelfde driver, dezelfde wachtrij, geen
-//! tweede pad. Tot 04-10 stond ernaast nog een tweede voorkant voor één
-//! opdracht tegelijk (`Paced`, met `start` en `poll_done` in het contract),
-//! alleen voor de meetbank en de tests: weg, de meetbank meet nu de
-//! wachtrij die hopfs ook gebruikt.
+//! meetbank), draait precies die futures af met [`block_on`], dat ze elke
+//! ronde opnieuw pollt: dezelfde driver, dezelfde wachtrij, geen tweede
+//! pad. De mount gebruikt daarbij de wachtrij van de actor zelf, met de
+//! [`Pace`] van de executor (`ExecPace` in `hopos/src/storage.rs`); de
+//! meetbank en de tests een [`Pace`] die pollt ([`Spin`]). Tot 04-10
+//! stond ernaast nog een tweede voorkant voor één opdracht tegelijk (de
+//! oude `Paced`, met `start` en `poll_done` in het contract), alleen voor
+//! de meetbank en de tests: weg, de meetbank meet nu de wachtrij die hopfs
+//! ook gebruikt.
 //!
 //! # Waarom er één pad is
 //!
@@ -283,7 +286,9 @@ pub trait Pace {
 }
 
 /// Een [`Pace`] die pollt: nooit slapen, altijd opnieuw kijken. Voor
-/// [`block_on`] vóór de executor (de mount, de meetbank) en de tests. De
+/// [`block_on`] vóór de executor (de meetbank) en de tests; de mount bij de
+/// boot draait met [`block_on`] over de wachtrij van de actor en diens
+/// `Pace`. De
 /// klok staat stil, dus de wachter van de [`Queue`] blijft in zijn
 /// yield-venster en toetst het device bij elke ronde van `block_on`; de
 /// time-out van een verzoek is van de driver (zijn eigen klok), dus ook zo

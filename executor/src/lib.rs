@@ -17,8 +17,9 @@
 //! rtt tussen twee bewoners (QEMU virt met `-icount shift=0`, één instructie
 //! per ns: riscv64 359 naar 108 us, arm64 252 naar 85 us).
 //!
-//! De ronde: alle taken met een gezet bit pollen, dan de timers die
-//! verstreken zijn wekken, en als er in die ronde niets gebeurd is slapen.
+//! De ronde ([`Executor::step`]): eerst de gespawnde taken een plaats
+//! geven, dan de timers die verstreken zijn wekken, dan alle taken met een
+//! gezet bit pollen, en als er in die ronde niets gebeurd is slapen.
 //! De verloren-wek-race is dicht doordat de [`Sleeper`] het `ready`-
 //! predicaat nog één keer toetst mét interrupts gemaskeerd.
 //!

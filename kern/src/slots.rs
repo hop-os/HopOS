@@ -448,7 +448,7 @@ impl ServicerCtl {
     /// Probeert een system-verbinding van levensduur `generation` te
     /// claimen (hooguit `max`). De plaatsen van een oudere levensduur tellen
     /// niet: wie als eerste van een nieuwe levensduur claimt, begint bij
-    /// nul. Tot 25-10 deelde het slot één teller over zijn levensduren, en
+    /// nul. Tot 24-10 deelde het slot één teller over zijn levensduren, en
     /// een nieuwe Hop die binnen milliseconden na zijn start belde (de
     /// ORION, na POST /restart), vond de plaatsen van de oude nog bezet tot
     /// hun serve-taken op hun tik ([`crate::system::LIFE_TICK`]) zagen dat
@@ -501,6 +501,20 @@ fn split_conns(v: u64) -> (u32, u32) {
     ((v >> 32) as u32, v as u32)
 }
 
+/// Eén regel van de servicer-tabel: de levende levensduur van een slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Life {
+    /// De generatie die de lifecycle-actor hem gaf.
+    generation: u32,
+    /// Geadopteerd bij een warme kern-flip: dezelfde app draait door, alleen
+    /// de kern is nieuw. Zijn root (`/.tasks/slot<N>`) is dan van hem en
+    /// blijft staan; alleen een echte start begint leeg. Tot 24-10 zag de
+    /// hopfs-actor van kern B elke geadopteerde generatie als een nieuwe
+    /// levensduur, en de eerste bestandscall na de flip wiste de root van
+    /// een app die gewoon doordraaide.
+    adopted: bool,
+}
+
 /// De servicers van alle slots: per slot de besturing, plus de leesbare
 /// tabel van wie er NU leeft (met de generatie van zijn levensduur).
 ///
@@ -510,11 +524,15 @@ fn split_conns(v: u64) -> (u32, u32) {
 /// bij elke bestandscall ([`crate::rpc::resolve`]). `None` is "geen zicht":
 /// elke bestandscall wordt dan geweigerd.
 ///
+/// Bij de generatie staat ook of die levensduur geadopteerd is
+/// ([`Servicers::root_kept`]): de lifecycle-actor schrijft het bij de
+/// registratie, de hopfs-actor leest het bij het klaarzetten van de root.
+///
 /// Elke wissel in de tabel luidt [`Servicers::changed`]: de committer hoort
 /// een stop zo, en hoeft niet rond te kijken.
 pub struct Servicers {
     ctl: [ServicerCtl; SLOT_CAP + 1],
-    table: LocalCell<[Option<u32>; SLOT_CAP + 1]>,
+    table: LocalCell<[Option<Life>; SLOT_CAP + 1]>,
     mounts: LocalCell<[Option<Vec<Mount>>; SLOT_CAP + 1]>,
     jobs: LocalCell<[Option<Vec<u8>>; SLOT_CAP + 1]>,
     changed: Signal,
@@ -586,6 +604,20 @@ impl Servicers {
     /// lening, geen `.await`.
     #[must_use]
     pub fn current(&self, slot: Slot) -> Option<u32> {
+        self.life(slot).map(|l| l.generation)
+    }
+
+    /// Houdt levensduur `generation` van `slot` zijn root? Waar alleen als
+    /// hij levend is en bij een warme flip geadopteerd werd: dan draait
+    /// dezelfde app door en is wat in `/.tasks/slot<N>` staat van hem. Een
+    /// gewone start (ook een herstart na de flip) begint leeg.
+    #[must_use]
+    pub fn root_kept(&self, slot: Slot, generation: u32) -> bool {
+        self.life(slot)
+            .is_some_and(|l| l.adopted && l.generation == generation)
+    }
+
+    fn life(&self, slot: Slot) -> Option<Life> {
         self.table.borrow().get(slot.get()).copied().flatten()
     }
 
@@ -608,7 +640,7 @@ impl Servicers {
         (size > 0).then(|| Region::new(ctl.base.load(Acquire), size))
     }
 
-    fn set(&self, slot: Slot, v: Option<u32>) -> Option<u32> {
+    fn set(&self, slot: Slot, v: Option<Life>) -> Option<Life> {
         let mut t = self.table.borrow_mut();
         let old = match t.get_mut(slot.get()) {
             Some(e) => core::mem::replace(e, v),
@@ -1052,7 +1084,11 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             self.abort(grant);
             return Err(e);
         }
-        self.register(slot, generation, region);
+        let life = Life {
+            generation,
+            adopted: false,
+        };
+        self.register(slot, life, region);
         let dispatch = self.cage.dispatch(slot, core);
         if let Err(e) = dispatch
             && e.never_ran()
@@ -1150,7 +1186,10 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         }
     }
 
-    fn register(&mut self, slot: Slot, generation: u32, region: Region) {
+    /// Publiceert levensduur `life` van `slot` in de servicer-tabel, met
+    /// zijn volumes, jobnaam en partitie, en luidt het startschot van zijn
+    /// servicer.
+    fn register(&mut self, slot: Slot, life: Life, region: Region) {
         // De volumes van deze levensduur, genormaliseerd. De claim toetste
         // ze al; faalt het hier toch (geheugen, of een geadopteerde spec),
         // dan krijgt het slot geen zicht en weigert elke bestandscall luid,
@@ -1191,7 +1230,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             let _ = ctl.gone.take();
             ctl.base.store(region.base, Release);
             ctl.size.store(region.size, Release);
-            self.svc.set(slot, Some(generation));
+            self.svc.set(slot, Some(life));
             ctl.start.set();
         }
     }
@@ -1633,7 +1672,13 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             if let Some(slot) = Slot::new(st.slot)
                 && let Some(generation) = self.resident(slot).map(|r| r.generation)
             {
-                self.register(slot, generation, Region::new(st.part_base, st.part_size));
+                // Geadopteerd: dezelfde app draait door, dus zijn root blijft
+                // (de hopfs-actor leest het bij zijn eerste bestandscall).
+                let life = Life {
+                    generation,
+                    adopted: true,
+                };
+                self.register(slot, life, Region::new(st.part_base, st.part_size));
                 self.log.log(format_args!(
                     "slot {slot}: adopted: partition {} MB @ {:#x} on core {} ({} core(s)), ownership restored",
                     st.part_size >> 20,
@@ -2100,6 +2145,16 @@ pub(crate) mod tests {
 
     pub(crate) fn stop<G: Grants>(a: &mut Actor<'_, G>, slot: usize) -> Result {
         block_on(a.stop(s(slot), Duration::from_millis(50)))
+    }
+
+    /// De adoptie van kern B, met het vertrek van elke servicer klaar zoals
+    /// bij [`start`]: de servicer-taken draait de toets niet.
+    pub(crate) fn adopt<G: Grants>(a: &mut Actor<'_, G>, states: &[SlotState]) -> Result<usize> {
+        let n = a.adopt(states)?;
+        for st in states {
+            a.svc.ctl(s(st.slot)).unwrap().gone.set();
+        }
+        Ok(n)
     }
 
     /// Een start met volumes, zoals de kern Hop plaatst.

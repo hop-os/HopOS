@@ -113,8 +113,13 @@ pub(crate) fn request_reset(reason: &'static str) {
 /// draait de canary toch, voor de console. Op een flip-boot wapent de taak meteen de
 /// boot-guard met twee minuten blinde gratie (de haak die flip.rs zou
 /// roepen: de generatie zegt het ook).
+///
+/// `hop`: woont Hop op deze node, gestaged of meegekomen over een flip.
+/// `setup` beslist dat één keer (main.rs, ook voor het token); tot 24-10
+/// keek dit zelf naar `staged_role`, en na een flip met Hop ingebakken in
+/// de kaart-kern (de M4 van 03-10) werd zijn hartslag dan niet bewaakt (F6).
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
-pub(crate) fn start(exec: &'static Executor) {
+pub(crate) fn start(exec: &'static Executor, hop: bool) {
     if BOARD.boot_param("hopos.wd") == "off" {
         if BOARD.disarm() {
             println!("watchdog: disabled for a post-mortem (the previous kernel armed it)");
@@ -129,7 +134,6 @@ pub(crate) fn start(exec: &'static Executor) {
         why: "not armed",
     };
     let flip = crate::flip::generation() > 1;
-    let hop = vboard::slots::staged_role() == Ok(board::stage::StagedRole::Hop);
     if let Err(e) = exec.spawn(run(exec, hw, flip, hop)) {
         println!("watchdog: task not spawned ({e:?}) - node liveness is UNGUARDED HOPOS_WD_NONE");
     }
@@ -144,18 +148,24 @@ struct Beat {
 impl Beat {
     /// Leest de heartbeat van Hop; `true` als hij binnen [`STALE_NS`]
     /// bewoog.
+    ///
+    /// Zonder page (een herstart van Hop: de stop haalt hem uit de tabel,
+    /// de nieuwe plaatsing zet er een verse in) of met een verse page die
+    /// nog 0 slaat, telt de laatste geziene beweging. Sinds 24-10 gaat de
+    /// page bij elke stop uit de tabel (F1); daarvoor bleef de oude staan en
+    /// was de herstart een hapering binnen [`STALE_NS`], geen gemiste aai.
+    /// Vóór de eerste slag is er geen beweging, dus geen bewijs.
     fn fresh(&mut self, now: u64) -> bool {
-        let Some(page) = crate::clock::ctrl_page(crate::slots::HOP_SLOT) else {
-            return false;
-        };
-        let at = page.add(abi::hopabi::CTRL_HEARTBEAT);
-        dev::pull(at, 8);
-        let v = dev::read64(at);
-        if v != self.last {
+        let v = crate::clock::ctrl_page(crate::slots::HOP_SLOT).map_or(0, |page| {
+            let at = page.add(abi::hopabi::CTRL_HEARTBEAT);
+            dev::pull(at, 8);
+            dev::read64(at)
+        });
+        if v != 0 && v != self.last {
             self.last = v;
             self.at = now;
         }
-        v != 0 && now.saturating_sub(self.at) < STALE_NS
+        self.last != 0 && now.saturating_sub(self.at) < STALE_NS
     }
 }
 

@@ -4,7 +4,7 @@
 //! - Poort-publicatie (DNAT): een vaste bestemming node-IP:poort naar
 //!   slot-IP:poort. Stateloos: per pakket alleen koppen herschrijven,
 //!   checksums incrementeel (RFC 1624). [`Nat::inbound`] (extern naar slot)
-//!   en [`Nat::from_slot`] (slot-antwoord naar extern).
+//!   en `Nat::slot_reply` (slot-antwoord naar extern; Go: `natFromSlot`).
 //! - Uitgaand (masquerade/PAT): een app belt naar buiten; HOP herschrijft
 //!   bron slot-IP:poort naar node-IP:node-poort en houdt een kleine
 //!   conntrack bij zodat het antwoord terugvindt. TCP én UDP (DNS, QUIC).

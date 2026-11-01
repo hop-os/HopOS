@@ -533,6 +533,67 @@ fn freeze_commits_first_and_names_the_generation() {
     assert_eq!(g2.stat(b"/.tasks/slot2/voor-de-flip").unwrap(), (5, false));
 }
 
+/// De warme kern-flip (F2 in docs/sequence-hopos.md): kern B adopteert de
+/// bewoner met een eigen generatie en begint met een verse actor, maar het
+/// is dezelfde app die doordraait. Zijn eerste bestandscall op kern B laat
+/// zijn root staan (de volumes bestaan, zoals bij elke levensduur). Een
+/// echte nieuwe levensduur daarna op kern B begint wel leeg, en het volume
+/// blijft.
+#[test]
+fn an_adopted_lifetime_keeps_its_root_and_a_new_start_wipes_it() {
+    let vol = || vec![m("/data", "/volumes/demo")];
+    // Kern A: de app schrijft in zijn root en zijn volume; de flip bevriest.
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+    crate::slots::tests::start_with_mounts(&mut a, 2, 8, 1, vol()).unwrap();
+    let g = svc.current(s(2)).unwrap();
+    assert!(!svc.root_kept(s(2), g), "a start is a new lifetime");
+    let (fs, _) = disk(64);
+    let mut f = FsActor::new(fs, &svc, &con);
+    for (p, d) in [("scratch", &b"blijft"[..]), ("/data/db", b"ook")] {
+        let mut c = fs_call(2, g, OP_WRITE, p, 0, 0, d);
+        on(f.handle(&mut c)).unwrap();
+    }
+    on(f.freeze()).unwrap();
+    let states = a.snapshot().unwrap();
+    let disk = f.into_fs().into_disk();
+
+    // Kern B: dezelfde schijf, een verse actor met een lege `prepared`.
+    let (svc2, con2) = (Servicers::new(), FakeConsole::default());
+    let mut b = actor(&svc2, &con2, Obey::Exit, 64, 4);
+    crate::slots::tests::adopt(&mut b, &states).unwrap();
+    let g2 = svc2.current(s(2)).unwrap();
+    assert!(svc2.root_kept(s(2), g2));
+    assert!(
+        !svc2.root_kept(s(2), g2.wrapping_add(1)),
+        "only the adopted generation"
+    );
+    let (fs2, _) = on(Fs::mount(disk, 0, (64 << 20) / 512, 512, 1 << 20, false)).unwrap();
+    let mut f2 = FsActor::new(fs2, &svc2, &con2);
+    let mut c = fs_call(2, g2, OP_READ, "scratch", 0, 64, &[]);
+    assert_eq!(on(f2.handle(&mut c)), Ok((6, 6)), "root kept over the flip");
+    assert_eq!(data(&c, 6), b"blijft");
+    assert!(con2.saw("hopfs: slot 2 keeps its root over the kernel flip HOPOS_FS_ROOT_KEPT"));
+    let mut c = fs_call(2, g2, OP_READ, "/data/db", 0, 64, &[]);
+    assert_eq!(on(f2.handle(&mut c)), Ok((3, 3)));
+
+    // Een echte nieuwe levensduur op kern B: de root leeg, het volume niet.
+    crate::slots::tests::stop(&mut b, 2).unwrap();
+    assert!(
+        !svc2.root_kept(s(2), g2),
+        "a stopped lifetime keeps nothing"
+    );
+    crate::slots::tests::start_with_mounts(&mut b, 2, 8, 1, vol()).unwrap();
+    let g3 = svc2.current(s(2)).unwrap();
+    assert_ne!(g3, g2);
+    assert!(!svc2.root_kept(s(2), g3));
+    let mut c = fs_call(2, g3, OP_STAT, "scratch", 0, 0, &[]);
+    assert_eq!(on(f2.handle(&mut c)), Err(Error::NoEnt), "root wiped");
+    let mut c = fs_call(2, g3, OP_READ, "data/db", 0, 64, &[]);
+    assert_eq!(on(f2.handle(&mut c)), Ok((3, 3)));
+    assert_eq!(data(&c, 3), b"ook");
+}
+
 // ---------------------------------------------------------------------------
 // De kern als lezer: de firmware van de codec (docs/media.md, haak 3).
 // ---------------------------------------------------------------------------

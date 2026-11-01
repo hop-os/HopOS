@@ -32,6 +32,7 @@ use crate::heap::HEAP;
 use crate::sleep::AppSleeper;
 use core::cell::OnceCell;
 use core::future::Future;
+use core::sync::atomic::Ordering::Relaxed;
 use core::time::Duration;
 use executor::Executor;
 use sync::Local;
@@ -97,6 +98,28 @@ mod tests {
         assert_eq!(w.tick(&app, t0 + 2_500_000_000, 0), Tick::Forced);
         assert_eq!(app.ctrl().get(CTRL_HEARTBEAT), 4);
     }
+
+    #[test]
+    fn a_lost_task_is_told_once_and_a_timer_overflow_once_per_run() {
+        let s = executor::Stats::default();
+        let mut l = Losses::default();
+        assert_eq!(l.check(&s), Lost::default());
+        // Twee taken zonder plaats: één regel met beide, daarna niets meer.
+        s.dropped.store(2, Relaxed);
+        assert_eq!(l.check(&s).dropped, 2);
+        assert_eq!(l.check(&s), Lost::default());
+        s.dropped.store(3, Relaxed);
+        assert_eq!(l.check(&s).dropped, 1);
+        // Een timer zonder slot telt per poll zolang hij spint: één regel
+        // bij het begin van de reeks, niet per slag.
+        s.timer_overflows.store(40, Relaxed);
+        assert_eq!(l.check(&s).overflows, Some(40));
+        s.timer_overflows.store(90, Relaxed);
+        assert_eq!(l.check(&s).overflows, None);
+        assert_eq!(l.check(&s).overflows, None);
+        s.timer_overflows.store(91, Relaxed);
+        assert_eq!(l.check(&s).overflows, Some(91));
+    }
 }
 
 /// Het ritme van de heartbeat.
@@ -139,17 +162,69 @@ impl Watch {
     }
 }
 
+/// Wat de heartbeat al meldde van de executor van de primaire: taken die
+/// geen plaats kregen terwijl `spawn` Ok gaf, en timers zonder slot. De kern
+/// meldt het eerste in zijn tik (`HOPOS_TASK_DROPPED`); een app meldde tot
+/// 24-10 geen van beide, dus zo'n taak verdween stil (F15).
+#[derive(Default)]
+struct Losses {
+    dropped: u64,
+    overflows: u64,
+    /// De vorige slag zag de overloop van de timers ook groeien.
+    overflowing: bool,
+}
+
+/// Wat één slag nieuw zag.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Lost {
+    /// Taken gedropt sinds de vorige slag.
+    dropped: u64,
+    /// Het totaal van de overloop, alleen op de eerste slag van een reeks:
+    /// een timer zonder slot telt bij elke poll zolang hij spint, en dat is
+    /// één melding waard, niet één per slag.
+    overflows: Option<u64>,
+}
+
+impl Losses {
+    fn check(&mut self, s: &executor::Stats) -> Lost {
+        let d = s.dropped.load(Relaxed);
+        let o = s.timer_overflows.load(Relaxed);
+        let dropped = d.wrapping_sub(self.dropped);
+        self.dropped = d;
+        let grew = o != self.overflows;
+        let overflows = (grew && !self.overflowing).then_some(o);
+        self.overflows = o;
+        self.overflowing = grew;
+        Lost { dropped, overflows }
+    }
+}
+
 /// De heartbeat als taak: elke 50 ms de teller, de kill-vlag, en om de twee
 /// seconden de geheugen-draw. Vraagt de kern de stop, dan luidt de bel
 /// ([`App::stop`]) en krijgt de app zijn gratie ([`App::stop_grace`]) om
 /// uit `main` terug te keren (de main-schil doet dan het net-afscheid en de
 /// exit); is hij dan nog niet terug, dan doet de heartbeat dat afscheid
-/// zelf. Tot 05-10 was dit een kale `exit` op de slag die de vlag zag: geen
+/// zelf. Elke slag meldt ook wat de executor verloor ([`Losses`]): één
+/// regel per gedropte reeks taken, één per reeks timers zonder slot. Tot
+/// 05-10 was dit een kale `exit` op de slag die de vlag zag: geen
 /// afscheid, en niets dicht (SIGTERM, dan SIGKILL; wij deden alleen KILL).
 pub async fn watch(app: &'static App) {
     let exec: &'static Exec = EXEC.get();
     let mut w = Watch::default();
+    let mut losses = Losses::default();
     loop {
+        let lost = losses.check(&exec.stats);
+        if lost.dropped != 0 {
+            crate::log!(
+                "applib: {} task(s) dropped, the task table is full HOPOS_TASK_DROPPED",
+                lost.dropped
+            );
+        }
+        if let Some(n) = lost.overflows {
+            crate::log!(
+                "applib: the timer table is full, a timer spins without a slot ({n} spins so far) HOPOS_TIMER_OVERFLOW"
+            );
+        }
         if w.tick(app, exec.now(), HEAP.used()) == Tick::Forced {
             crate::log!(
                 "applib: main did not return within the grace, shutting down HOPOS_APP_STOP_FORCED"

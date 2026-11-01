@@ -8,6 +8,10 @@ schrijven", verzamelt wat dubbel of scheef lijkt, met paden.
 
 Stand: main op 333d91e (04-10-2026), met het config-venster van a6ceae5.
 Regelnummers verschuiven; de padnamen blijven.
+Bijgewerkt op 24-10-2026 (main op 2d1ed1f) langs de code: wat sinds 04-10
+anders is, staat in de tekst, en in §8 staat bij elk thema wat er opgelost
+is. De volgorde in de tijd en de afwegingen per stap:
+[sequence-hopos.md](sequence-hopos.md).
 
 ## 1. In één alinea
 
@@ -79,8 +83,10 @@ net kent geen kern. Alleen hopos kent alles en verbindt het.
 | Mac mini M4 | `board/apple/src/head.rs` (eigen relocatie, VHE-only) | iBoot of m1n1 |
 | riscv64 machine mode | `cpu/src/riscv/boot.rs` `_start`; andere harts in een postvak-lus | hart 0 |
 
-Alle vier zetten stack, BSS, vectoren (`__hopos_vectors`), de identity map
-en de MMU, en roepen `kmain(dtb, el)` in `hopos/src/main.rs` aan. Een
+De drie arm64-ingangen zetten stack, BSS, vectoren (`__hopos_vectors`),
+de identity map en de MMU. Die van riscv zet stack, BSS, `mtvec` (de trap
+`__hopos_trap`) en de FPU, zonder MMU: machine mode vertaalt niet. Alle
+vier roepen `kmain(dtb, el)` in `hopos/src/main.rs` aan. Een
 flip-boot komt via dezelfde ingangen binnen (x3 = `FLIP_ENTRY`, op UEFI een
 feitenpagina).
 
@@ -226,8 +232,10 @@ applib (`applib/`) is de runtime waar elke Rust-app tegen linkt (op
 0x50010000, het canonieke adres dat ook Go gebruikt). `_start` zet vectoren,
 de stage-1-identity map en de MMU; `main!` → `rt::run` maakt de `App`
 (staart, outbox, control-page, env), de heap (dezelfde crate als de kern),
-meldt READY, en draait de executor met twee taken: de hartslag (`watch`,
-elke 50 ms) en `main`. Ziet de hartslag de kill-vlag, dan luidt hij de
+meldt READY, en draait de executor met de hartslag (`watch`, elke 50 ms)
+en `main`, plus `smp::bring_up` als de app meer dan één core heeft; opent
+de app zijn net, dan komt de RX-pomp erbij (`appnet.rs`). Ziet de
+hartslag de kill-vlag, dan luidt hij de
 stopbel van de app (`App::stop`, een `sync::Stop`; `app.stopped().await`
 voor de hoofdlus) met de termijn van de kern min 500 ms als gratie
 (`HOPOS_APP_STOP grace_ms=`). Keert `main` terug, dan volgt het
@@ -260,8 +268,10 @@ gelijk aan Go-ABI 10.
   "HOPS" van 12 bytes over TCP naar 10.100.0.1:10100, met daarin een
   verzoek of antwoord met een kop van 24 bytes. Bestands-, store-, codec-,
   device- en bevoegde ops (`PrivOp`, alleen Hop).
-- **De plaatsing** (`place.rs`), het PA-plan (`layout/plan.rs`), en
-  `sha256`, `checksum` (FNV), `FlowState` (NAT-flows voor de flip).
+- **De plaatsing** (`place.rs`), het PA-plan (`layout/plan.rs`),
+  `sha256`, `checksum` (FNV), `NatState` en `FlowState` (de NAT-staat voor
+  de flip, sinds c6e0bf8 één definitie), en `glass` (het glas en het
+  invoercontract: de `FB_*`-sleutels, poort 7879, de JSON-invoerregel).
 
 ### 4.6 De system-API, van app naar kern en terug
 
@@ -291,8 +301,9 @@ applib.
   hij zelf), of de gateway: naar poort 0 voor 10.100.0.1, SNAT voor een
   antwoord van een gepubliceerde poort, hairpin voor het eigen node-IP, of
   masquerade naar de uplink.
-- **Poorten:** jobspec-poorten via `Cage::publish` naar `Nat::publish`
-  (tcp en udp), hoogstens 512.
+- **Poorten:** de poorten van een start, die van een jobspec en Hop's
+  8080 en 9080 (in zijn `StartSpec`, sinds 110b945), via `Cage::publish`
+  naar `Nat::publish` (tcp en udp), hoogstens 512.
 
 ### 4.8 hopfs
 
@@ -309,7 +320,11 @@ antwoord met per lees de uitkomst ([apps.md](apps.md), "Veel kleine
 lezingen").
 
 Paden: een volume uit de jobspec (`/data` → `/volumes/demo`) wint op
-langste prefix, anders `/.tasks/slot<N>`, dat per levensduur gewist wordt.
+langste prefix, anders `/.tasks/slot<N>`. Die root wist de actor lui, bij
+de eerste bestandscall van een nieuwe levensduur (`prepare` in
+`kern/src/rpc.rs`): wat een bewoner achterliet, staat er tot zijn
+opvolger een bestandscall doet. Een levensduur die bij een warme flip
+geadopteerd werd, houdt zijn root.
 `OP_SYNC` is een bevestigde barrière (`docs/storage-sync.md`). De committer
 legt elke 10 s vast, of zodra een slot stopt.
 
@@ -363,13 +378,13 @@ procedure).
 | Crate | Wat | Gebruikt door |
 | --- | --- | --- |
 | `dev` (0,9k) | MMIO-lezen en -schrijven, `Reg<T>`, kopieën, barrières, `push`/`pull` (cache), `poll_until`, `delay`, de memcpy-lussen. Op de host no-ops. | ± 50 crates |
-| `bounded` (0,3k) | `BoundedVec<T, N>` en `Full<T>`. Geen map, set of ringbuffer. | 35 bestanden |
-| `sync` (1,5k) | `Signal`, `Stop`, `AtomicWaker`, `WakerSet`, `spsc::Channel`, `mpsc::Mailbox`, `Local`/`LocalCell`, `select`, `Pool` (futures zonder heap), `yield_now`, `Oneshot` met `oneshot::call` (verzoek en antwoord). Geen mutex. | overal |
+| `bounded` (0,3k) | `BoundedVec<T, N>`, `Full<T>` en `Text<N>` (`fmt::Write` op een vaste buffer). Geen map, set of ringbuffer. | 35 bestanden |
+| `sync` (1,5k) | `Signal`, `Stop`, `AtomicWaker`, `WakerSet`, `spsc::Channel`, `mpsc::Mailbox`, `Local`/`LocalCell`, `select`, `Futures` (futures zonder heap; tot 04-10 `Pool`), `Doors` (werkers met een acceptor), `Timer`, `yield_now`, `Oneshot` met `oneshot::call` (verzoek en antwoord). Geen mutex. | overal |
 | `heap` (1,2k) | De allocator van kern en apps: vrije lijsten met grenslabels, klassen per 16 bytes tot 1 KiB, `HeapLock` (spinslot met core-id). | `board/src/heap.rs`, `applib/src/heap.rs` |
-| `executor` (0,8k) | Eén per core: taken in een box, timerwiel, ready-bits, `Sleeper`-trait, uitstelbare timers. | hopos, applib, net |
+| `executor` (0,8k) | Eén per core: taken in een box, timerwiel, ready-bits, `Sleeper`-trait, uitstelbare timers, `ExecTimer`. | hopos, applib, net |
 | `abi` (7k) | Zie §4.5. `forbid(unsafe)`. | kern, net, cpu, boards, applib, hopos, gui |
-| `netdev` (0,1k) | Het NIC-contract: `transmit`, `receive`, `flush`, `mac`, `irq`. | 7 NIC-drivers, net, applib |
-| `blkdev` (1,3k) | Het blokcontract: `AsyncBlockDevice` (tickets; zonder tags één, ticket 0), `Pace`, `Queue` als enige voorkant, `BlockIo` voor hopfs. | nvme, virtioblk, hopos |
+| `netdev` (0,1k) | Het NIC-contract: `transmit`, `receive`, `flush`, `mac`, `irq`, `stats`; `IrqAck` en `AckSlot` voor de ack van de lijn. | 7 NIC-drivers, net, applib |
+| `blkdev` (1,3k) | Het blokcontract: `AsyncBlockDevice` (tickets; zonder tags één, ticket 0), `Disk`, `Pace`, `Queue` als enige voorkant, `BlockIo` voor hopfs. | nvme, virtioblk, hopos |
 
 ### 5.2 cpu en fw
 
@@ -396,6 +411,7 @@ nooit een panic.
 | Opslag | `virtiopci` (transport mmio en pci), `virtioblk`, `nvme` (pci en Apple-ANS) |
 | Firmware | `rtkit` (Apple-coprocessoren), `smc` (Apple), `scmi` (O6N, Radxa), `smpro` (Altra), `vcmail` (Pi) |
 | RNG | `rkrng` (Radxa), `rng200` (Pi) |
+| Watchdog | `dwwdt` (Radxa, LicheeRV), `i6300esb` (QEMU virt, `WDT=1`); de andere zitten in hun board |
 | USB | `usb/xhci`, `usb/dwc3`, `usb/hid` |
 | Geen driver | `dvfs` (klokbeleid), `codec` (het videocodec-contract) |
 
@@ -405,11 +421,14 @@ thermiek-taak.
 
 ### 5.4 board
 
-`board/src/lib.rs` definieert `trait Board`: `Nic` en `Sleeper` als types,
+`board/src/lib.rs` definieert `trait Board: Sync + Watchdog + Thermal +
+ClockKnob` (sinds a0eaeb0): `Nic`, `Sleeper` en `Disk` als types,
 console, privilege, firmware, heap, `discover`, klok, geheugen, cores en
-hun klasse, het PA-plan, `start_interrupts`/`dispatch_interrupts`,
-`probe_nic`, en met `gui` de framebuffer en USB-hosts. Daarnaast `cfgwin`,
-`stage` en `heap`.
+hun klasse (`this_core`, `os_core`, `os_bell`, `kick_self`), de config
+(`config`, `bootargs`, `boot_param`), het PA-plan,
+`start_interrupts`/`dispatch_interrupts`, `probe_nic`, `probe_disk`,
+constanten als `FLAVOR` en `HOP_MEM`, en met `gui` de framebuffer en
+USB-hosts. Daarnaast `cfgwin`, `stage` en `heap`.
 
 hopos kiest precies één board met een feature (`board-qemuvirt`, `-rpi4`,
 `-rpi5`, `-rk3566`, `-uefi`, `-o6n`, `-altra`, `-qemuvirt-riscv`,
@@ -445,8 +464,9 @@ In `net/` verder: `flows` (conntrack, 4096 flows, 512 per slot), `host`
 
 De binary (11k): `main.rs` (kmain, setup, tick), en de lijm die de traits
 van kern invult en de taken spawnt: `slots`, `kooi`, `cage`/`cage_riscv`,
-`glue`, `net`, `storage`, `flip`, `codec`, `optical`, `conport`,
-`watchdog`, `telemetry`, `seed`, `clock`, `load`, `bench`, `mem`.
+`glue`, `config`, `net`, `storage`, `flip`, `codec`, `optical`, `gui`,
+`conport`, `watchdog`, `telemetry`, `seed`, `clock`, `load`, `bench`,
+`mem`.
 Features buiten het board: `gui`, `media`, `vhe`, en de meetkernen
 `nvmebench`, `wdtest` en `hopcost`.
 
@@ -485,10 +505,11 @@ eigen netstack. De kern plaatst ze via dezelfde weg (ABI-stempel 10).
   en sync van deze werkboom. `image/flip-bundle.sh` maakt de flipbundels.
 - **Gate** (`tools/gate.sh`): host-tests, clippy, fmt, target-builds van
   alle boards en smaken. Geen QEMU.
-- **QEMU-tests**: 18 shellscripts plus `qemu-test-sync.py`, met als enige
-  gedeelde laag `tools/lib.sh` (38 regels). Elk wacht op markers in de
-  console. `tools/soak.sh` (ijzer) en `tools/qemu-soak-hop.sh` (QEMU) voor
-  uren.
+- **QEMU-tests**: 21 shellscripts plus `qemu-test-sync.py` op de gedeelde
+  laag `tools/lib.sh` (± 520 regels, sinds d4d8700). Elk wacht op markers
+  in de console. `tools/qemu-all.sh` draait ze als 33 ringen na elkaar,
+  met één eindregel. `tools/soak.sh` (ijzer) en `tools/qemu-soak-hop.sh`
+  (QEMU) voor uren.
 - **Release** (`tools/release.sh`): elk board headless en headfull, de
   bundels, de apps, `SHA256SUMS`; publiceert zelf niets.
 - **Host-tools**: `mkcard` (MBR + FAT16 + raw blobs), `netmeter`, `loc`.
@@ -503,7 +524,7 @@ eigen netstack. De kern plaatst ze via dezelfde weg (ABI-stempel 10).
 | `docs/flip.md`, `gui.md`, `media.md`, `apps.md`, `go-apps.md` | De vlakken |
 | `docs/heap.md`, `stacktask.md`, `storage-sync.md`, `ipv6.md` | Losse ontwerpen |
 | `docs/measurements.md` | Metingen per board naast v2 |
-| `docs/review-*.md` | Momentopnames van reviews |
+| `docs/review-*.md`, `sequence-hopos.md` | Momentopnames van reviews; de volgorde in de tijd met per stap de afweging (24-10) |
 | `ALLES.md` | De lijst van wat er nog moet |
 | `jobs/README.md` | Jobspecs en het releaseschema |
 
@@ -520,14 +541,19 @@ thema gegroepeerd, niet per crate, omdat de meeste dubbelingen over een
 laaggrens lopen. **H** = beide kanten in de code gelezen, **M** =
 waarschijnlijk, **V** = vermoeden. Regelaantallen zijn schattingen.
 
+Nagelopen op 24-10: op 8.7 en 8.8 na is elk thema op 04-10 aangepakt, met
+de commit bij de kop. Wat opgelost is, staat in de vorm van nu; wat bleef,
+staat erbij als open of bewust.
+
 ### 8.1 Mogelijke fouten (eerst kijken)
 
 Nagelopen op 04-10; wat een fout was, is gerepareerd.
 
 - **O6N: `hopos.oscore=small` viel terug.** `BOARD.os_core()` kwam via
   `Deref` bij `Uefi::os_core` met de MADT-klassen (op de Cix allemaal 0,
-  dus alles big). Nu heeft de O6N (en de Altra) een eigen `os_core` over
-  `Uefi::os_core_by` met de klassen van het board; `small` is core 2 (MPIDR
+  dus alles big). Nu kiest `board_uefi::On::os_core` (de O6N en de Altra
+  zijn sinds a0eaeb0 `On<Cix>` en `On<Ampere>`) via `Uefi::os_core_by` met
+  de klassen van het board; `small` is core 2 (MPIDR
   0x000), `big` core 0. Hosttoets in `board/o6n/src/class.rs`; op ijzer nog
   niet gezien.
 - **De kern na `move_to_os_core` draaide op 64 KiB zonder wachtpagina.**
@@ -548,105 +574,120 @@ Nagelopen op 04-10; wat een fout was, is gerepareerd.
 
 ### 8.2 Hetzelfde begrip, meer definities
 
-- `Region` vier keer: `abi` (`lib.rs:72`), `kern` (`lib.rs:166`, veld voor
-  veld gelijk), `board` (`base: Pa`), `fw::fdt` (`addr`). `Slot` twee keer
-  (`abi::layout`, `kern`). `Core` drie keer met drie betekenissen (fysiek in
-  abi, logisch in kern, een trait in heap). H.
-- `Full<T>` identiek in `sync` en `bounded`; aanroepers matchen op beide. H.
-- `Pool` drie betekenissen (`sync::Pool`, `abi::layout::Pool`,
-  `kern::pool::CorePool`). H, naamgeving.
-- **Het adresplan** (slot ↔ IP/MAC) drie keer: `abi::layout`,
-  `net::plan`, `applib::contract` en `applib::net`; de inverse eigen in
-  `kern::system::slot_from_remote` en `net::gw::from_host`. H.
-- **De NAT-staat voor de flip** drie keer (`kernflip::NatState`,
-  `net::nat::NatState`, `net::switch::NatSnapshot`) plus twee losse
-  `MAX_FLOWS`; hopos zet ze om. Hoort bij `abi::FlowState`. H.
-- **`Timer`** drie keer (`applib::sys`, `kern::cage`, `driver_xhci`),
-  `ExecTimer` twee keer, `Conn` twee keer, en daarnaast `blkdev::Pace` en
-  `dvfs::Host` als klok-en-slaap. De klokparameter heet `clock` in elf
-  drivers en `now` in vijf. H.
-- **Codec-types** drie keer (`driver/codec`, `abi::hopabi`,
-  `applib::codec`). H.
-- **Het glas** twee keer beschreven (`applib::fb::Glass` en
-  `driver_fb::Desc`, dezelfde `encode`), en het invoercontract (JSON-regels,
-  poort 7879, `FB_*`-sleutels) staat buiten abi, in usbin en applib. H.
-- Kleine botsingen: `MAX_CHUNK` is 8 KiB in abi en 1 MiB in applib;
-  `KIND_LOG` is 1 als ringsoort en 3 als framesoort; `Coherence` is een enum
-  en een trait; `Glass` een struct en een trait; de temperatuur heet
-  `temp_milli_c`, `temp_millic`, `temp`, `reading` met vier returntypes. H.
+Opgelost op 04-10 (c6e0bf8, "abi als enige waarheid"), op wat hieronder
+als open of bewust staat na.
+
+- `Region`: `abi::Region` in kern en `fw::fdt`; `board::Region` blijft
+  (bewust: zijn basis is een getypte `Pa`). `Slot` één keer
+  (`abi::layout::Slot`, met `SLOT_CAP`, ook in de kern). `Core` nog twee
+  keer met twee betekenissen (fysiek in abi, logisch in kern); de trait in
+  heap heet `CoreId`. H.
+- `Full<T>` één keer: `bounded::Full`. H.
+- `Pool`: `sync::Pool` heet `Futures`, `kern::pool::CorePool` heet
+  `Places`; `abi::layout::Pool` is de enige pool. H.
+- **Het adresplan** één keer, in `abi::layout` (`slot_ip4`, `slot_mac`,
+  `port_ip4`, `port_mac`, `ip4_port`); `net::plan` en `applib::net` geven
+  het door, en de inverse in `kern::system::slot_from_remote` en
+  `net::gw::from_host` is `ip4_port`. H.
+- **De NAT-staat voor de flip** één keer: `abi::NatState<F>` met
+  `abi::MAX_FLOWS`, naast `abi::FlowState`. `NatSnapshot` en de omzetting
+  in hopos zijn weg. H.
+- **`Timer`**: één `sync::Timer` voor kern, xhci en dwc3, één
+  `executor::ExecTimer` voor hopos en applib. Bewust gebleven:
+  `applib::sys::Timer` (een slaaptrait die Hop zelf implementeert) en
+  `Conn` twee keer (server en client). Open: `blkdev::Pace` en `dvfs::Host`
+  als klok-en-slaap, en de klokparameter heet nog `clock` of `now` per
+  driver. H.
+- **Codec-types**: applib gebruikt die van `abi::hopabi::codec` (de
+  eventsoort is `abi::hopabi::codec::Kind`, de `EVENT_`-constanten zijn
+  weg); `driver/codec` houdt zijn eigen contract. H.
+- **Het glas** en het invoercontract (JSON-regels, poort 7879,
+  `FB_*`-sleutels, de pixelregel) staan één keer, in `abi::glass`; fbgrant,
+  usbin, `driver_fb` en `applib::fb` gebruiken hem. H.
+- De kleine botsingen zijn weg: `MAX_CHUNK` staat niet meer in abi
+  (applib's is `MAX_IO_CHUNK`, 1 MiB), de ringsoort heet `RING_LOG`, de
+  traits heten `CacheMaint` en `GlassConsole`, en de temperatuur van een
+  board heet overal `temp_milli_c`. H.
 
 ### 8.3 Het contract buiten abi
 
-- **De draadvorm van de system-API wordt drie keer gecodeerd**: in abi
-  (`systemapi::encode_header`, `hopabi::encode_req`/`decode_resp`), in de
-  kern (`kern/src/system.rs`: `read_header`, `write_frame`, `Call::decode`,
-  `put_resp_head`) en in applib (`applib/src/sys.rs:194-296`). Binnen de kern
-  gebruiken `store.rs` en `codecabi.rs` wél de abi-encoder. Stond in de
-  review van 01-10 als "abi als enige waarheid". H.
+Opgelost op 04-10 (c6e0bf8).
+
+- **De draadvorm van de system-API staat één keer**, in abi: de kern leest
+  en schrijft de kop met de abi-encoder en decodeert calls met
+  `abi::hopabi::decode_req` (`Call` en `put_resp_head` zijn weg), en
+  `applib/src/sys.rs` codeert niets meer zelf (`encode_req_head`). H.
 - **`abi` draagt ook kern-interne dingen**: `sha256`, `checksum` en
-  `FlowState` hebben geen app-gebruiker. Ontwerpkeuze. H.
+  `FlowState` hebben geen app-gebruiker. Bewust, en zo in de moduledoc. H.
 
 ### 8.4 Het Board-contract is grotendeels impliciet
 
-- Wat hopos van een board nodig heeft staat voor een groot deel níet in het
-  trait: `this_core`, `os_bell`, `kick_self`, `probe_disk`/`Disk`,
-  `config`/`boot_param`, `temp_*`, `clock_knob`, de modules `watchdog` en
-  `slots`, constanten als `KERN_RAM` en `FLAVOR`. Het wordt bij naam
-  aangeroepen via `vboard::`. H.
-- Gevolg: een **`cfg`-bos in hopos**. Drie `mod hw` in `watchdog.rs`
-  (de Apple-module is een kopie van de UEFI-module), acht in
-  `telemetry.rs`, drie `mod src` in `bench.rs`, acht in `flip.rs`, en
-  board-eigenschappen als `cfg!` in `net.rs`, `cage.rs`, `kooi.rs`,
-  `slots.rs`. Kandidaat: traits `Watchdog`, `Thermal`, `ClockKnob` in board,
-  en constanten van het board in plaats van `cfg!`. ± 700 regels. H.
-- **O6N en Altra** delegeren 10 tot 12 methodes één-op-één naar
-  `self.uefi`; `probe_disk` en het NIC-skelet zijn gelijk. ± 200 regels. H.
-- **Watchdog-drivers staan in board/** in plaats van driver/; de DW-WDT
-  staat twee keer (rk3566, licheerv). H.
-- De O6N-governor in telemetry is `policy::governor` zonder de boot-flank. H.
+Opgelost op 04-10 (a0eaeb0, "Het Board-contract expliciet").
+
+- Het contract is expliciet: `Board: Sync + Watchdog + Thermal +
+  ClockKnob`, met `probe_disk` en type `Disk`, `this_core`, `os_core`,
+  `os_bell`, `kick_self`, `config`, `bootargs`, `boot_param`, de
+  flip-haken en constanten als `FLAVOR`, `PSCI` en `HOP_MEM` (§5.4).
+  Alle tien borden implementeren de vier traits. H.
+- Het **`cfg`-bos in hopos** is weg uit `watchdog.rs`, `telemetry.rs`,
+  `bench.rs`, `net.rs`, `cage.rs`, `kooi.rs` en `slots.rs`; in `flip.rs`
+  staan er nog twee voor de UEFI-borden, de rest per architectuur, en
+  elk board levert zijn `BLACK_BOX`. Wat blijft is `cfg` op de
+  architectuur (riscv64) en op features (`vhe`, `gui`). H.
+- **O6N en Altra** zijn `On<Cix>` en `On<Ampere>` op
+  `board_uefi::On<P: Platform>`: de delegatie, de `Deref` naar `Uefi` en de
+  dubbele `probe_disk` zijn weg. H.
+- **De DW-WDT** is één driver (`driver/dwwdt`); de Radxa houdt zijn
+  klokpoorten, de LicheeRV zijn RTC-routing. Open: de andere
+  watchdog-drivers staan nog in board/ (`board/*/src/watchdog.rs`,
+  `wdt.rs`). H.
+- De O6N-governor is gelijk aan de rest: de boot-flank synchroon vóór het
+  net (`HOPOS_CLOCK_EDGE`), de klok vol vóór een flip-sprong. H.
 
 ### 8.5 Interrupts
 
-- **gicv3 implementeert `cpu::irq::Controller` niet**, gicv2, aic en de
-  PLIC wel. Daardoor hebben qemuvirt, uefi en rk3566 elk een eigen
-  claim/eoi-lus met dezelfde takken, en licheerv en qemuvirt-riscv ook
-  (zonder `STRAY_LIMIT`), terwijl raspi en apple de `Dispatcher` gebruiken.
-  uefi heeft daarbovenop een eigen lijntabel. ± 250 regels. H.
-- gicv2 en gicv3 delen de distributor (`Gicd` tot `icfgr` identiek, de
-  SPI-enable en -disable dezelfde code). ± 80 regels. H.
-- `riscv::trap::IRQ_FLAG`/`take_irq` dubbelt `irq::IRQ_PENDING` en wordt
-  weggegooid; `irq::run`/`report`/`wait` hebben geen aanroeper. H, dood.
+Opgelost op 04-10 (8e8cea4, "Interrupts via één Controller").
+
+- **gicv3 implementeert `cpu::irq::Controller`**, net als gicv2, aic en de
+  PLIC, en elk board gebruikt de `Dispatcher`: de eigen claim/eoi-lussen
+  van qemuvirt, rk3566, uefi, licheerv en qemuvirt-riscv zijn weg, en
+  `STRAY_LIMIT` geldt overal. De lijntabel van uefi is weg (LPI's via de
+  ITS, de rest via de GIC, in een kleine `Irqchip`-wrapper). H.
+- De distributor staat één keer, als `driver_gicv3::dist`; gicv2 gebruikt
+  hem. H.
+- Dood en weg: `riscv::trap::IRQ_FLAG`, `take_irq`, `irq::run`, `report`
+  en `wait`. H.
 
 ### 8.6 Drivers: hetzelfde skelet met de hand
 
-- **Het NIC-skelet zeven keer**: dezelfde DMA-indeling (`N_RX`, `N_TX`,
-  `BUF_SIZE`, `BUF_OFF`, `DMA_NEED`), dezelfde IRQ-vorm (`set_irq`,
-  `IrqAck`, `rearm`) en dezelfde RX-kopie. In drie boards een
-  `static NIC_ACK`. Kandidaat: een `netdev::IrqAck`-trait en gedeelde
-  helpers. ± 150-250 regels. H voor de duplicatie, M voor de waarde.
-- **Link en PHY**: tg3 en rtl8126 doen clause 22 zonder `Mdio`-impl en een
-  eigen link-lus van dezelfde vorm als `mdio::autoneg`; vier boards doen
-  scan → autoneg → init zelf, drie drivers hebben `link_up` in de driver.
-  ± 70 regels. M (quirks per chip).
-- **virtionet en virtioblk** delen de status-handdruk, `new()`, `IrqAck`,
-  de publish en zes foutvarianten buiten virtiopci. ± 90 regels. H.
-- **brcmpcie implementeert `driver_pcie::Config` niet**; rpi5 bouwt de
-  capability-walk en MSI-X met de hand na. ± 80 regels. H.
-- **rkrng en rng200** hebben dezelfde `Regs`/`Mmio`, en de board-lijm
-  erboven (`board/raspi/src/rng.rs`, `board/rk3566/src/rng.rs`) is bijna
-  regel voor regel gelijk. ± 85 regels. H.
-- **Wachten op tellingen** in plaats van op de klok: genet, gem,
-  virtiopci, gicv3, its, brcmpcie. De duur hangt dan af van de CPU. H.
-- **Tellers die niemand leest**: `rx_bad`, `doorbells`, `tx_full` in igb,
-  rtl8126, tg3, virtionet; `requests`/`slowest_ns` in virtioblk. Alleen
-  stmmac print zijn `Stats`. `netdev` heeft geen `stats`. H.
-- **Vier bump-allocators** (virtionet, xhci, rtkit, `pcie::MmioWindow`). H.
-- **Drie UART-pollers** met verschillend beleid (pl011 en ns16550 permanent
-  dood, apple herstelt). H.
-- **Het rearm-moment** verschilt (in `receive` of in `flush`) en `netdev`
-  legt het niet vast. M.
-- `smpro` parseert de PCCT zelf (hoort in `fw::acpi`); `board/o6n/src/cpc.rs`
-  heeft eigen AML-primitieven naast `fw::aml`. H.
+Grotendeels opgelost op 04-10 (67e5a3a, "De drivers").
+
+- **Het NIC-skelet**: `netdev::IrqAck` en `AckSlot` (igb, rtl8126, tg3 en
+  stmmac implementeren de trait; de `static NIC_ACK` van altra, o6n,
+  apple, rk3566 en licheerv is een `AckSlot`). Bewust niet samengevoegd:
+  de DMA-indeling en de RX-kopie per chip. H.
+- **Link en PHY**: open; `mdio::wait_link` is alleen een voorstel (quirks
+  per chip). M.
+- **virtionet en virtioblk** delen via virtiopci `negotiate`,
+  `driver_ok`, `publish`, `IrqAck` en de opzetfouten. H.
+- **brcmpcie implementeert `driver_pcie::Config`**; rpi5 gebruikt `probe`,
+  `msix` en `msix_table_addr`. H.
+- **rkrng en rng200** gebruiken `dev::Mmio` in plaats van hun eigen
+  `Regs`/`Mmio`. H.
+- **Wachten op de klok** in brcmpcie, de ITS, de virtio-reset en de MDIO
+  van genet. Open: de MDIO van gem (`MDIO_POLLS`) en de redistributor-wek
+  van gicv3 (`WAKER_POLLS`) tellen nog. H.
+- **De tellers** gaan via `netdev::Stats` en `Device::stats` naar de tik
+  (`nic(bad= full= bells=)`); virtioblk meldt `commands=` en
+  `slowest_us=` in `HOPOS_DISK_STATS`. H.
+- **Eén bump-allocator**, `dev::Bump`, voor virtionet, xhci, rtkit en
+  `pcie::MmioWindow`. H.
+- **Eén consolebeleid**, `dev::Stall` (herstellen), voor pl011, ns16550 en
+  de M4; een UART die niets neemt, meldt `HOPOS_CONSOLE_STUCK`. H.
+- **Het rearm-moment** ligt vast: de lijn gaat weer open in `receive` als
+  die `None` geeft. H.
+- De PCCT staat in `fw::acpi::pcct_subspace`, de AML van de O6N-klok in
+  `fw::aml::cpc`. H.
 - Niet alles onder `driver/` is een driver: `codec` is een contract (zoals
   `netdev`, `blkdev` in de root), `dvfs` beleid. Andersom zijn `gui/rkscan`
   en `media/mve` wel drivers. Smaak.
@@ -711,33 +752,35 @@ Nagelopen op 04-10; wat dubbel was, is één keer.
 
 ### 8.10 Verzoek en antwoord zonder bouwsteen
 
-`sync` heeft geen oneshot. Daardoor is het patroon "zend, wacht op een bel,
-neem het antwoord" vijf keer met de hand gemaakt: `slots::Reply`,
-`switch::Ack`, `NatReply`, de `done[i]` van store (de `Door` van hopos is
-`sync::Doors` geworden, zie 8.12), en de helpers `slots::call`, `rpc::call`, `rpc::freeze`, `rpc::kern_read`,
-`deviceabi::call`. M-H dat het één bouwsteen kan zijn.
+Opgelost op 04-10 (110b945): `sync::Oneshot<T>` (het nieuwste antwoord
+wint) met `oneshot::call` (legen, zenden, wachten). `slots::Reply` draagt
+er twee, `switch::Ack` en `NatReply` zijn aliassen, en de helpers
+`slots::call`, `rpc::call`, `rpc::freeze`, `rpc::kern_read` en
+`deviceabi::call` gaan erdoorheen; `sync::Doors` leunt erop (zie 8.12).
+Open: de `done[i]` van store is nog een `Signal` per plek. H.
 
 ### 8.11 Twee paden waar één bedoeld is
 
-- **blkdev**: `Paced` en `Queue` hebben dezelfde chunk-lus en dezelfde
-  wachtmachine; in productie draait alleen `Queue`. Het contract heeft
-  `start`/`poll_done` naast `start_tag`/`poll_tag`/`reap`. nvme heeft
-  daarbij nog een eigen synchroon leespad voor de GPT. H.
-- **hopfs**: `Fs::read_at`/`write_at`/`commit` naast de `*_shared`-functies,
-  alleen voor tests en bench. H.
-- **Logregels van een app**: via de outbox (standaard), via `KIND_LOG` over
-  de system-API (alleen appspike), en via `LOGNET` (230 regels, niemand zet
-  het aan). H.
-- **Hop's poorten** 8080/9080 via `net::publish` (alleen TCP, twee
-  gekopieerde lussen), buiten `Resident.ports` en `republish`; jobspec-poorten
-  via `Cage::publish`. H.
-- **Switch-beheer in de kooi-lijm**: `Attach`/`Detach` gebeuren in
-  `hopos/src/kooi.rs`, de lifecycle weet niet dat de ringen van de switch
-  af moeten (een FIXME). H.
+Opgelost op 04-10 (110b945, "Oneshot en één pad"), op de DRBG's na.
+
+- **blkdev** kent alleen tickets (`start_tag`, `poll_tag`, `reap`), en
+  `Queue` is de enige voorkant: `Paced`, `InFlight`, `start`/`poll_done`
+  en het single-pad van nvme zijn weg, en de meetbank meet door de
+  `Queue`. Het GPT-leespad van nvme blijft (de probe heeft het
+  NVMe-foutdetail nodig). H.
+- **hopfs** heeft één I/O-pad: `Fs::read_at` en verwanten zijn weg, de
+  tests en de meetbank gebruiken `hopfs::path`. H.
+- **Logregels van een app** gaan via de outbox; `LOGNET` is weg, en
+  `Kind::Log` over de system-API blijft voor de Go-SDK. H.
+- **Hop's poorten** 8080 en 9080 staan in zijn `StartSpec` en gaan zoals
+  die van een jobspec via `Cage::publish` (tcp en udp), `Resident.ports`,
+  de flip en `republish`; de twee lussen rond `net::publish` zijn weg. H.
+- **Switch-beheer**: de lifecycle roept bij elke stop `Cage::detach`; de
+  FIXME is weg. H.
 - **Twee DRBG's** (Hash-DRBG in de kern, ChaCha20 in applib) en twee
   jitter-oogsters. Bewust gescheiden; wel twee keer review. Laag.
-- `memcpy`/`memcmp`/`bcmp`-shims regel voor regel gelijk in `applib/src/mem.rs`
-  en `hopos/src/mem.rs`. H.
+- De `memcpy`/`memcmp`/`bcmp`-shims zijn één macro, `dev::mem_symbols!`,
+  voor applib en hopos. H.
 
 ### 8.12 Pollen waar een gebeurtenis hoort
 
@@ -767,63 +810,78 @@ Nagelopen op 04-10; wat hieronder als gedaan staat, wacht nu op een bel.
 
 ### 8.13 Apps
 
-- `fmt::Write` op een vaste buffer vijf keer (bench, welcome, vitals,
-  display, usbin); `bounded::Text<N>` bestaat nog niet. H.
-- `port_of` drie keer, `read_exact` drie keer (`TcpStream` heeft wel
-  `write_all`), "blijf staan" op vier manieren, JSON-escape twee keer. H.
-- De burn-werklast en het idle-percentage in bench en vitals. H.
+Opgelost op 04-10 (249963d, "De apps"), op de keuzes na.
+
+- `bounded::Text<N>` is de `fmt::Write` op een vaste buffer (afgekapt op
+  een hele UTF-8-letter) voor bench, vitals, display en usbin; welcome en
+  vitals delen `applib::text::Room`. H.
+- `applib::app::port_of` één keer, `TcpStream::read_exact` naast
+  `write_all`, `applib::park()` voor het blijven staan,
+  `applib::text::json_str`. H.
+- De burn-werklast en het idle-percentage één keer (`applib::burn`,
+  `applib::clock::idle_pct`). H.
 - syncprobe (57 regels) kan een rol in appspike worden; replica gebruikt
-  hem, dus dat kost afstemming. Keuze.
-- cloudflared-lean (Rust, 5,4k) naast go/cloudflared (upstream-CLI, de Go-SDK,
-  en ABI 1 die vast moet blijven). Keuze.
-- Geen gebruiker in deze repo, hop of Stulp: `sys::Client::device_command`
-  (dus het optische pad heeft geen end-to-end-toets vanuit een app),
-  `Net::resolve_via`. V (grep).
-- Stulp heeft een eigen kopie van applib die 1693 diff-regels afwijkt. H.
+  hem, dus dat kost afstemming. Keuze, een voorstel voor Derek.
+- cloudflared-lean (Rust, 5,4k, sinds 19-10 in de Hop-repo) naast
+  go/cloudflared (upstream-CLI, de Go-SDK, en ABI 1 die vast moet
+  blijven). Keuze.
+- `sys::Client::device_command` en `Net::resolve_via` hadden geen
+  gebruiker en zijn weg. H.
+- Stulp heeft een eigen kopie van applib die 1693 diff-regels afwijkt (de
+  stand van 04-10). Voorstel: de overlay laten vallen en een tag vanaf
+  3.0.9 pinnen. H.
 
 ### 8.14 Scripts
 
-- **De QEMU-tests**: 1340 regels komen woordelijk in vier of meer scripts
-  voor (cleanup, objcopy, artifact-server, hop-build, wachtlus, POST,
-  rapport). Functies in `lib.sh` schelen 600-800 regels. `probe`/`refusals`
-  identiek in drie scripts; riscv-hop deelt 204 van 283 regels met
-  `qemu-test-hop.sh`; de QEMU-regel van virt, EDK2 en riscv staat
-  meermaals. H.
-- **De image-scripts**: het `APP`-keuzeblok zes keer; `rpi4.sh` en `rpi5.sh`
-  delen 92 van ± 143 regels; ELF-werk in inline Python verspreid (de
-  RELATIVE-toets twee keer); de terugleesproef alleen voor de Radxa (een
-  `mkcard --verify` zou elke kaart dekken). H.
-- Twee manieren om een bewoner in te bakken (`HOPOS_EMBED` op Apple,
-  `HOPOS_LRV_STAGE` op de LicheeRV). H.
-- **Lijsten die synchroon moeten blijven**: de apps op vier plekken (gate,
-  release, release-notes, jobs/README), `STAGE_MAX` vijf keer, de koude
-  linkadressen vier keer. Drie node-configs die bijna gelijk zijn. H.
-- Geen runner voor de hele QEMU-suite. M.
+Grotendeels opgelost op 04-10 (d4d8700, "De scripts").
+
+- **De QEMU-tests** staan op `tools/lib.sh` (opruimen, poorten, strip,
+  artifact-server, hop-build, wachtlus, POST, rapport, en `qemu_virt`,
+  `qemu_edk2` en `qemu_rv` één keer); `qemu-riscv-test-hop.sh` roept
+  `qemu-test-hop.sh` met `HOP_ARCH=riscv64`. De ringen gingen van 5122 naar
+  3734 regels. H.
+- **De image-scripts**: `image/raspi.sh` voor de Pi 4 en 5,
+  `image/elf.py` als de ene ELF-lezer met de RELATIVE-toets, `pick_app`
+  en `need_objcopy` één keer, en `mkcard -verify` leest elke kaart en
+  stick terug (de terugleesproef van de Radxa is weg). H.
+- Inbakken heet overal `HOPOS_EMBED`. H.
+- **Lijsten**: de apps één keer als `APPS` en `APPS_RISCV64` in
+  `tools/lib.sh` (gate, release, de notes en jobs/README lezen die),
+  `STAGE_MAX` één keer. Open: de koude linkadressen uit een
+  linkersymbool (raakt het flip-pad), en de drie node-configs. H.
+- De runner is `tools/qemu-all.sh`: alle ringen na elkaar, per ring groen
+  of ROOD met duur en laatste regel, en één eindregel. H.
 
 ### 8.15 Docs
 
-- De bouwcommando's per board op vijf plekken; elke test drie keer
-  beschreven (scriptkop, docs/README, vlak-doc). De root-README mist de
-  riscv-boards en Apple in de mapindeling en noemt 6 van de ± 20 tests. H.
-- `docs/boards.md` heet UEFI maar draagt de config voor alle boards;
-  ALLES.md verwijst naar `boards-*.md`, waar het niet onder valt. M.
-- De testtabel in `docs/README.md` mist `qemu-riscv-test-flip.sh` en
-  `-share.sh`; de kop zegt nog 30-09. H.
-- Verouderd: `jobs/hopos-media-o6n.cfg` (v2-stijl, `hopos.flip.enable` bestaat
-  niet, `hopos.console=5555` werkt bij toeval);
-  `jobs/job-cloudflared-lean.json` wijst naar `-tamago.elf` die de release
-  niet bouwt; `go/cloudflared/README.md` noemt gVisor;
-  `docs/measurements.md:357` zegt "Zero 3W"; `image/apple/console.py` noemt
-  `load-probe.py` en `console.go`; het commentaar in `hopos/src/main.rs:122`
-  zegt nog "bump-allocator". H.
-- `heap.md`, `stacktask.md` en de twee review-docs zijn niet gelinkt vanuit
-  `docs/README.md`; de reviews hebben regelnummers die niet meer kloppen. H.
-- De handboekregel "statische taken" klopt niet met de executor, die elke
-  taak in een box zet en stil dropt als de tabel vol is. H.
+Opgelost op 04-10 (f1917f0), op wat als open staat na.
+
+- Bouwen per board staat op één plek, de tests in één tabel in
+  `docs/README.md` (met de twee riscv-toetsen), en de root-README noemt
+  alle mappen en boards. H.
+- `docs/boards.md` heet ook config ("de config van elke node, en de
+  UEFI-machines"). H.
+- Bijgewerkt: de media-config in v3-vorm, cloudflared-lean naar de
+  Rust-ELF, `go/cloudflared/README.md` (gVisor alleen als toets dat het
+  er niet in zit), `image/apple/console.py`, en het commentaar in
+  `hopos/src/main.rs` over de heap. Open: `docs/measurements.md` zegt nog
+  "Zero 3W" (de kop van de meting van 04-10). H.
+- `heap.md`, `stacktask.md`, `storage-sync.md`, deze omschrijving en de
+  reviews zijn gelinkt vanuit `docs/README.md`; de reviews zonder
+  regelnummers. H.
+- De executor zet nog elke taak in een box, maar een taak die geen plaats
+  krijgt, is luid: `Stats::dropped` en `HOPOS_TASK_DROPPED` op de tik.
+  Open: de handboekregel "statische taken" zelf (in `rustdoc/README.md`,
+  buiten deze repo). H.
 
 ### 8.16 Dood of zonder gebruiker
 
-`Handoff.agent` (altijd leeg), `CommitWhy::Flip`, `FsActor::handle` en
-verwanten (alleen tests), `codecabi::serve` (alleen tests), `sync::Stop` in
-productie (gaat nooit af), `riscv::trap::jitter`, `irq::run`/`report`/`wait`,
-`board/licheerv/src/lottery.rs` (0 bytes), de feature `window-b000`. H.
+Opgelost op 04-10 (f1917f0, en `irq::run`/`report`/`wait` in 8e8cea4):
+het veld `Handoff.agent` is weg (het woord blijft in het blob, lengte 0,
+`HAND_VERSION` 6), net als `CommitWhy::Flip`, `FsActor::peak` en
+`::generation`, de vrije functie `codecabi::serve`, de riscv-`jitter`,
+`board/licheerv/src/lottery.rs` en de feature `window-b000`.
+`FsActor::handle` en de andere test-ingangen staan alleen nog onder
+`cfg(test)`. De `sync::Stop` die nooit afging (pomp, switch, host-taak,
+flow-expiry) is weg; `Stop` zelf is de stopbel van een app geworden
+(`App::stop`, §4.4) en de bel van de adoptie (`flip::ADOPTED`). H.

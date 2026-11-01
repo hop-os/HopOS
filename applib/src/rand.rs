@@ -19,9 +19,10 @@
 //! `key' = ChaCha20(key ^ blok)[0..8]` per blok van 32 bytes, met de
 //! lengte en een domein in de nonce; trekken is snelle sleutelvernietiging
 //! (Bernstein): elk blok geeft 32 bytes nieuwe sleutel en 32 bytes uitvoer,
-//! dus een gelekte staat verraadt geen eerdere uitvoer. Geen SHA-256 hier:
-//! applib heeft er geen en een derde kopie (naast `cpu::drbg` en `kern`)
-//! loont niet voor een mengfunctie; ChaCha20 is twintig regels.
+//! dus een gelekte staat verraadt geen eerdere uitvoer. ChaCha20 en geen
+//! SHA-256 als menger, al ligt die er (`abi::sha256`, sinds 03-10 de ene
+//! kopie voor kern, `cpu::drbg` en kernflip): het trekken is toch al
+//! ChaCha20, dus één primitief voor beide, en ChaCha20 is twintig regels.
 //!
 //! De regel, één keer per app, bij de eerste [`Rng::open`]:
 //!

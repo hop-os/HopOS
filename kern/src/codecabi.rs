@@ -79,7 +79,8 @@ pub const MAX_POLL: usize = 32;
 pub const POLL_WAIT_MAX: Duration = Duration::from_secs(1);
 /// Hoe vaak de kern de engine pompt tijdens een wachtende poll: de driver
 /// heeft geen interrupt (`media/mve/src/pump.rs`), dus de eigenaar van het
-/// ijzer kijkt, niet de app over de draad.
+/// ijzer kijkt, niet de app over de draad. Een poll met een reden:
+/// docs/description.md §4.11.
 pub const POLL_PUMP: Duration = Duration::from_millis(1);
 
 /// Is `op` een codec-call?

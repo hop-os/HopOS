@@ -306,7 +306,8 @@ impl board::ClockKnob for Apple {
     }
 }
 
-/// De cadans van de wachter op de p-states (Go: twee seconden).
+/// De cadans van de wachter op de p-states (Go: twee seconden). Een poll
+/// met een reden: docs/description.md §4.11.
 const PSTATE_WATCH_EVERY: core::time::Duration = core::time::Duration::from_secs(2);
 
 /// De wachter: alleen-lezen, één regel per sprong.

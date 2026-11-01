@@ -188,8 +188,8 @@ pub fn hyp_timer_off() {
 pub enum Mode {
     /// WFE tot werk of de deadline ([`wfe_until`]), met de event-stream
     /// (~1 ms) als klok: de default, want hij wekt op elk silicium dat we
-    /// kennen (behalve de M4). Zonder deadline houdt
-    /// [`WFI_CAP_NS`] de vangrail.
+    /// kennen (behalve de M4). Een poll met een reden: docs/description.md
+    /// §4.11.
     Wfe,
     /// WFI met de fysieke timer op de deadline. Alleen kiezen waar het board
     /// bewezen heeft dat de timer-PPI de WFI wekt: een slaap die niet wekt

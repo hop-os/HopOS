@@ -69,7 +69,7 @@ use storage::Inflight;
 
 /// Hoe vaak we de event-ring bekijken. Een boot-toetsenbord meldt zich elke
 /// 8-10ms; 4ms is dus ruim binnen de aanslagsnelheid en kost per beurt een
-/// handvol MMIO-reads.
+/// handvol MMIO-reads. Een poll met een reden: docs/description.md §4.11.
 pub const POLL_INTERVAL_NS: u64 = 4_000_000;
 
 /// Hoe vaak we naar in- en uitpluggen kijken. Een halve seconde wachten op

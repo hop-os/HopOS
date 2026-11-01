@@ -398,10 +398,12 @@ impl Board for LicheeRv {
     }
 
     /// De slaap van de kern op de C906B: de `wfi` op de wekker (twee weken
-    /// productie in Go, 30-07 tot 16-08).
+    /// productie in Go, 30-07 tot 16-08), hooguit 2 ms: de wekker van de
+    /// SG2002 wekt niet betrouwbaar (`cpu::riscv::idle::WFI_CAP_NS`).
     fn sleeper(&self) -> Self::Sleeper {
         let clint = CLINT_OK.load(Relaxed).then_some(CLINT_DEV);
         cpu::riscv::idle::RvSleeper::new(clint, self.clint_hart())
+            .with_cap(cpu::riscv::idle::WFI_CAP_NS)
     }
 
     fn mem_total(&self) -> u64 {
@@ -509,16 +511,15 @@ impl Board for LicheeRv {
         }
         .map_err(|_| Error::Nic("dwmac start failed"))?;
         // De lijn op de PLIC van de C906B ([`GMAC_IRQ`]); wil hij niet aan,
-        // dan pollt de pomp (300 µs). De kern hoort een app op de C906L op de
-        // failsafe van de switch (1 ms): er is geen bel van de C906L naar de
-        // C906B.
+        // dan is dat een fout (docs/sequence-hopos.md §14.1 O3). De kern
+        // hoort een app op de C906L na elke slaap van hooguit 2 ms
+        // (`cpu::riscv::idle::WFI_CAP_NS`): er is geen bel van de C906L naar
+        // de C906B.
         NIC_ACK.set(nic.irq_ack());
-        if cpu::irq::enable(Line(GMAC_IRQ), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
-            nic.set_irq(&NIC_BELL);
-            cpu::println!("net: dwmac irq {GMAC_IRQ} on the PLIC HOPOS_NIC_IRQ");
-        } else {
-            cpu::println!("net: dwmac polled, the PLIC refused the source HOPOS_NIC_IRQ");
-        }
+        cpu::irq::enable(Line(GMAC_IRQ), Some(nic_ack), Some(&NIC_BELL))
+            .map_err(|_| Error::Irq("dwmac source refused by the PLIC"))?;
+        nic.set_irq(&NIC_BELL);
+        cpu::println!("net: dwmac irq {GMAC_IRQ} on the PLIC HOPOS_NIC_IRQ");
         cpu::println!("net: dwmac {}", nic.diag());
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))

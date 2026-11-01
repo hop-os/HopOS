@@ -102,15 +102,12 @@ pub(crate) fn thaw_after_flip() -> bool {
     !is_up() || rpc::thaw(&FS_INBOX)
 }
 
-/// De klok en de timers van de executor als `blkdev::Pace`: waarop de
-/// hopfs-actor tijdens een blok-verzoek wacht.
+/// De timers van de executor als `blkdev::Pace`: de termijn van de
+/// hopfs-actor tijdens een blok-verzoek.
 pub(crate) struct ExecPace(pub(crate) &'static Executor);
 
 impl Pace for ExecPace {
     type Sleep = executor::After<512, 256>;
-    fn now(&self) -> u64 {
-        self.0.now()
-    }
     fn sleep(&self, d: Duration) -> Self::Sleep {
         self.0.after(d)
     }
@@ -162,10 +159,13 @@ impl core::fmt::Display for DevStats {
 /// Zoekt de schijf van het board, één keer voor de hele boot: `probe_disk`
 /// mag maar één keer, en de schijf gaat eerst langs de bench (bench.rs)
 /// en dan naar [`start`]. Geen schijf of een fout is één regel en `None`:
-/// de node draait door en weigert elke bestandscall luid.
+/// de node draait door en weigert elke bestandscall luid. Een schijf
+/// zonder lijn is hard ([`no_line`]).
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn probe() -> Option<Disk> {
     match board::Board::probe_disk(&crate::BOARD) {
+        Ok(Some(d)) if d.irq().is_none() => no_line("the board wired no IRQ line"),
+        Err(board::Error::Irq(why)) => no_line(why),
         Ok(Some(d)) => Some(d),
         Ok(None) => {
             println!("disk: none found on this board, file calls refused HOPOS_DISK_NONE");
@@ -178,14 +178,23 @@ pub(crate) fn probe() -> Option<Disk> {
     }
 }
 
+/// Een schijf zonder lijn: hard (docs/sequence-hopos.md §13.3), langs het
+/// pad van de panic: de reden, parkeren, de watchdog. FATAL: wordt
+/// `fatal()` (agent D, §13.2).
+fn no_line(why: &str) -> ! {
+    cpu::console::emergency(format_args!(
+        "disk: {why}, no disk without its line HOPOS_DISK_FAIL HOPOS_PANIC"
+    ));
+    cpu::boot::park()
+}
+
 /// De wachtrij van de opslag, zoals [`start`] hem geeft.
 pub(crate) type DiskQueue = Queue<Disk, ExecPace>;
 
 /// Zet de opslag op de geprobede schijf ([`probe`]): hopfs mounten, actor
 /// en committer spawnen. Geeft de wachtrij als de bestandscalls bediend
-/// worden (de lijn van de schijf komt erbij na `start_interrupts`,
-/// `Board::wire_disk`); zonder schijf draait de node door en weigert elke
-/// bestandscall luid (de regel gaf [`probe`] al).
+/// worden; zonder schijf draait de node door en weigert elke bestandscall
+/// luid (de regel gaf [`probe`] al).
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'static DiskQueue> {
     let board = &crate::BOARD;

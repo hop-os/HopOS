@@ -656,7 +656,7 @@ fn run_loop_attach_forward_detach() {
     exec.spawn(async move {
         let mut sw = sw;
         let mut buf = vec![0u8; MAX_LAN_FRAME];
-        sw.run(exec, &mut buf).await;
+        sw.run(&mut buf).await;
     })
     .unwrap();
     let settle = || {
@@ -953,6 +953,9 @@ impl netdev::Device for SlowNic {
     fn mac(&self) -> netdev::Mac {
         netdev::Mac(NIC_MAC)
     }
+    fn irq(&self) -> Option<&'static Signal> {
+        Some(leak(Signal::new()))
+    }
     fn stats(&self) -> netdev::Stats {
         netdev::Stats {
             tx_full: self.full,
@@ -1004,7 +1007,8 @@ fn switch_and_pump() -> (H, App, TestPump) {
         h.door,
         h.published.xoff(),
         h.stats,
-    );
+    )
+    .unwrap();
     (h, app, pump)
 }
 

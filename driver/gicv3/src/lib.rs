@@ -848,10 +848,7 @@ mod tests {
         assert_eq!(pass.stuck, Some(Line(65)));
         assert_eq!(dev::read32(pa(d).add(0x180 + 4 * 2)), 1 << 1);
         assert_eq!(console_lines("INTID 65 came back"), 1);
-        assert_eq!(
-            console_lines("line disabled, its waiter polls HOPOS_IRQ_STUCK"),
-            1
-        );
+        assert_eq!(console_lines("line disabled HOPOS_IRQ_STUCK"), 1);
         // Een storm die de lijn aan laat, ná een lijn die uitging: ook die
         // eerste komt op de console.
         disp.enable(Line(66), Some(|| {}), None).unwrap();

@@ -240,3 +240,30 @@ fn link_decides_speed_and_duplex() {
     assert_eq!(rx_len((64 << 16) | DMA_SOP), None);
     assert_eq!(rx_len((1514 << 16) | DMA_SOP | DMA_EOP), Some(1512));
 }
+
+/// De lijn (docs/sequence-hopos.md §14.1 O3): de ack sluit `RXDMA_MBDONE`
+/// in het masker en wist de status; `set_irq` en een lege ring met de lijn
+/// dicht zetten hem weer open (NAPI).
+#[test]
+fn the_ack_closes_rx_done_and_an_empty_ring_reopens_it() {
+    static BELL: Signal = Signal::new();
+    let mut f = Fake::new();
+    let b = f.base();
+    let mut n = f.nic();
+    let r = |off: u64| dev::read32(b.add(off));
+    netdev::IrqAck::ack(&n.irq_ack());
+    assert_eq!((r(0x210), r(0x208)), (1 << 13, 1 << 13), "mask_set, clear");
+    dev::write32(b.add(0x208), 0);
+    n.set_irq(&BELL);
+    assert_eq!(
+        (r(0x214), r(0x208)),
+        (1 << 13, 1 << 13),
+        "mask_clear, clear"
+    );
+    assert!(n.irq().is_some());
+    // De ack sloot hem (mask_status), de ring is leeg: open, en `None`.
+    dev::write32(b.add(0x214), 0);
+    dev::write32(b.add(0x20c), 1 << 13);
+    assert_eq!(n.receive(&mut [0; 64]), None);
+    assert_eq!(r(0x214), 1 << 13, "an empty ring reopens the line");
+}

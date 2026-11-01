@@ -17,12 +17,14 @@
 //!
 //! De [`Queue`] is de enige voorkant (Linux blk-mq in het klein) en maakt
 //! er de [`BlockIo`] van die hopfs gebruikt: wie I/O wil, krijgt een ticket
-//! en wacht op zijn eigen completion; precies één wachter tegelijk pollt het
-//! device (de "pacer") op de bel van de IRQ-lijn met een vangrail van
-//! [`IRQ_GUARD`], of zonder lijn eerst per ronde en daarna op
-//! [`POLL_PERIOD`], en wekt de anderen waarvan de completion binnenkwam.
+//! en wacht op zijn eigen completion; precies één wachter tegelijk kijkt
+//! naar het device (de "pacer"), op de bel van de IRQ-lijn plus de
+//! [`TERM`] (docs/sequence-hopos.md §13.1 R2: één bel, één termijn), en
+//! wekt de anderen waarvan de completion binnenkwam. Elke schijf heeft een
+//! lijn (§14.1 O3): het board bedraadt hem in `probe_disk`, en een schijf
+//! zonder lijn is een harde fout van de boot, geen poll.
 //! Tijdens het wachten draait de executor door. Zo kost een node met
-//! zestien opdrachten in de lucht één poll per ronde, niet zestien.
+//! zestien opdrachten in de lucht één blik per bel, niet zestien.
 //! GEMETEN 01-10 op de M4 (`hopos.nvmebench=1`): willekeurig 4 KiB lezen
 //! haalt 11.888 per seconde met één opdracht tegelijk (~84 us per lees) en
 //! 175.055 met zestien tegelijk door deze wachtrij. De wachtrij is er voor
@@ -33,7 +35,7 @@
 //! ronde opnieuw pollt: dezelfde driver, dezelfde wachtrij, geen tweede
 //! pad. De mount gebruikt daarbij de wachtrij van de actor zelf, met de
 //! [`Pace`] van de executor (`ExecPace` in `hopos/src/storage.rs`); de
-//! meetbank en de tests een [`Pace`] die pollt ([`Spin`]). Tot 04-10
+//! meetbank en de tests een [`Pace`] die nooit slaapt ([`Spin`]). Tot 04-10
 //! stond ernaast nog een tweede voorkant voor één opdracht tegelijk (de
 //! oude `Paced`, met `start` en `poll_done` in het contract), alleen voor
 //! de meetbank en de tests: weg, de meetbank meet nu de wachtrij die hopfs
@@ -88,21 +90,12 @@ use sync::Signal;
 /// device 4096-byte-blokken heeft (dan rekent de driver om).
 pub const LBA_SIZE: u64 = 512;
 
-/// De vangrail op de IRQ-lijn: een verloren flank mag nooit een hang
-/// worden, dus wie op de bel wacht, kijkt na deze tijd toch (dezelfde
-/// 10 ms als de RX-pomp).
-pub const IRQ_GUARD: Duration = Duration::from_millis(10);
-
-/// Zonder lijn: zo lang na een submit of completion pollt de wachter van de
-/// [`Queue`] per ronde van de executor (een yield, geen timer). Een 4 KB-lees op NVMe is binnen
-/// een paar tientallen microseconden klaar; die hoort geen timer te kosten.
-pub const POLL_SPIN_NS: u64 = 100_000;
-
-/// Zonder lijn, na [`POLL_SPIN_NS`]: de pollperiode. Een timer, geen yield:
-/// een executor die per ronde yieldt slaapt nooit, en op de OS-core krijgt
-/// een bewoner (Hop) alleen tijd als de executor slaapt. Een FLUSH van
-/// honderden milliseconden mag Hop niet uithongeren.
-pub const POLL_PERIOD: Duration = Duration::from_micros(200);
+/// De termijn van een wacht op het device: zonder bel binnen deze tijd
+/// kijkt de pacer toch, en daar ziet de driver zijn eigen time-out (de
+/// virtio-blk en de NVMe: 5 s), zodat een stil device een fout wordt en
+/// geen hang. Geen vangrail naast de bel: een verloren wek kost hier 5 s,
+/// en dat ziet iedereen.
+pub const TERM: Duration = Duration::from_secs(5);
 
 /// Waarom een blok-verzoek niet lukte. Elke variant draagt de LBA, want
 /// "I/O failed" zonder plek is niets waard op een headless node.
@@ -211,18 +204,12 @@ pub trait AsyncBlockDevice {
         1
     }
 
-    /// De bel van de IRQ-lijn van het device, als het board er een
-    /// bedraadt. `None` = pollen.
+    /// De bel van de IRQ-lijn van het device. `None` alleen vóór het board
+    /// hem bedraadde, en in de tests en de meetbank, die met [`block_on`]
+    /// en [`Spin`] toch elke ronde kijken; de opslag van de kern weigert een
+    /// schijf zonder lijn.
     fn irq(&self) -> Option<&'static Signal> {
         None
-    }
-
-    /// Zonder lijn: hoe lang de wachter na een beweging op het device per
-    /// ronde pollt, en daarna op welke periode. Een driver die zijn
-    /// opdrachten kent, kiest zelf (de ANS: 20 us en 20 us); anders
-    /// [`POLL_SPIN_NS`] en [`POLL_PERIOD`].
-    fn poll_pace(&self) -> (u64, Duration) {
-        (POLL_SPIN_NS, POLL_PERIOD)
     }
 
     /// De meetlat van de driver als tekst voor één consoleregel (opdrachten,
@@ -254,9 +241,6 @@ impl<D: AsyncBlockDevice + ?Sized> AsyncBlockDevice for &mut D {
     fn irq(&self) -> Option<&'static Signal> {
         (**self).irq()
     }
-    fn poll_pace(&self) -> (u64, Duration) {
-        (**self).poll_pace()
-    }
     fn depth(&self) -> usize {
         (**self).depth()
     }
@@ -274,33 +258,25 @@ impl<D: AsyncBlockDevice + ?Sized> AsyncBlockDevice for &mut D {
     }
 }
 
-/// De klok en de wekker van wie op een device wacht: de executor levert
-/// hem (in de binary `exec.after`).
+/// De wekker van wie op een device wacht: de executor levert hem (in de
+/// binary `exec.after`), voor de [`TERM`].
 pub trait Pace {
     /// De future van [`sleep`](Pace::sleep).
     type Sleep: Future<Output = ()> + Unpin;
-    /// Monotone nanoseconden.
-    fn now(&self) -> u64;
     /// Een future die na `d` klaar is.
     fn sleep(&self, d: Duration) -> Self::Sleep;
 }
 
-/// Een [`Pace`] die pollt: nooit slapen, altijd opnieuw kijken. Voor
-/// [`block_on`] vóór de executor (de meetbank) en de tests; de mount bij de
-/// boot draait met [`block_on`] over de wachtrij van de actor en diens
-/// `Pace`. De
-/// klok staat stil, dus de wachter van de [`Queue`] blijft in zijn
-/// yield-venster en toetst het device bij elke ronde van `block_on`; de
-/// time-out van een verzoek is van de driver (zijn eigen klok), dus ook zo
-/// wordt een stil device nooit een eeuwige lus.
+/// Een [`Pace`] die nooit slaapt: elke wacht is meteen om, dus de wachter
+/// van de [`Queue`] toetst het device bij elke ronde. Voor [`block_on`]
+/// vóór de executor (de meetbank) en de tests; de time-out van een verzoek
+/// is van de driver (zijn eigen klok), dus ook zo wordt een stil device
+/// nooit een eeuwige lus.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Spin;
 
 impl Pace for Spin {
     type Sleep = core::future::Ready<()>;
-    fn now(&self) -> u64 {
-        0
-    }
     fn sleep(&self, _d: Duration) -> Self::Sleep {
         core::future::ready(())
     }

@@ -154,7 +154,7 @@ async fn idlestat(exec: &'static Executor, every: u64) {
             / hz;
         let res_pm = res_ns.saturating_mul(1000) / dt;
         println!(
-            "idle: {} wakes/s, {} polls/s, {} irq/s (timer {}, nic {}, other {}), {} empty rx rounds/s; switch by door {}/s, by failsafe {}/s; os core {} in/s, back on irq {}/s ipi {}/s timer {}/s yield {}/s, residents {}.{}%, idle rounds {}/s, kicks {}/s HOPOS_IDLESTAT",
+            "idle: {} wakes/s, {} polls/s, {} irq/s (timer {}, nic {}, other {}), {} empty rx rounds/s; switch by door {}/s; os core {} in/s, back on irq {}/s ipi {}/s timer {}/s yield {}/s, residents {}.{}%, idle rounds {}/s, kicks {}/s HOPOS_IDLESTAT",
             r(now.exec[0], prev.exec[0]),
             r(now.exec[1], prev.exec[1]),
             r(now.irq.iter().sum(), prev.irq.iter().sum()),
@@ -163,7 +163,6 @@ async fn idlestat(exec: &'static Executor, every: u64) {
             r(now.irq[2], prev.irq[2]),
             r(now.net[0], prev.net[0]),
             r(now.net[1], prev.net[1]),
-            r(now.net[2], prev.net[2]),
             r(now.os[0], prev.os[0]),
             r(now.os[1], prev.os[1]),
             r(now.os[2], prev.os[2]),
@@ -205,8 +204,8 @@ struct Snap {
     exec: [u64; 2],
     /// De IRQ-dispatch: timer, nic, other.
     irq: [u64; 3],
-    /// Het netwerkvlak: lege RX-rondes, werk na de bel, werk na de failsafe.
-    net: [u64; 3],
+    /// Het netwerkvlak: lege RX-rondes, werk na de bel.
+    net: [u64; 2],
     /// De OS-core: in, irq, ipi, timer, yield, exit, fault, ticks, idle, kicks.
     os: [u64; 10],
 }
@@ -224,11 +223,7 @@ impl Snap {
                 crate::IRQS[1].load(Relaxed),
                 crate::IRQS[2].load(Relaxed),
             ],
-            net: [
-                n.rx_idle.load(Relaxed),
-                n.work_by_door.load(Relaxed),
-                n.work_by_timer.load(Relaxed),
-            ],
+            net: [n.rx_idle.load(Relaxed), n.work_by_door.load(Relaxed)],
             os: [
                 o.entries.load(Relaxed),
                 o.irq.load(Relaxed),
@@ -603,9 +598,6 @@ impl<D: AsyncBlockDevice> Meter<D> {
 impl<D: AsyncBlockDevice> AsyncBlockDevice for Meter<D> {
     fn max_transfer(&self) -> usize {
         self.dev.max_transfer()
-    }
-    fn poll_pace(&self) -> (u64, Duration) {
-        self.dev.poll_pace()
     }
     fn depth(&self) -> usize {
         self.dev.depth()

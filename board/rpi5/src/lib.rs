@@ -194,12 +194,11 @@ impl Soc for Bcm2712 {
             .map_err(|_| Error::Nic("rp1: no link within 8 s"))?;
         nic.init(link)
             .map_err(|_| Error::Nic("gem: DMA region too small"))?;
-        match wire_irq(&rc, &mut nic) {
-            Ok(id) => {
-                cpu::println!("net: gem up, {link}, RX on INTID {id} (RP1 MSI-X via the MIP)")
-            }
-            Err(why) => cpu::println!("net: gem up, {link}, RX polled: {why} HOPOS_NIC_POLLED"),
-        }
+        let id = wire_irq(&rc, &mut nic).map_err(|why| {
+            cpu::println!("net: gem up, {link}, but no line: {why}");
+            Error::Irq("rp1: the GEM line did not come up")
+        })?;
+        cpu::println!("net: gem up, {link}, RX on INTID {id} (RP1 MSI-X via the MIP)");
         Ok(Some(nic))
     }
 }
@@ -410,7 +409,8 @@ const fn mip_line(v: u32) -> (Line, Trigger) {
 }
 
 /// Bedraadt de GEM-interrupt: RP1-MSI-X-entry naar de MIP naar de GIC.
-/// Elke stap die faalt laat de NIC pollen, met de reden.
+/// Elke stap die faalt, is een NIC zonder lijn: een fout met de reden
+/// (docs/sequence-hopos.md §14.1 O3).
 fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
     // 1. De MSI-X-capability van de RP1 (bus 1, dev 0): tabel-BAR en offset.
     let f = pcie::probe(rc, RP1_BDF).ok_or("rp1: nothing on bus 1")?;

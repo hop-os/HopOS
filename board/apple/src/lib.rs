@@ -472,7 +472,7 @@ impl Board for Apple {
     /// De hele keten: de PCIe-controller, de link, de DART, de brug en het
     /// endpoint, en dan de tg3 met het MAC uit de ADT (na een PERST draagt
     /// de chip alleen nog Broadcom's default). Daarna de lijn: INTA van de
-    /// poort op de AIC ([`wire_nic`]), anders gepold.
+    /// poort op de AIC ([`wire_nic`]); zonder lijn een fout.
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
         if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
@@ -527,7 +527,7 @@ impl Board for Apple {
                 return Err(Error::Nic("no link"));
             }
         }
-        wire_nic(self.boot_param("hopos.nicirq"), &mut nic);
+        wire_nic(self.boot_param("hopos.nicirq"), &mut nic)?;
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
@@ -593,41 +593,43 @@ impl Board for Apple {
     }
 }
 
-/// De interrupt van de tg3 (`hopos.nicirq`: leeg of `auto`, `off`, of een
+/// De interrupt van de tg3 (`hopos.nicirq`: leeg of `auto`, of een
 /// AIC-nummer), en één bootregel over de keuze (`HOPOS_NIC_IRQ`). INTx, geen
 /// MSI: de doorbell van de Apple-poort is onbekend, en MSI aanzetten zonder
 /// haar nam op 18-09 de node mee (Go bundel 18). Auto is het blok van de
 /// poort uit de ADT plus INTA (`pcie::INTA`, gemeten 19-09: 1249 + 4 =
-/// 1253). Komt de lijn niet aan, dan pollt de pomp zoals voorheen.
-fn wire_nic(v: &str, nic: &mut Tg3) {
+/// 1253). Komt de lijn niet aan, dan is dat een fout: de pomp pollt niet
+/// (docs/sequence-hopos.md §14.1 O3).
+fn wire_nic(v: &str, nic: &mut Tg3) -> Result<(), Error> {
     let base = pcie::port_irq_base();
     let line = match irq::NicIrq::parse(v) {
-        Some(irq::NicIrq::Off) => {
-            println!("net: tg3 polled, hopos.nicirq={v} HOPOS_NIC_IRQ");
-            return;
-        }
         Some(irq::NicIrq::Line(l)) => Ok(l),
         Some(irq::NicIrq::Auto) => base
             .and_then(|b| b.checked_add(pcie::INTA))
             .ok_or("no interrupts word for the port on /arm-io/apcie"),
-        None => Err("hopos.nicirq is not auto, off or an AIC number"),
+        None => Err("hopos.nicirq is not auto or an AIC number"),
     };
     let base = base.unwrap_or(0);
-    match line {
-        Ok(l) => match irq::wire_nic(nic, l) {
-            Ok(us) => println!(
-                "net: tg3 INTx on AIC irq {l} (port {} block {base} + INTA {}), first interrupt after {us} us, pump on the line with a 10 ms guard HOPOS_NIC_IRQ",
+    let l = line.map_err(|why| {
+        println!("net: tg3 has no line: {why} (hopos.nicirq={v:?}) HOPOS_NIC_IRQ");
+        Error::Irq("the tg3 line")
+    })?;
+    match irq::wire_nic(nic, l) {
+        Ok(us) => {
+            println!(
+                "net: tg3 INTx on AIC irq {l} (port {} block {base} + INTA {}), first interrupt after {us} us HOPOS_NIC_IRQ",
                 pcie::ETH_PORT,
                 pcie::INTA
-            ),
-            Err((why, (st, msk))) => {
-                println!(
-                    "net: tg3 polled, AIC irq {l} (port {} block {base}): {why}, port INTSTAT {st:#x} INTMSK {msk:#x} HOPOS_NIC_IRQ",
-                    pcie::ETH_PORT
-                );
-            }
-        },
-        Err(why) => println!("net: tg3 polled, {why} (hopos.nicirq={v:?}) HOPOS_NIC_IRQ"),
+            );
+            Ok(())
+        }
+        Err((why, (st, msk))) => {
+            println!(
+                "net: tg3 has no line, AIC irq {l} (port {} block {base}): {why}, port INTSTAT {st:#x} INTMSK {msk:#x} HOPOS_NIC_IRQ",
+                pcie::ETH_PORT
+            );
+            Err(Error::Irq("the tg3 line did not come up"))
+        }
     }
 }
 

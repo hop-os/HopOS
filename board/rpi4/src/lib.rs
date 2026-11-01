@@ -11,8 +11,10 @@
 //! af met PSCI via SMC, precies als op de Pi 5 (image/rpi4.sh,
 //! docs/boards-pi.md).
 //!
-//! Netwerk: de geïntegreerde GENET v5 (`driver-genet`), gepold: de lijn
-//! (GIC SPI 157/158) is nog niet bedraad, zoals in de Go-kern.
+//! Netwerk: de geïntegreerde GENET v5 (`driver-genet`) op zijn lijn, GIC
+//! SPI 157 (INTRL2_0, ring 16; docs/sequence-hopos.md §14.1 O3). In de
+//! Go-kern was hij gepold. ONGETOETST op ijzer: QEMU `raspi4b` heeft geen
+//! GENET.
 //!
 //! Adressen: "low peripheral mode" (de default), MMIO onder 4 GB, in de
 //! laatste 64 MB van de vierde gigabyte.
@@ -32,9 +34,12 @@ use board::Error;
 use board_raspi::driver_gicv2::Gic;
 use board_raspi::map::{self, L2, Tables};
 use board_raspi::{NicCtx, Raspi, Soc};
+use cpu::irq::Line;
 use dev::Pa;
-use driver_genet::Genet;
+use driver_genet::{Genet, IrqAck};
 use driver_pl011::Pl011;
+use netdev::AckSlot;
+use sync::Signal;
 
 // De VL805 achter de PCIe-brug (usb.rs), alleen in de gui-smaak.
 mod usb;
@@ -59,6 +64,19 @@ pub const GENET: Pa = Pa(0xFD58_0000);
 pub const GENET_COMPAT: &str = "brcm,bcm2711-genet-v5";
 /// Waar de peripherals beginnen: de laatste 64 MB onder 4 GB.
 pub const PERIPH: u64 = 0xFC00_0000;
+/// De lijn van de GENET: GIC SPI 157, level-high (bcm2711.dtsi, `genet`
+/// `interrupts` 0: INTRL2_0, waar ring 16 meldt).
+pub const GENET_INTID: u32 = 32 + 157;
+
+/// De bel van de NIC-lijn: de dispatch luidt hem, de RX-pomp wacht erop.
+static NIC_BELL: Signal = Signal::new();
+/// De ack van de GENET, gezet vóór de lijn scherp gaat.
+static NIC_ACK: AckSlot<IrqAck> = AckSlot::new();
+
+/// De device-ack van de NIC-lijn: `RXDMA_MBDONE` dicht, de lijn valt.
+fn nic_ack() {
+    NIC_ACK.ack();
+}
 
 // SAFETY: 0xFE20_1000 is de PL011 van de BCM2711 en ligt in het
 // Device-venster van de vaste tabel (0xFC00_0000 tot 4 GB).
@@ -157,7 +175,12 @@ impl Soc for Bcm2711 {
             .map_err(|_| Error::Nic("genet: no link within 8 s"))?;
         nic.init(link)
             .map_err(|_| Error::Nic("genet: DMA region too small"))?;
-        cpu::println!("net: genet up, {link}, polled (no IRQ line wired on the Pi 4 yet)");
+        // De lijn: de GIC staat al (`start_interrupts` komt eerst).
+        NIC_ACK.set(nic.irq_ack());
+        cpu::irq::enable(Line(GENET_INTID), Some(nic_ack), Some(&NIC_BELL))
+            .map_err(|_| Error::Irq("genet line refused"))?;
+        nic.set_irq(&NIC_BELL);
+        cpu::println!("net: genet up, {link}, RX on INTID {GENET_INTID}");
         Ok(Some(nic))
     }
 }

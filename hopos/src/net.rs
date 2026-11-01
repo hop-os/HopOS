@@ -288,6 +288,9 @@ pub(crate) enum Error {
     Twice,
     /// De executor nam een taak niet aan.
     Spawn(&'static str),
+    /// De NIC heeft geen lijn: elke NIC krijgt er een van zijn board
+    /// (docs/sequence-hopos.md §14.1 O3), de pomp pollt niet.
+    NoLine,
 }
 
 impl fmt::Display for Error {
@@ -298,6 +301,7 @@ impl fmt::Display for Error {
             Self::Net(e) => write!(f, "{e}"),
             Self::Twice => f.write_str("net started twice"),
             Self::Spawn(what) => write!(f, "spawn {what} refused"),
+            Self::NoLine => f.write_str("the NIC has no IRQ line from its board"),
         }
     }
 }
@@ -360,22 +364,17 @@ pub(crate) fn start<D: Device + 'static>(
         &DOOR,
         PUBLISHED.xoff(),
         &STATS,
-    );
-    let irq = pump.nic().irq().is_some();
+    )
+    .ok_or(Error::NoLine)?;
     exec.spawn(async move { pump.run(exec).await })
         .map_err(|_| Error::Spawn("pump"))?;
     println!(
-        "net: pump on the nic ({}), uplink queues 2x{} HOPOS_NET_PUMP",
-        if irq {
-            "irq line, 10 ms guard"
-        } else {
-            "polled every 300 us"
-        },
+        "net: pump on the nic's irq line, uplink queues 2x{} HOPOS_NET_PUMP",
         net::UPLINK_QUEUE,
     );
 
     let mut sw_buf = boot_buf(MAX_LAN_FRAME)?;
-    exec.spawn(async move { sw.run(exec, &mut sw_buf).await })
+    exec.spawn(async move { sw.run(&mut sw_buf).await })
         .map_err(|_| Error::Spawn("switch"))?;
     SWITCH_UP.store(true, Relaxed);
     exec.spawn(switch::flow_expiry(exec, &COMMANDS))

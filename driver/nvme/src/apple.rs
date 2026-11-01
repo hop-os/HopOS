@@ -168,14 +168,6 @@ const ADM_DELETE_CQ: u8 = 0x04;
 /// mag niet (29-08: de firmware antwoordt met `NVME_PERM_ERR` en valt om).
 pub const BLOCK: u64 = 4096;
 
-/// Zonder lijn pollt de wachter zo lang per ronde van de executor: een
-/// opdracht van 4 KB is binnen ~10 us terug (M14: schrijven 4, lezen 9 us).
-pub const POLL_SPIN_NS: u64 = 20_000;
-/// En daarna op deze timer. Een MiB lezen duurt ~600 us, schrijven ~210 us
-/// (M14): 20 us kost hoogstens 3 tot 10 procent te laat kijken, en de
-/// OS-core slaapt ertussen (WFI op de timer).
-pub const POLL_PERIOD: core::time::Duration = core::time::Duration::from_micros(20);
-
 /// De uitlijning van de DMA-regio: de paginamaat van dit silicium.
 pub const DMA_ALIGN: u64 = 0x4000;
 /// Hoe lang de firmware mag doen over BOOT_STATUS na het gesprek.
@@ -235,7 +227,6 @@ impl<C: Coprocessor> Transport for Apple<C> {
     /// 01-10 op de M4, op `tag * 128` (M25) faalde elke opdracht op tag 1.
     const LINEAR: bool = true;
     const DMA_ALIGN: u64 = DMA_ALIGN;
-    const PACE: (u64, core::time::Duration) = (POLL_SPIN_NS, POLL_PERIOD);
 
     /// De TCB, de mailbox leeg (een wachtende coprocessor doet geen DMA),
     /// dan de lineaire deurbel met het slot.

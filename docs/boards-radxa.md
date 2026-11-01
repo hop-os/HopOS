@@ -207,8 +207,8 @@ b6-image) staat in `image/firmware/radxa/donor-boot.bin` (herkomst in de
 13. **DHCP en de lijn.** De kern vraagt een lease (net.rs). In
     `HOPOS_TICK` moet `nic=` oplopen bij verkeer: de lijn is SPI 32 (INTID
     64), NIE op bit 15 (de 4.10-indeling; 20-09 bewezen). Blijft `nic=0`
-    terwijl er frames binnenkomen, dan pollt de pomp op de vangrail van
-    10 ms: werkt, maar traag.
+    terwijl er frames binnenkomen, dan komt er niets meer door: de pomp
+    pollt niet en heeft geen vangrail meer (01-11, O3).
 14. **Doorvoer.** v2 haalde met Normal-NC op de NIC-DMA 56,6 MB/s in en 99 uit
     (was 15,5 op Device). De map zet die regio vanaf de eerste instructie
     Normal-NC; meet met de netmeter als DHCP er is.

@@ -142,10 +142,10 @@ fn open_hwmon(pcct: &[u8]) {
 /// en dan een zelftest: de driver vuurt de vector met de hand (EICS) en
 /// de dispatch moet hem binnen [`NIC_TEST_NS`] zien. Een route die niet
 /// klopt (de tabel, de DeviceID uit de IORT, de ITS) is stil; zonder
-/// zelftest zou de pomp dan op zijn vangrail van 10 ms leven, trager dan
-/// pollen. Nooit INTx: dat doodt deze SoC ([`nic_irq_mode`]). Geeft de
-/// lijn en de microseconden tot de eerste aflevering, of de reden om te
-/// pollen.
+/// zelftest hoorde de pomp nooit iets. Nooit INTx: dat doodt deze SoC
+/// ([`nic_irq_mode`]). Geeft de lijn en de microseconden tot de eerste
+/// aflevering, of de reden: een NIC zonder lijn is een fout
+/// (docs/sequence-hopos.md §14.1 O3).
 fn wire_nic(
     segs: &pcie::Segments,
     hit: &pcie::Found,
@@ -166,10 +166,7 @@ fn wire_nic(
         root_bus: hit.root_bus,
         f: &hit.f,
     };
-    let wired = board_uefi::irq::wire(&at, mode, &NIC_BELL, igb_ack, igb_ack);
-    if let Wired::Polled(why) = wired {
-        return Err(why);
-    }
+    let wired = board_uefi::irq::wire(&at, mode, &NIC_BELL, igb_ack, igb_ack)?;
     let _ = NIC_BELL.take();
     nic.set_irq(&NIC_BELL);
     nic.fire_irq();
@@ -223,14 +220,9 @@ impl Platform for Ampere {
         pcie::probe_nvme()
     }
 
-    /// MSI-X vector 0 via de ITS, met een zelftest; anders pollt hij.
-    fn wire_disk(&self, disk: &mut Nvme<Pci>) {
-        pcie::wire_nvme(disk);
-    }
-
     /// De eerste igb: BAR0, reset en MAC, ringen, dan de link, en dan de
-    /// lijn: MSI-X via de ITS met een zelftest, anders gepold
-    /// ([`wire_nic`]; `hopos.nicirq=off` pollt zonder herbouw).
+    /// lijn: MSI-X via de ITS met een zelftest ([`wire_nic`]); zonder lijn
+    /// een fout.
     fn probe_nic(&self, _uefi: &Uefi) -> Result<Option<Igb>, Error> {
         let segs = pcie::segments();
         let Some(hit) = pcie::first_in(&segs, 0, is_nic) else {
@@ -256,14 +248,15 @@ impl Platform for Ampere {
             Error::Nic("igb has no link")
         })?;
         let (vendor, device, bdf, bar) = (hit.f.vendor, hit.f.device, hit.f.bdf, hit.bar);
-        match wire_nic(&segs, &hit, &mut nic) {
-            Ok((wired, us)) => cpu::println!(
-                "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link {link}, {wired}, first interrupt after {us} us, pump on the line with a 10 ms guard HOPOS_NIC_IRQ"
-            ),
-            Err(why) => cpu::println!(
-                "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link {link}, polled ({why}) HOPOS_NIC_IRQ"
-            ),
-        }
+        let (wired, us) = wire_nic(&segs, &hit, &mut nic).map_err(|why| {
+            cpu::println!(
+                "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link {link}, no line: {why} HOPOS_NIC_IRQ"
+            );
+            Error::Irq("the igb line did not come up")
+        })?;
+        cpu::println!(
+            "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link {link}, {wired}, first interrupt after {us} us HOPOS_NIC_IRQ"
+        );
         Ok(Some(nic))
     }
 }

@@ -535,16 +535,20 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
     /// Het PA-plan.
     fn plan(&self) -> Plan;
 
-    /// Zet de interruptcontroller op HOP's core en de timer-interrupt aan.
+    /// Zet de interruptcontroller op HOP's core, de timers en de kick aan:
+    /// als eerste, vóór elk device (die bedraden hun lijn in hun probe).
     /// Geeft de bel die de IRQ-deur luidt: een taak wacht erop en roept
-    /// dan [`dispatch_interrupts`](Board::dispatch_interrupts).
+    /// dan [`dispatch_interrupts`](Board::dispatch_interrupts). Een lijn
+    /// die niet aan wil, is een fout: de kern start dan niet
+    /// (docs/sequence-hopos.md §13.3).
     fn start_interrupts(&self) -> Result<&'static Signal, Error>;
 
     /// Claimt, behandelt en sluit elke wachtende interrupt. Draait in een
     /// taak, nooit in exception-context.
     fn dispatch_interrupts(&self) -> Dispatched;
 
-    /// Vindt en initialiseert de NIC. `Ok(None)` = geen NIC. Eén keer
+    /// Vindt en initialiseert de NIC, met zijn lijn (§14.1 O3): een lijn
+    /// die niet aan wil is [`Error::Irq`]. `Ok(None)` = geen NIC. Eén keer
     /// gelukt; na een `Err` (geen link) mag een tweede poging, en die begint
     /// weer bij het begin (hopos `nic_retry`).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error>;
@@ -567,16 +571,13 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
         UsbHosts::new()
     }
 
-    /// Vindt en initialiseert de schijf. `Ok(None)` = geen schijf aan dit
-    /// board; één keer (de bench leent hem, dan neemt de opslag hem).
+    /// Vindt en initialiseert de schijf, met zijn lijn
+    /// (docs/sequence-hopos.md §14.1 O3): na
+    /// [`start_interrupts`](Board::start_interrupts). `Ok(None)` = geen
+    /// schijf aan dit board; een lijn die niet aan wil is
+    /// [`Error::Irq`]. Eén keer (de bench leent hem, dan neemt de opslag
+    /// hem).
     fn probe_disk(&self) -> Result<Option<Self::Disk>, Error>;
-
-    /// De lijn van de schijf, zodra de interrupts er zijn
-    /// ([`start_interrupts`](Board::start_interrupts)): de schijf komt
-    /// ervóór op (de bench en de mount pollen), zijn bel daarna. Standaard
-    /// niets: de schijf pollt, of het board bedraadde hem al bij de probe
-    /// (QEMU virt).
-    fn wire_disk(&self, _disk: &mut Self::Disk) {}
 
     /// De fysieke index van de core waar dit draait.
     fn this_core(&self) -> usize;

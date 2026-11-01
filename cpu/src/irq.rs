@@ -23,9 +23,9 @@
 //! - Interrupts zijn uitsluitend HOP-werk. Een app-core wordt nooit een
 //!   target van de controller en houdt zijn maskers dicht; een app heeft
 //!   geen lijn en geen controller.
-//! - Een verloren flank mag nooit een hang worden: de wachter op een bel
-//!   heeft een maximum en behandelt een time-out als "kijk toch maar"
-//!   (liever pollen dan hangen).
+//! - Elke wacht op een bel heeft één termijn (docs/sequence-hopos.md §13.1
+//!   R2): geen vangrail ernaast. Een verloren wek is een fout die we
+//!   repareren, niet afdekken.
 
 use core::cell::{Cell, RefCell};
 use core::fmt;
@@ -101,6 +101,14 @@ pub trait Controller {
     fn claim(&self) -> Option<Line>;
     /// Sluit de afhandeling van `l` af (EOI, waar dat los van claim is).
     fn complete(&self, l: Line);
+    /// Sluit de afhandeling van `l` af en houdt hem dicht tot
+    /// [`Dispatcher::release`]: een level-lijn die alleen de driver laat
+    /// zakken (Linux `IRQF_ONESHOT`). Standaard uit en dan de EOI; een
+    /// controller die bij de claim al maskeert (de AIC), doet niets.
+    fn hold(&self, l: Line) {
+        self.disable(l);
+        self.complete(l);
+    }
 }
 
 /// Waarom een lijn niet scherp kon.
@@ -187,6 +195,8 @@ struct Entry {
     ack: Option<Ack>,
     bell: Option<&'static Signal>,
     trigger: Trigger,
+    /// Dicht na elke claim tot [`Dispatcher::release`] ([`Controller::hold`]).
+    held: bool,
 }
 
 /// De dispatcher: de tabel lijn-naar-wachter.
@@ -258,6 +268,37 @@ impl Dispatcher {
         ack: Option<Ack>,
         bell: Option<&'static Signal>,
     ) -> Result<(), Error> {
+        self.register(l, trigger, ack, bell, false)
+    }
+
+    /// Registreert level-lijn `l` met de bel van zijn wachter en zonder
+    /// device-ack: na elke claim blijft hij dicht ([`Controller::hold`]) tot
+    /// de driver hem bediende en [`release`](Self::release) roept. Voor een
+    /// device dat alleen zijn driver kan laten zakken (de ANS en zijn
+    /// mailbox op de M4).
+    pub fn enable_held(&self, l: Line, bell: &'static Signal) -> Result<(), Error> {
+        self.register(l, Trigger::Level, None, Some(bell), true)
+    }
+
+    /// Zet een vastgehouden lijn ([`enable_held`](Self::enable_held)) weer
+    /// open: de driver bediende hem. Staat hij nog, dan vuurt hij meteen
+    /// opnieuw. Een lijn die niet vastgehouden wordt, laat hij staan.
+    pub fn release(&self, l: Line) {
+        if let (Some(ctrl), Some((_, e))) = (self.ctrl.get(), self.entry(l))
+            && e.held
+        {
+            let _ = ctrl.enable(l);
+        }
+    }
+
+    fn register(
+        &self,
+        l: Line,
+        trigger: Trigger,
+        ack: Option<Ack>,
+        bell: Option<&'static Signal>,
+        held: bool,
+    ) -> Result<(), Error> {
         let ctrl = self.ctrl.get().ok_or(Error::NoController)?;
         {
             let mut lines = self.lines.borrow_mut();
@@ -272,6 +313,7 @@ impl Dispatcher {
                     ack,
                     bell,
                     trigger,
+                    held,
                 });
             }
         }
@@ -288,15 +330,15 @@ impl Dispatcher {
     }
 
     /// Eén ronde: alle gevuurde lijnen claimen, per lijn het device acken,
-    /// de bel luiden en de lijn completeren.
+    /// de bel luiden en de lijn completeren (of vasthouden).
     ///
     /// Onbekend = meteen uit (een lijn die de firmware aan liet staan:
     /// UEFI-timer, UART, een watchdog-waarschuwing). Een level-lijn zonder
     /// device-ack die [`STRAY_LIMIT`] keer terugkomt, laat niemand ooit
-    /// zakken: uit (`pass.stuck`); zijn wachter valt terug op zijn maximum,
-    /// liever pollen dan een dispatcher die de rotatie van de OS-core voor
-    /// eeuwig onderbreekt (de vrees van 30-09
-    /// bij de eerste Pi 5-boot). Bekend met een ack, of een flank, maar
+    /// zakken: uit (`pass.stuck`); zijn wachter hoort dan alleen zijn
+    /// termijn, liever dat dan een dispatcher die de rotatie van de OS-core
+    /// voor eeuwig onderbreekt (de vrees van 30-09 bij de eerste Pi
+    /// 5-boot). Bekend met een ack, of een flank, maar
     /// blijvend = de ronde afbreken na [`STRAY_LIMIT`], en de lijn NIET
     /// uitzetten: een
     /// bediende lijn die blijft terugkomen is een NIC onder last (tg3: een
@@ -342,7 +384,11 @@ impl Dispatcher {
             if let Some(b) = e.bell {
                 b.set();
             }
-            ctrl.complete(l);
+            if e.held {
+                ctrl.hold(l);
+            } else {
+                ctrl.complete(l);
+            }
             let Some(seen) = pass.seen.get_mut(i) else {
                 continue;
             };
@@ -358,7 +404,7 @@ impl Dispatcher {
                     self.stats.stuck.fetch_add(1, Relaxed);
                     pass.stuck = Some(l);
                     crate::println!(
-                        "irq: INTID {} came back {STRAY_LIMIT} times in one pass, a level line without a device ack that nobody lowers: line disabled, its waiter polls HOPOS_IRQ_STUCK",
+                        "irq: INTID {} came back {STRAY_LIMIT} times in one pass, a level line without a device ack that nobody lowers: line disabled HOPOS_IRQ_STUCK",
                         l.0
                     );
                 } else if first {
@@ -409,6 +455,17 @@ pub fn use_controller(c: &'static dyn Controller) {
 /// ([`Dispatcher::enable`]).
 pub fn enable(l: Line, ack: Option<Ack>, bell: Option<&'static Signal>) -> Result<(), Error> {
     global().enable(l, ack, bell)
+}
+
+/// Maakt level-lijn `l` scherp met de bel van zijn wachter, dicht na elke
+/// claim tot [`release`] ([`Dispatcher::enable_held`]).
+pub fn enable_held(l: Line, bell: &'static Signal) -> Result<(), Error> {
+    global().enable_held(l, bell)
+}
+
+/// Zet vastgehouden lijn `l` weer open ([`Dispatcher::release`]).
+pub fn release(l: Line) {
+    global().release(l);
 }
 
 /// Maakt lijn `l` van soort `trigger` scherp met optionele device-ack en
@@ -498,6 +555,24 @@ mod tests {
 
     fn bell() -> &'static Signal {
         Box::leak(Box::new(Signal::new()))
+    }
+
+    #[test]
+    fn a_held_line_stays_closed_until_its_driver_releases_it() {
+        let (d, f) = setup(Fake::default());
+        let s = bell();
+        d.enable_held(Line(590), s).unwrap();
+        d.release(Line(77));
+        f.pending.borrow_mut().push(590);
+        let pass = d.dispatch();
+        assert_eq!(pass.claims(Line(590)), 1);
+        assert!(s.take());
+        d.release(Line(590));
+        assert_eq!(
+            *f.log.borrow(),
+            [('e', 590), ('d', 590), ('c', 590), ('e', 590)],
+            "dicht en EOI bij de claim, open bij de release"
+        );
     }
 
     #[test]

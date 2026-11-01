@@ -11,12 +11,11 @@ use crate::BLK_DMA;
 use crate::irq::{self, At, Wired};
 use board::Error;
 use bounded::BoundedVec;
-use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use dev::Pa;
 use driver_nvme::{Nvme, pci::Pci};
 use driver_pcie::{CMD_INTX_DISABLE, Config, Ecam, Function, find};
-use sync::{Local, Signal};
+use sync::Signal;
 
 /// Zoveel ECAM-vensters: de Altra heeft er tot acht, de O6N vijf.
 pub const MAX_SEGMENTS: usize = 8;
@@ -85,8 +84,10 @@ pub fn first_in(segs: &Segments, bar: u8, is: impl Fn(&Function) -> bool) -> Opt
     first(segs.as_slice().iter().map(|(e, s)| (e, *s)), bar, is)
 }
 
-/// Vindt en initialiseert de eerste NVMe (het hele device) in [`BLK_DMA`].
-/// `Ok(None)` = geen NVMe. Eén keer: de aanroeper bewaakt dat.
+/// Vindt en initialiseert de eerste NVMe (het hele device) in [`BLK_DMA`],
+/// met zijn lijn ([`wire_line`]; de interrupts staan al). `Ok(None)` = geen
+/// NVMe; een lijn die niet komt is [`Error::Irq`]. Eén keer: de aanroeper
+/// bewaakt dat.
 pub fn probe_nvme() -> Result<Option<Nvme<Pci>>, Error> {
     let segs = segments();
     let Some(hit) = first_in(&segs, 0, |f| f.class == CLASS_NVME) else {
@@ -98,7 +99,7 @@ pub fn probe_nvme() -> Result<Option<Nvme<Pci>>, Error> {
     }
     if let Some((e, _)) = segs.get(hit.win) {
         hit.f.enable(e);
-        // Stil tot zijn lijn er is ([`wire_nvme`]): geen INTx, en geen
+        // Stil tot zijn lijn er is ([`wire_line`]): geen INTx, en geen
         // MSI-X van de vorige kern van een flip naar een ITS die deze kern
         // nog niet opzette (Linux `msix_capability_init` zet hem ook eerst
         // uit).
@@ -107,15 +108,15 @@ pub fn probe_nvme() -> Result<Option<Nvme<Pci>>, Error> {
             hit.f.msix_enable(e, &m, false);
         }
     }
-    NVME.get().set(Some(hit));
     // SAFETY: BAR0 is door de firmware toegewezen en nu Device-gemapt
     // (`map_device`); memory-decode en bus-mastering staan aan. BLK_DMA is
     // van deze driver alleen, Normal-NC gemapt door de stub.
-    let disk = unsafe { Nvme::<Pci>::new(Pa(hit.bar), BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
-        .map_err(|e| {
-            cpu::println!("disk: {e} HOPOS_NVME_FAIL");
-            Error::Disk("nvme init failed")
-        })?;
+    let mut disk =
+        unsafe { Nvme::<Pci>::new(Pa(hit.bar), BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
+            .map_err(|e| {
+                cpu::println!("disk: {e} HOPOS_NVME_FAIL");
+                Error::Disk("nvme init failed")
+            })?;
     let (major, minor) = disk.version();
     cpu::println!(
         "disk: nvme {} at {} bar0 {:#x}, NVMe {major}.{minor}, {} blocks of {} bytes, max transfer {} HOPOS_NVME_UP",
@@ -126,45 +127,38 @@ pub fn probe_nvme() -> Result<Option<Nvme<Pci>>, Error> {
         disk.block_size(),
         disk.max_transfer()
     );
+    let (wired, us, vectors) = wire_line(&hit, &mut disk).map_err(|why| {
+        cpu::println!(
+            "disk: nvme at {} has no line: {why} HOPOS_NVME_IRQ",
+            hit.f.bdf
+        );
+        Error::Irq("the NVMe line did not come up")
+    })?;
+    cpu::println!(
+        "disk: nvme at {} {wired}, vector 0 of {vectors}, first interrupt after {us} us HOPOS_NVME_IRQ",
+        hit.f.bdf
+    );
     Ok(Some(disk))
 }
-
-/// De NVMe van [`probe_nvme`], voor [`wire_nvme`]. Alleen de executor van
-/// de kern-core raakt hem aan (de boot).
-static NVME: Local<Cell<Option<Found>>> = Local::new(Cell::new(None));
 
 /// De bel van de NVMe-lijn: de dispatch luidt hem, de wachter van de
 /// opslag (`blkdev::Queue`) slaapt erop.
 static NVME_BELL: Signal = Signal::new();
 
-/// De LPI van de NVMe, 0 = geen: de dispatch telt hem niet als NIC.
-pub(crate) static NVME_LPI: AtomicU32 = AtomicU32::new(0);
+/// De LPI van de schijf (de NVMe, of de virtio-blk van QEMU), 0 = geen: de
+/// dispatch telt hem niet als NIC.
+pub(crate) static DISK_LPI: AtomicU32 = AtomicU32::new(0);
 
 /// Hoe lang de zelftest op de interrupt wacht (zoals de igb op de Altra).
 const IRQ_TEST_NS: u64 = 50_000_000;
 
-/// Zet de NVMe van [`probe_nvme`] op zijn lijn, na `start_interrupts`:
-/// MSI-X vector 0 via de ITS van zijn root-complex (`irq::wire_msix`, de
-/// weg van de NIC), en dan de zelftest: één admin-opdracht, en de dispatch
-/// moet zijn interrupt binnen [`IRQ_TEST_NS`] zien. Pas dan krijgt de
-/// driver de bel; anders pollt hij zoals voorheen (een stille route liet de
-/// wachter anders op zijn vangrail van 10 ms leven). Nooit INTx: dat doodt
-/// de Altra (L83). Eén regel, `HOPOS_NVME_IRQ`.
-pub fn wire_nvme(disk: &mut Nvme<Pci>) {
-    let Some(hit) = NVME.get().get() else {
-        return;
-    };
-    match wire_line(&hit, disk) {
-        Ok((wired, us, vectors)) => cpu::println!(
-            "disk: nvme at {} {wired}, vector 0 of {vectors}, first interrupt after {us} us, the queue waits on the line with a 10 ms guard HOPOS_NVME_IRQ",
-            hit.f.bdf
-        ),
-        Err(why) => cpu::println!("disk: nvme at {} polled ({why}) HOPOS_NVME_IRQ", hit.f.bdf),
-    }
-}
-
-/// Zie [`wire_nvme`]: de lijn, de microseconden tot de eerste interrupt en
-/// het aantal vectoren van de functie, of de reden om te pollen.
+/// Zet de NVMe op zijn lijn: MSI-X vector 0 via de ITS van zijn
+/// root-complex (`irq::wire_msix`, de weg van de NIC), en dan de zelftest:
+/// één admin-opdracht, en de dispatch moet zijn interrupt binnen
+/// [`IRQ_TEST_NS`] zien. Pas dan krijgt de driver de bel; anders de reden
+/// (een stille route is een schijf zonder lijn). Nooit INTx: dat doodt de
+/// Altra (L83). Geeft de lijn, de microseconden tot de eerste interrupt en
+/// het aantal vectoren van de functie.
 fn wire_line(hit: &Found, disk: &mut Nvme<Pci>) -> Result<(Wired, u64, u16), &'static str> {
     let segs = segments();
     let (e, _) = segs.get(hit.win).ok_or("no config window")?;
@@ -182,7 +176,7 @@ fn wire_line(hit: &Found, disk: &mut Nvme<Pci>) -> Result<(Wired, u64, u16), &'s
     let Wired::Msix { lpi, dev_id } = wired else {
         return Err("not MSI-X");
     };
-    NVME_LPI.store(lpi, Relaxed);
+    DISK_LPI.store(lpi, Relaxed);
     let _ = NVME_BELL.take();
     disk.fire_irq()
         .map_err(|_| "the self-test command failed")?;

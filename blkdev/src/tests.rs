@@ -83,9 +83,9 @@ impl AsyncBlockDevice for Lagging {
     }
 }
 
-/// Een klok die de test zet, en slapen die telt.
+/// Een wekker die telt en nooit afloopt: alleen een bel of een nieuwe poll
+/// gaat verder.
 struct Clock {
-    now: Cell<u64>,
     sleeps: Cell<usize>,
     last: Cell<Duration>,
 }
@@ -93,14 +93,13 @@ struct Clock {
 impl Clock {
     fn new() -> Self {
         Self {
-            now: Cell::new(0),
             sleeps: Cell::new(0),
             last: Cell::new(Duration::ZERO),
         }
     }
 }
 
-/// Een slaap die nooit afloopt: alleen een bel of een nieuwe poll gaat verder.
+/// Een slaap die nooit afloopt.
 struct Never;
 
 impl Future for Never {
@@ -112,9 +111,6 @@ impl Future for Never {
 
 impl Pace for &Clock {
     type Sleep = Never;
-    fn now(&self) -> u64 {
-        self.now.get()
-    }
     fn sleep(&self, d: Duration) -> Never {
         self.sleeps.set(self.sleeps.get() + 1);
         self.last.set(d);
@@ -129,9 +125,6 @@ impl Wake for Count {
         self.0.fetch_add(1, SeqCst);
     }
 }
-
-/// Een lees van 512 bytes op LBA 0.
-const RD: Op<'static> = Op::Read { lba: 0, len: 512 };
 
 #[test]
 fn a_request_is_cut_by_max_transfer_and_round_trips() {
@@ -151,64 +144,7 @@ fn a_request_is_cut_by_max_transfer_and_round_trips() {
 }
 
 #[test]
-fn without_a_line_it_yields_first_and_then_sleeps_a_poll_period() {
-    let clock = Clock::new();
-    let q = Queue::new(Lagging::new(4096, usize::MAX, 4096), &clock);
-    let c = Arc::new(Count(AtomicUsize::new(0)));
-    let waker = Waker::from(c.clone());
-    let mut cx = Context::from_waker(&waker);
-    let mut f = core::pin::pin!(q.io(RD, &mut []));
-    // Binnen het spin-venster: een yield (zelf wekken), geen timer.
-    assert!(f.as_mut().poll(&mut cx).is_pending());
-    assert_eq!(c.0.load(SeqCst), 1);
-    assert_eq!(clock.sleeps.get(), 0);
-    // Daarna: een timer van de pollperiode, en niet meer zelf wekken.
-    clock.now.set(POLL_SPIN_NS);
-    assert!(f.as_mut().poll(&mut cx).is_pending());
-    assert_eq!(c.0.load(SeqCst), 1);
-    assert_eq!(clock.sleeps.get(), 1);
-    assert_eq!(clock.last.get(), POLL_PERIOD);
-    // Een volgende poll hergebruikt de lopende timer.
-    assert!(f.as_mut().poll(&mut cx).is_pending());
-    assert_eq!(clock.sleeps.get(), 1);
-}
-
-/// Een [`Lagging`] die zijn eigen pollritme opgeeft, zoals de ANS.
-struct OwnPace(Lagging);
-
-impl AsyncBlockDevice for OwnPace {
-    fn max_transfer(&self) -> usize {
-        self.0.max_transfer()
-    }
-    fn start_tag(&mut self, op: Op<'_>) -> Result<usize> {
-        self.0.start_tag(op)
-    }
-    fn poll_tag(&mut self, t: usize, into: &mut [u8]) -> Poll<Result> {
-        self.0.poll_tag(t, into)
-    }
-    fn poll_pace(&self) -> (u64, Duration) {
-        (20_000, Duration::from_micros(20))
-    }
-}
-
-#[test]
-fn a_driver_can_choose_its_own_poll_pace() {
-    let clock = Clock::new();
-    let q = Queue::new(OwnPace(Lagging::new(4096, usize::MAX, 4096)), &clock);
-    let c = Arc::new(Count(AtomicUsize::new(0)));
-    let waker = Waker::from(c.clone());
-    let mut cx = Context::from_waker(&waker);
-    let mut f = core::pin::pin!(q.io(RD, &mut []));
-    assert!(f.as_mut().poll(&mut cx).is_pending());
-    assert_eq!(clock.sleeps.get(), 0);
-    // Na zijn eigen spin-venster de timer van zijn eigen periode.
-    clock.now.set(20_000);
-    assert!(f.as_mut().poll(&mut cx).is_pending());
-    assert_eq!(clock.last.get(), Duration::from_micros(20));
-}
-
-#[test]
-fn with_a_line_it_waits_on_the_bell_behind_a_guard() {
+fn it_waits_on_the_bell_with_the_term_and_never_per_round() {
     static BELL: Signal = Signal::new();
     let clock = Clock::new();
     let mut dev = Lagging::new(4096, 3, 4096);
@@ -219,7 +155,7 @@ fn with_a_line_it_waits_on_the_bell_behind_a_guard() {
     let mut cx = Context::from_waker(&waker);
     let mut f = core::pin::pin!(q.io(Op::Flush, &mut []));
     assert!(f.as_mut().poll(&mut cx).is_pending());
-    assert_eq!(clock.last.get(), IRQ_GUARD, "de vangrail staat");
+    assert_eq!(clock.last.get(), TERM, "de termijn staat");
     assert_eq!(c.0.load(SeqCst), 0, "geen yield: de executor mag slapen");
     // De bel wekt de wachter; die kijkt tot het device klaar is.
     BELL.set();
@@ -232,7 +168,7 @@ fn with_a_line_it_waits_on_the_bell_behind_a_guard() {
 #[test]
 fn a_borrowed_driver_is_the_same_path_and_comes_back() {
     // De meetbank vóór de executor: de driver geleend, `block_on` met een
-    // pollende `Pace`, en daarna is hij weer van de eigenaar.
+    // `Pace` die nooit slaapt, en daarna is hij weer van de eigenaar.
     let mut dev = Lagging::new(8192, 3, 4096);
     {
         let q = Queue::new(&mut dev, Spin);

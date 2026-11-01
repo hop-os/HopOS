@@ -16,6 +16,8 @@ driver-pl011 = { path = "../../driver/pl011" }
 driver-gicv2 = { path = "../../driver/gicv2" }
 driver-genet = { path = "../../driver/nic/genet" }
 driver-mdio = { path = "../../driver/nic/mdio" }
+netdev = { path = "../../netdev" }
+sync = { path = "../../sync" }
 # De RC voor de VL805 (usb.rs), alleen met `gui`.
 driver-brcmpcie = { path = "../../driver/brcmpcie", optional = true }
 

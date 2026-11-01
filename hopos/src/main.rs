@@ -360,6 +360,12 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
             }
         );
     }
+    // De interrupts vóór elk device: de schijf en de NIC bedraden hun lijn
+    // in hun probe (docs/sequence-hopos.md §14.1 O3). Zonder interrupts geen
+    // node (§13.3): hard, zoals een panic (FATAL: `fatal()` van agent D).
+    let bell = board.start_interrupts().expect("irq HOPOS_IRQ_FAIL");
+    exec.spawn(irq_dispatch(board, bell)).expect("spawn irq");
+
     // De opslag vóór de system-API: die krijgt de hopfs-actor alleen als
     // er een schijf is (anders weigert elke bestandscall luid). De schijf
     // wordt één keer geprobed; de meetbanken (bench.rs, alleen met
@@ -371,20 +377,6 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     codec::up(exec);
     let system = system(privilege, disk.is_some(), slot_count(board));
 
-    // De IRQ-dispatch spawnt als eerste: hij is de pomp van alle lijnen.
-    // Faalt de controller, dan draait de node door op de vangrail van de
-    // slaap (interrupts zijn een verbetering, geen voorwaarde).
-    // De schijf kwam ervóór op (de bench en de mount pollen); zijn lijn
-    // komt nu.
-    match board.start_interrupts() {
-        Ok(bell) => {
-            exec.spawn(irq_dispatch(board, bell)).expect("spawn irq");
-            if let Some(q) = disk {
-                q.with_dev(|d| board.wire_disk(d));
-            }
-        }
-        Err(e) => println!("irq: {e}, running on the sleep failsafe HOPOS_IRQ_FAIL"),
-    }
     exec.spawn(tick(exec)).expect("spawn tick");
     #[cfg(feature = "hopcost")]
     exec.spawn(hopcost(exec)).expect("spawn hopcost");
@@ -838,8 +830,8 @@ async fn tick(exec: &'static Executor) {
         let o = &cpu::el2::OS_STATS;
         // De laatste beurt en de langste sinds de vorige tik (30-09: de
         // stilte van de hoplb-kring was niet te lezen zonder te weten wie de
-        // OS-core het laatst had), en de switch: werk na de bel tegen werk
-        // na de failsafe, volle en gedropte RX, en wat de NAT weggooide.
+        // OS-core het laatst had), en de switch: werk na de bel, volle en
+        // gedropte RX, en wat de NAT weggooide.
         let last = o.last.load(Relaxed);
         let long_us = o.longest.swap(0, Relaxed) / (OS_HZ() / 1_000_000).max(1);
         let sw = &net::STATS;
@@ -875,7 +867,7 @@ async fn tick(exec: &'static Executor) {
             continue;
         }
         println!(
-            "HOPOS_TICK {n} late_ms={late_ms} busy_ms={busy_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} xoff={} flowfull={} natin={} natmiss={}) nic(bad={} full={} held={} err={} bells={}) waker(rounds={} seen={} kicks={} rx={}) temp={}",
+            "HOPOS_TICK {n} late_ms={late_ms} busy_ms={busy_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} rxfull={} rxdrop={} big={} noroute={} txdrop={} xoff={} flowfull={} natin={} natmiss={}) nic(bad={} full={} held={} err={} bells={}) waker(rounds={} seen={} kicks={} rx={}) temp={}",
             s.sleeps.load(Relaxed),
             s.polls.load(Relaxed),
             IRQS[0].load(Relaxed),
@@ -894,7 +886,6 @@ async fn tick(exec: &'static Executor) {
             last & 0xff,
             cpu::el2::Back::name_of((last >> 8) & 0xff),
             sw.work_by_door.load(Relaxed),
-            sw.work_by_timer.load(Relaxed),
             sw.rx_full.load(Relaxed),
             sw.rx_drops.load(Relaxed),
             sw.nat_oversize.load(Relaxed),

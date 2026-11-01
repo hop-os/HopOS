@@ -500,25 +500,17 @@ impl<S: Soc> Board for Raspi<S> {
         // De EL2-timer: de deadline van de executor terwijl een bewoner de
         // OS-core heeft (`cpu::el2::OsCore`). Zijn ack zet hem uit, zodat de
         // lijn valt tot de volgende beurt hem weer zet.
-        if cpu::irq::enable(
+        cpu::irq::enable(
             cpu::irq::Line(HYP_TIMER_PPI),
             Some(cpu::idle::hyp_timer_off),
             None,
         )
-        .is_err()
-        {
-            cpu::println!(
-                "irq: CNTHP PPI {HYP_TIMER_PPI} refused, the OS-core rotation runs without its timer"
-            );
-        }
+        .map_err(|_| Error::Irq("CNTHP PPI refused"))?;
         // De kick van de app-cores: zonder vermelding in de dispatch zou de
         // eerste claim hem als onbekende lijn uitzetten. Zijn "ack" telt
         // alleen: er is geen device om los te laten.
-        if cpu::irq::enable(cpu::irq::Line(KICK_SGI), Some(cpu::el2::count_kick), None).is_err() {
-            cpu::println!(
-                "irq: kick SGI {KICK_SGI} refused, the OS core hears app cores only on its timer"
-            );
-        }
+        cpu::irq::enable(cpu::irq::Line(KICK_SGI), Some(cpu::el2::count_kick), None)
+            .map_err(|_| Error::Irq("kick SGI refused"))?;
         cpu::println!("irq: {}", gic.describe());
         // Vanaf hier mag de vector komen: hij zet de vlag, wekt de
         // dispatch-taak via `cpu::irq::on_irq` en keert gemaskeerd terug.

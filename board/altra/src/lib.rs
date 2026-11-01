@@ -9,7 +9,7 @@
 //!
 //! - de NIC: de Intel igb (I210) op deze machines, en QEMU's 82576 waarmee
 //!   het pad getest wordt. Op MSI-X via de ITS, de route die Linux neemt,
-//!   met een zelftest en anders gepold ([`nic_irq_mode`]). Nooit INTx: de
+//!   met een zelftest, en zonder lijn een fout ([`nic_irq_mode`]). Nooit INTx: de
 //!   `_PRT`-INTx komt aan, maar hem aanzetten doodt de SoC (L83, 19-09,
 //!   UART-bewijs);
 //! - de schijf: de eerste NVMe, het hele device voor HopOS;
@@ -58,16 +58,13 @@ pub const fn core_class(_core: usize) -> CoreClass {
 }
 
 /// Wat `hopos.nicirq` op dit board mag: `msix` (de standaard, en ook wat
-/// `auto` hier betekent) of `off`. INTx, ook een opgegeven INTID, weigert
+/// `auto` hier betekent). INTx, ook een opgegeven INTID, weigert
 /// het board: de `_PRT`-INTx aanzetten doodde deze SoC (L83, 19-09), en
 /// `auto` zou er na een mislukte MSI-X op terugvallen.
 pub fn nic_irq_mode(m: Mode) -> Result<Mode, &'static str> {
     match m {
         Mode::Auto | Mode::Msix => Ok(Mode::Msix),
-        Mode::Off => Err("hopos.nicirq=off"),
-        Mode::Intx | Mode::Line(_) => {
-            Err("INTx kills this SoC (L83), hopos.nicirq is msix or off here")
-        }
+        Mode::Intx | Mode::Line(_) => Err("INTx kills this SoC (L83), hopos.nicirq is msix here"),
     }
 }
 
@@ -115,10 +112,9 @@ mod tests {
     }
 
     #[test]
-    fn the_nic_is_msix_or_polled_never_intx() {
+    fn the_nic_is_msix_never_intx() {
         assert_eq!(nic_irq_mode(Mode::Msix), Ok(Mode::Msix));
         assert_eq!(nic_irq_mode(Mode::Auto), Ok(Mode::Msix));
-        assert_eq!(nic_irq_mode(Mode::Off), Err("hopos.nicirq=off"));
         assert!(nic_irq_mode(Mode::Intx).is_err());
         assert!(nic_irq_mode(Mode::Line(166)).is_err());
         // Zonder regel in hopos.cfg is het msix.

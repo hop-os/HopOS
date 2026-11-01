@@ -246,6 +246,8 @@ dependencies = [
  "driver-gicv2",
  "driver-mdio",
  "driver-pl011",
+ "netdev",
+ "sync",
 ]
 
 [[package]]
@@ -395,6 +397,7 @@ dependencies = [
  "dev",
  "driver-mdio",
  "netdev",
+ "sync",
 ]
 
 [[package]]

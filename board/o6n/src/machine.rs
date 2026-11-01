@@ -231,17 +231,12 @@ impl Platform for Cix {
         pcie::probe_nvme()
     }
 
-    /// MSI-X vector 0 via de ITS, met een zelftest; anders pollt hij.
-    fn wire_disk(&self, disk: &mut Nvme<Pci>) {
-        pcie::wire_nvme(disk);
-    }
-
     /// De eerste Realtek-poort (geen twee-poorts-aggregatie): BAR2 (het
     /// MMIO-blok; BAR0 is de I/O-alias), reset en MAC, ringen en MAC aan,
     /// dan PHY en autoneg, en dan de lijn (`board_uefi::irq`): MSI-X via de
     /// ITS als de IORT de DeviceID kent, anders INTx uit de `_PRT` van de
-    /// root-poort (bus 0x30: GSI 0x1dd, INTID 477), anders gepold.
-    /// `hopos.nicirq` kiest anders (`msix`, `intx`, `off`, een INTID).
+    /// root-poort (bus 0x30: GSI 0x1dd, INTID 477); geen lijn is een fout.
+    /// `hopos.nicirq` kiest anders (`msix`, `intx`, een INTID).
     ///
     /// De ack is voor beide dezelfde (`IrqAck::ack`: masker dicht, status
     /// schoon); de driver heropent het masker in `receive` als de ring leeg
@@ -290,11 +285,13 @@ impl Platform for Cix {
                 let mode = board_uefi::irq::nic_mode(board_uefi::irq::Mode::Auto);
                 board_uefi::irq::wire(&at, mode, &NIC_BELL, rtl_ack, rtl_ack)
             }
-            None => board_uefi::irq::Wired::Polled("no config window for the root bus"),
-        };
-        if !matches!(wired, board_uefi::irq::Wired::Polled(_)) {
-            nic.set_irq(&NIC_BELL);
+            None => Err("no config window for the root bus"),
         }
+        .map_err(|why| {
+            cpu::println!("net: {} has no line: {why} HOPOS_NIC_IRQ", nic_name(&nic));
+            Error::Irq("the Realtek line did not come up")
+        })?;
+        nic.set_irq(&NIC_BELL);
         cpu::println!(
             "net: {} {:04x}:{:04x} at {} xid {:#x} link {link}, {wired} (the DT table said INTID {}) HOPOS_NIC_IRQ",
             nic_name(&nic),

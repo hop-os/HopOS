@@ -8,7 +8,7 @@
 //! switcher ([`super::switch`]).
 //!
 //! De slaap: MIE uit, `ready()` nog één keer, `mtimecmp` op de deadline
-//! (geklemd op [`WFI_CAP_NS`]), MTIE aan, `wfi`, MTIE uit en de wekker
+//! (op de LicheeRV geklemd op [`WFI_CAP_NS`]), MTIE aan, `wfi`, MTIE uit en de wekker
 //! ontwapend terug, MIE zoals hij stond. `wfi` wekt op elke pending
 //! interrupt met een `mie`-bit, óók met MIE uit, dus een PLIC-lijn of een
 //! kick tussen de toets en de `wfi` is geen verloren wek: hij houdt de `wfi`
@@ -23,19 +23,16 @@ use executor::Sleeper;
 
 pub use crate::idle::{Stats, ns_to_ticks, ticks_to_ns};
 
-/// De vangrail van één slaap op de LicheeRV: 2 ms, het getal van de
-/// Go-kern (`SleepCapTicks`, 2 × 25.000 tikken op de SG2002). Geen
-/// zuinigheidsgetal maar een vangnet: raakt er ooit een wek zoek, dan kost
-/// dat 2 ms in plaats van een hart dat nooit meer opkijkt. Op de SG2002 bleek
+/// De grens van één slaap op de LicheeRV: 2 ms, het getal van de Go-kern
+/// (`SleepCapTicks`, 2 × 25.000 tikken op de SG2002). Een feit van het
+/// ijzer (een poll: docs/description.md §4.11): op de SG2002 bleek
 /// "mtimecmp is bruikbaar" iets anders dan "een wfi erop wekt betrouwbaar"
-/// (01-08, boots 6 en 7).
+/// (01-08, boots 6 en 7), en de C906L heeft geen bel naar de C906B.
 pub const WFI_CAP_NS: u64 = 2_000_000;
 
-/// De vangrail op QEMU virt: 10 ms, dezelfde als de WFI-slaap van arm64
-/// (`cpu::idle::WFI_CAP_NS`): QEMU wekt de `wfi` op de wekker, dus de
-/// vangrail hoeft daar niet krap. Gemeten 30-09: met beide grenzen ~780
-/// slaaprondes per seconde (HOPOS_TICK 3 sleeps=2334), gedragen door de
-/// timers van de executor (de failsafe van de switch), niet door de vangrail.
+/// De slaapgrens van een app-hart in de switcher op QEMU virt
+/// (`SCHED_SLEEP_CAP`): 10 ms. Het hart van de kern heeft er geen: QEMU
+/// wekt de `wfi` op de wekker.
 pub const WFI_CAP_QEMU_NS: u64 = 10_000_000;
 
 /// De timebase: tikken per seconde van de TIME-CSR. RISC-V heeft geen
@@ -75,7 +72,7 @@ pub fn now() -> u64 {
 pub struct RvSleeper {
     clint: Option<Clint>,
     hart: usize,
-    cap_ns: u64,
+    cap_ns: Option<u64>,
     os: Option<OsCore>,
     /// De meetlat.
     pub stats: Stats,
@@ -90,17 +87,17 @@ impl RvSleeper {
         Self {
             clint,
             hart,
-            cap_ns: WFI_CAP_NS,
+            cap_ns: None,
             os: None,
             stats: Stats::default(),
         }
     }
 
-    /// Een andere vangrail dan [`WFI_CAP_NS`], voor een board dat bewezen
-    /// heeft dat zijn wekker betrouwbaar wekt.
+    /// Een grens op elke slaap, voor een board waarop de wekker niet
+    /// betrouwbaar wekt ([`WFI_CAP_NS`], de LicheeRV).
     #[must_use]
     pub const fn with_cap(mut self, cap_ns: u64) -> Self {
-        self.cap_ns = cap_ns;
+        self.cap_ns = Some(cap_ns);
         self
     }
 
@@ -132,8 +129,11 @@ impl RvSleeper {
 
     fn nap(&self, clint: Clint, now: u64, until: Option<u64>) -> u64 {
         let hz = hz();
-        let cap = now.saturating_add(self.cap_ns);
-        let u = until.map_or(cap, |u| u.min(cap));
+        let cap = self.cap_ns.map(|c| now.saturating_add(c));
+        let u = match (until, cap) {
+            (Some(u), Some(c)) => u.min(c),
+            (u, c) => u.or(c).unwrap_or(u64::MAX),
+        };
         let start = csr::rdtime();
         let deadline = start.saturating_add(ns_to_ticks(u.saturating_sub(now), hz));
         clint.set_timecmp(self.hart, deadline);

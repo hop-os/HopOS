@@ -1488,7 +1488,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             return fail(out, h.op, h.seq, &Fail::Kern(Error::Denied));
         }
         if (device.is_some() && self.devices.is_none()) || (device.is_none() && self.fs.is_none()) {
-            return refuse(out, h.op, h.seq, STATUS_ERROR, b"no storage layer on board");
+            return refuse(out, h.op, h.seq, STATUS_NO_ENT, b"no storage on this node");
         }
         let c = FsCall {
             slot: who.slot,
@@ -3380,7 +3380,8 @@ mod tests {
         assert_eq!(res[3].1, STATUS_DENIED);
         assert_eq!((res[4].1, &res[4].4[..]), (STATUS_OK, &b"a/"[..]));
 
-        // Zonder schijf: een nette fout, en de verbinding leeft door.
+        // Zonder schijf: niet gevonden, net als op een lege schijf, en de
+        // verbinding leeft door.
         let bare = System::new(&inbox, &svc, None, 8);
         let mut p = Pipe::new(port_ip4(2), &[req(OP_STAT, 1, b"x", b"", 0)]);
         let _ = drive(
@@ -3389,7 +3390,7 @@ mod tests {
         let res = results(&p.tx);
         assert_eq!(
             (res[0].1, &res[0].4[..]),
-            (STATUS_ERROR, &b"no storage layer on board"[..])
+            (STATUS_NO_ENT, &b"no storage on this node"[..])
         );
     }
 

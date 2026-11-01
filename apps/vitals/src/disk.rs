@@ -21,8 +21,9 @@
 //! zet ze samen op het device), met `bundles=2` twee bundels tegelijk over
 //! twee verbindingen; p50 en p99 zijn dan die van een call.
 //!
-//! Een node zonder opslag zegt dat expliciet ("no storage layer on board");
-//! dan slaat de test zichzelf over. Elke andere fout is een fout.
+//! Een node zonder opslag geeft "niet gevonden" op elke bestandscall, ook
+//! op een write; een leeg bestand maken is dus de toets of er opslag is, en
+//! zonder slaat de test zichzelf over. Elke andere fout is een fout.
 //!
 //! Dit module bezit de system-client van één run; hij gaat met de run weg.
 
@@ -34,8 +35,11 @@ use applib::appnet::SystemClient;
 use applib::clock;
 use applib::sys;
 
-/// Het antwoord van de kern op een node zonder opslag.
-const NO_STORAGE: &str = "no storage layer on board";
+/// Wat het rapport zegt op een node zonder opslag.
+const NO_STORAGE: &str = "no storage on this node";
+
+/// Het lege bestand dat bewijst dat er opslag is; het gaat meteen weer weg.
+const PROBE_PATH: &str = "/vitals-probe";
 
 /// Het bestand zonder `?path=`: in de eigen root.
 const DEFAULT_PATH: &str = "/vitals-disk.bin";
@@ -50,22 +54,20 @@ const SMALL_N: usize = 256;
 /// De stat-calls van de vloer.
 const STAT_N: usize = 200;
 
-/// Wat een `stat` van de root over de opslag zegt.
+/// Wat het maken van [`PROBE_PATH`] over de opslag zegt.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Storage {
-    /// Er is opslag (ook "bestaat niet" bewijst dat de dienst er is).
+    /// Er is opslag.
     Present,
-    /// De node zegt expliciet dat hij geen opslag heeft.
+    /// Niet gevonden: de node heeft geen opslag.
     Absent,
 }
 
-/// De uitkomst van de `stat` van de root als [`Storage`], of de fout.
-pub(crate) fn storage_of(res: sys::Result<u64>) -> sys::Result<Storage> {
+/// De uitkomst van het maken van [`PROBE_PATH`] als [`Storage`], of de fout.
+pub(crate) fn storage_of(res: sys::Result) -> sys::Result<Storage> {
     match res {
-        Ok(_) | Err(sys::Error::NotFound { .. }) => Ok(Storage::Present),
-        Err(sys::Error::Call { msg, .. }) if msg.as_str().ends_with(NO_STORAGE) => {
-            Ok(Storage::Absent)
-        }
+        Ok(()) => Ok(Storage::Present),
+        Err(sys::Error::NotFound { .. }) => Ok(Storage::Absent),
         Err(e) => Err(e),
     }
 }
@@ -128,8 +130,13 @@ struct Plan<'a> {
 /// dat na afloop weer weg is.
 pub(crate) async fn disk(sh: &'static Shared, r: &mut Report, p: &Params) {
     let mut sys = sh.net.system_client();
-    match storage_of(sys.stat("/").await) {
-        Ok(Storage::Present) => {}
+    match storage_of(sys.truncate(PROBE_PATH, 0).await) {
+        Ok(Storage::Present) => {
+            if let Err(e) = sys.remove(PROBE_PATH).await {
+                r.fail(format_args!("storage probe: remove {PROBE_PATH}: {e}"));
+                return;
+            }
+        }
         Ok(Storage::Absent) => {
             r.skip(NO_STORAGE);
             return;
@@ -610,11 +617,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_missing_root_still_proves_storage() {
-        assert_eq!(storage_of(Ok(0)), Ok(Storage::Present));
+    fn not_found_on_a_write_means_no_storage() {
+        assert_eq!(storage_of(Ok(())), Ok(Storage::Present));
         assert_eq!(
             storage_of(Err(sys::Error::NotFound { op: 2 })),
-            Ok(Storage::Present)
+            Ok(Storage::Absent)
         );
         assert_eq!(
             storage_of(Err(sys::Error::Timeout)),

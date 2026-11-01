@@ -834,10 +834,6 @@ pub enum SlotState {
     Streaming = 1,
     /// Gedispatcht.
     Running = 2,
-    /// Beëindiging onbevestigd. Sinds 01-11 meldt de kern dit niet meer
-    /// (een onbevestigde beëindiging is `HOPOS_FATAL`); de variant blijft tot
-    /// Hop hem niet meer kent (`hopos-runner`).
-    Quarantined = 3,
 }
 
 /// Het antwoord op een [`PrivOp::SlotStatus`], in `data` (little-endian).
@@ -995,7 +991,6 @@ impl SlotInfo {
             0 => SlotState::Empty,
             1 => SlotState::Streaming,
             2 => SlotState::Running,
-            3 => SlotState::Quarantined,
             _ => return None,
         })
     }

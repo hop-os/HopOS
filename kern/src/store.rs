@@ -863,7 +863,7 @@ async fn fs<T: Timer, C: Console>(
     out: &mut Vec<u8>,
 ) -> Result<(u64, usize), Fail> {
     let Some(inbox) = cx.fs else {
-        return Err(Fail::Refused(STATUS_ERROR, "no storage layer on board"));
+        return Err(Fail::Refused(STATUS_NO_ENT, "no storage on this node"));
     };
     let c = FsCall {
         slot: who.0,

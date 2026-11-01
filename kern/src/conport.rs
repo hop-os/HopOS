@@ -68,13 +68,15 @@ const _: () = assert!(MAX_READERS == 4);
 /// # Invariants
 ///
 /// De bytes `[head - min(head, size), head)` staan in de data, byte `p` op
-/// `HEAD + p % size`; `uart` en `hop` zijn nooit groter dan `head`. Alleen
-/// de schrijver onder het console-slot verzet `head` en `uart`. Bit `i` van
+/// `HEAD + p % size`; `uart` en `hop` zijn nooit groter dan `head`, en
+/// `head` nooit groter dan `next`, het einde van de schrijf die loopt. Alleen
+/// de schrijver onder het console-slot verzet `next`, `head` en `uart`. Bit `i` van
 /// `seats` is de lezer op 5555 met wekker `wakers[i]`.
 pub struct Ring {
     mem: &'static dyn Mem,
     size: u64,
     head: AtomicU64,
+    next: AtomicU64,
     uart: AtomicU64,
     hop: AtomicU64,
     /// Bytes die de ring overschreef voor de UART ze had.
@@ -95,6 +97,7 @@ impl Ring {
             mem,
             size: len - HEAD,
             head: AtomicU64::new(0),
+            next: AtomicU64::new(0),
             uart: AtomicU64::new(0),
             hop: AtomicU64::new(0),
             lost: AtomicU64::new(0),
@@ -135,6 +138,7 @@ impl Ring {
         self.uart.store(self.word(W_UART).min(head), Release);
         self.hop.store(self.word(W_HOP).min(head), Release);
         self.head.store(head, Release);
+        self.next.store(head, Release);
         head.min(self.size)
     }
 
@@ -155,6 +159,7 @@ impl Ring {
         let head = self.head();
         let skip = b.len().saturating_sub(self.size as usize);
         let (mut at, mut rest) = (head + skip as u64, b.get(skip..).unwrap_or_default());
+        self.next.store(at + rest.len() as u64, Release);
         while !rest.is_empty() {
             let off = at % self.size;
             let (part, more) = rest.split_at(rest.len().min((self.size - off) as usize));
@@ -174,8 +179,9 @@ impl Ring {
 
     /// Kopieert de bytes vanaf `seen` naar `out`; geeft het aantal en de
     /// volgende positie. Wie te ver achterliep, begint bij de oudste.
-    /// Schreef een andere core intussen over het begin heen, dan geeft hij
-    /// niets en de positie erachter: de volgende lees is weer heel.
+    /// Schreef een andere core intussen over het begin heen (ook een schrijf
+    /// die nog loopt), dan geeft hij niets en de positie erachter: de
+    /// volgende lees is weer heel.
     pub fn read(&self, seen: u64, out: &mut [u8]) -> (usize, u64) {
         let head = self.head();
         let from = seen.clamp(head.saturating_sub(self.size), head);
@@ -187,7 +193,7 @@ impl Ring {
             self.mem.get(HEAD + off, part);
             (at, rest) = (at + part.len() as u64, more);
         }
-        let gone = self.oldest();
+        let gone = self.next.load(Acquire).saturating_sub(self.size);
         if gone > from {
             return (0, gone);
         }

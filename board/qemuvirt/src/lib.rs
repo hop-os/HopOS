@@ -157,8 +157,8 @@ fn nic_ack() {
 /// tijdens een blok-verzoek (de wachter van `blkdev::Queue`).
 static DISK_BELL: Signal = Signal::new();
 
-/// De schijflijn en zijn ack, gezet door `probe_disk`, scherp gezet door
-/// `start_interrupts` (de GIC is dan op) en gelezen door de dispatch-taak.
+/// De schijflijn en zijn ack, gezet en scherp gezet door `probe_disk` (de
+/// GIC is dan op), gelezen door de dispatch-taak.
 static DISK_IRQ: Local<Cell<Option<(u32, BlkAck)>>> = Local::new(Cell::new(None));
 
 /// De device-ack van de schijflijn bij de dispatcher.
@@ -386,14 +386,6 @@ impl Board for QemuVirt {
             .map_err(|_| Error::Irq("hyp timer PPI refused"))?;
         cpu::irq::enable(Line(KICK_SGI), Some(cpu::el2::count_kick), None)
             .map_err(|_| Error::Irq("kick SGI refused"))?;
-        // De schijf (als `probe_disk` hem vond): een weigering is geen
-        // reden om zonder interrupts te draaien, de actor valt terug op de
-        // vangrail.
-        if let Some((id, _)) = DISK_IRQ.get().get()
-            && cpu::irq::enable(Line(id), Some(disk_ack), Some(&DISK_BELL)).is_err()
-        {
-            cpu::println!("irq: disk INTID {id} refused, the disk waits on its 10 ms guard");
-        }
         cpu::println!("irq: {}", GIC.describe());
         // Vanaf hier mag de vector komen: hij zet de vlag, wekt de
         // dispatch-taak via `cpu::irq::on_irq` en keert gemaskeerd terug.
@@ -432,8 +424,8 @@ impl Board for QemuVirt {
     }
 
     /// Vindt het virtio-net-slot, zet de driver op in de NIC-DMA-regio en
-    /// hangt zijn lijn aan de GIC. Een lijn die niet aan wil, laat de NIC
-    /// pollen: interrupts zijn een verbetering, geen voorwaarde.
+    /// hangt zijn lijn aan de GIC. Een lijn die niet aan wil, is een fout:
+    /// de pomp pollt niet (docs/sequence-hopos.md §14.1 O3).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
         if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
@@ -453,12 +445,13 @@ impl Board for QemuVirt {
             .boot_param("hopos.virtio.txq")
             .parse::<u16>()
             .map_or(nic.queue_size(), |n| nic.limit_tx(n));
-        if intid != 0 {
-            NIC_IRQ.get().set(Some((intid, nic.irq_ack())));
-            if cpu::irq::enable(Line(intid), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
-                nic.set_irq(&NIC_BELL);
-            }
+        if intid == 0 {
+            return Err(Error::Irq("virtio-net without a line in the FDT"));
         }
+        NIC_IRQ.get().set(Some((intid, nic.irq_ack())));
+        cpu::irq::enable(Line(intid), Some(nic_ack), Some(&NIC_BELL))
+            .map_err(|_| Error::Irq("virtio-net line refused"))?;
+        nic.set_irq(&NIC_BELL);
         cpu::println!(
             "net: virtio-net at {:#x}, intid {intid}, queue {}, tx ring {txq}",
             base.0,
@@ -527,14 +520,16 @@ impl Board for QemuVirt {
         let mut disk = unsafe { VirtioBlk::new(base, BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
             .map_err(|_| Error::Disk("virtio-blk init failed"))?;
         // De lijn (30-09): de hopfs-actor wacht op de bel in plaats van de
-        // OS-core vast te houden tot het device klaar is. Scherp in de GIC
-        // pas in `start_interrupts` (vóór de GIC-init is een SPI-route niet
-        // te schrijven); tot dan, en als dat mislukt, kijkt de wachter op
-        // de vangrail van 10 ms.
-        if intid != 0 {
-            DISK_IRQ.get().set(Some((intid, disk.irq_ack())));
-            disk.set_irq(&DISK_BELL);
+        // OS-core vast te houden tot het device klaar is. De GIC staat al
+        // (`start_interrupts` komt eerst); een lijn die niet aan wil, is een
+        // fout.
+        if intid == 0 {
+            return Err(Error::Irq("virtio-blk without a line in the FDT"));
         }
+        DISK_IRQ.get().set(Some((intid, disk.irq_ack())));
+        cpu::irq::enable(Line(intid), Some(disk_ack), Some(&DISK_BELL))
+            .map_err(|_| Error::Irq("virtio-blk line refused"))?;
+        disk.set_irq(&DISK_BELL);
         cpu::println!(
             "disk: virtio-blk at {:#x}, intid {intid}, {} sectors, flush {}",
             base.0,

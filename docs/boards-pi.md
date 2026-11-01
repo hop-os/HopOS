@@ -278,7 +278,10 @@ gefikst en op de host en QEMU getoetst, nog niet op ijzer:
 - **`cpu::idle` zet de event-stream in CNTKCTL_EL1**; onder E2H=0 geldt
   voor EL2 CNTHCTL_EL2. De Pi-ingang zet die voor core 0 (1,2 ms op
   54 MHz); andere EL2-boards (O6N, Altra) hebben hetzelfde nodig.
-- **GENET-interrupt** (Pi 4, SPI 157/158): niet bedraad, gepold.
+- **GENET-interrupt** (Pi 4): SPI 157 (INTRL2_0, ring 16) bedraad sinds
+  01-11 (`board/rpi4`, `driver-genet`: `RXDMA_MBDONE` met een drempel van
+  één frame, het NAPI-ritme). NOG NIET OP IJZER: QEMU `raspi4b` heeft geen
+  GENET. Komt de lijn niet, dan start de NIC niet (`HOPOS_NIC_FAIL`).
 - **Framebuffer-console**: in de gui-smaak (`GUI=1 sh image/rpi5.sh`, of
   `GUI=1 sh image/flip-bundle.sh rpi5` op een draaiende node), via `FB_ALLOC`
   op de mailbox (board/raspi/src/vcfb.rs). Gemeten 30-09 op de Pi 5:

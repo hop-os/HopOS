@@ -431,7 +431,8 @@ fn join(plan: &Plan, b: &Built, tramp: Pa) -> Result<bool, CageError> {
 /// wekker-taak en de switch (`slot_wake`).
 static WAKE_PLAN: Local<OnceCell<Plan>> = Local::new(OnceCell::new());
 
-/// Het ritme van de wekker: Go's 1 ms, de korrel van een wektijd.
+/// Het ritme van de wekker: Go's 1 ms, de korrel van een wektijd. Een poll
+/// met een reden: docs/description.md §4.11.
 const WAKE_EVERY: Duration = Duration::from_millis(1);
 
 /// Start de wekker (`StartWaker`), alleen op `AppleVhe`; de marker

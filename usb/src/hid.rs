@@ -9,7 +9,7 @@ use driver_xhci::PROTO_MOUSE;
 
 /// Hoe vaak we de event-ring bekijken. Een boot-toetsenbord meldt zich elke
 /// 8-10ms; 4ms is dus ruim binnen de aanslagsnelheid en kost per beurt een
-/// handvol MMIO-reads.
+/// handvol MMIO-reads. Een poll met een reden: docs/description.md §4.11.
 pub const POLL_INTERVAL_NS: u64 = 4_000_000;
 
 /// Hoeveel rapporten we per beurt van één apparaat ophalen. Eén apparaat kan

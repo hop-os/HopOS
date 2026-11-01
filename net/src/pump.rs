@@ -6,17 +6,17 @@
 //! egress-rij, die alleen de switch vult. Zo heeft de NIC één eigenaar en
 //! elke rij één producer: de `uplinkTxMu` van de Go-kern bestaat niet meer.
 //!
-//! Wachten: op de NIC-interrupt waar het board er een bedraadt, met de
-//! vangrail van 10 ms, want een verloren flank mag nooit een hang worden (hij
-//! kost bij stilte 100 wekken per seconde in plaats van 3.333, en onder
-//! verkeer wordt hij nooit geraakt). Zonder lijn: pollen op 300 µs, zodat de
-//! core bij stilte echt kan slapen; onder last wordt er nooit geslapen.
+//! Wachten: op de NIC-interrupt en de bel van de switch, verder niets. Elke
+//! NIC heeft een lijn (docs/sequence-hopos.md §14.1 O3): de kern start de
+//! pomp niet zonder. Geen vangrail ernaast (§13.3): een verloren wek is een
+//! fout die we repareren.
 //!
 //! Een volle TX-ring van de NIC is geen drop maar een stop, zoals Linux'
 //! `netif_stop_queue` in een driver die geen descriptor meer heeft: de pomp
 //! houdt het frame vast en probeert het de volgende ronde als eerste, en
-//! zolang hij vasthoudt kijkt hij elke [`NIC_POLL`] (er is geen
-//! TX-interrupt). De egress-rij loopt dan vol, en de switch stopt met lezen
+//! zolang hij vasthoudt kijkt hij elke [`NIC_POLL`]: niet elke driver zet
+//! een interrupt op een vrijgekomen TX-descriptor (een poll met een reden:
+//! docs/description.md §4.11). De egress-rij loopt dan vol, en de switch stopt met lezen
 //! uit de TX-ringen ([`crate::switch::Xoff`]); de pomp opent hem weer zodra
 //! hij een frame uit de rij nam (`netif_wake_queue`). Tot 24-10 ging het
 //! frame na één flush weg ("drop, TCP herstelt"), en elk gat kostte de TCP
@@ -31,13 +31,8 @@ use netdev::{Device, TxError};
 use sync::spsc::{Receiver, Sender};
 use sync::{Signal, select, yield_now};
 
-/// De vangrail op de NIC-interrupt. Op het raster van 10 ms sinds boot,
-/// hetzelfde als de vangrail van de servicers (`kern::slots::SERVICER_GUARD`):
-/// dan kosten ze samen één wek per 10 ms in plaats van elk één (Linux:
-/// `round_jiffies`; QEMU 30-09: een stille OS-core ~250 naar ~210).
-pub const IRQ_GUARD: Duration = Duration::from_millis(10);
-
-/// De poll-periode zonder interrupt.
+/// Hoe vaak de pomp kijkt zolang hij een frame vasthoudt dat de volle
+/// TX-ring van de NIC niet nam (een poll: docs/description.md §4.11).
 pub const NIC_POLL: Duration = Duration::from_micros(300);
 
 /// Frames per RX-burst. De RX-doorbell gaat per burst, niet per frame: per
@@ -49,6 +44,8 @@ pub const RX_BATCH: usize = 32;
 /// De pomp.
 pub struct Pump<'a, D: Device> {
     nic: D,
+    /// De bel van de NIC-lijn.
+    line: &'a Signal,
     ingress: Sender<'a, Frame, UPLINK_QUEUE>,
     egress: Receiver<'a, Frame, UPLINK_QUEUE>,
     /// De bel van de pomp: de switch zet hem na een ronde met egress-werk.
@@ -64,7 +61,8 @@ pub struct Pump<'a, D: Device> {
 }
 
 impl<'a, D: Device> Pump<'a, D> {
-    /// Een pomp over `nic`.
+    /// Een pomp over `nic`, gewekt door zijn lijn ([`Device::irq`]);
+    /// `None` voor een NIC zonder lijn: die pompt de kern niet.
     pub fn new(
         nic: D,
         ingress: Sender<'a, Frame, UPLINK_QUEUE>,
@@ -73,8 +71,9 @@ impl<'a, D: Device> Pump<'a, D> {
         door: &'a Signal,
         xoff: &'a Xoff,
         stats: &'a Stats,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        Some(Self {
+            line: nic.irq()?,
             nic,
             ingress,
             egress,
@@ -83,7 +82,7 @@ impl<'a, D: Device> Pump<'a, D> {
             xoff,
             held: None,
             stats,
-        }
+        })
     }
 
     /// De NIC.
@@ -182,9 +181,9 @@ impl<'a, D: Device> Pump<'a, D> {
         self.stats.nic_doorbells.store(n.doorbells, Relaxed);
         if got > 0 {
             // De burst ligt bij de switch: hem nú wekken, niet pas bij HOP's
-            // idle of de failsafe. Onder inbound verkeer is HOP nooit idle,
-            // en dan lagen de ACK's van de apps tot de 1 ms-failsafe in hun
-            // TX-ringen (gemeten 20-09: 37 MB/s = venster ÷ RTT).
+            // idle. Onder inbound verkeer is HOP nooit idle, en dan lagen de
+            // ACK's van de apps tot 20-09 tot de failsafe van 1 ms in hun
+            // TX-ringen (gemeten: 37 MB/s = venster ÷ RTT).
             self.door.set();
         }
         sent || got > 0
@@ -192,29 +191,20 @@ impl<'a, D: Device> Pump<'a, D> {
 
     /// De lus van de pomp; keert niet terug.
     pub async fn run<const T: usize, const M: usize>(&mut self, exec: &'static Executor<T, M>) {
-        let irq = self.nic.irq();
+        let line = self.line;
         loop {
             if self.pass() {
                 yield_now().await;
                 continue;
             }
             self.stats.rx_idle.fetch_add(1, Relaxed);
-            match irq {
+            if self.held.is_some() {
                 // Een vastgehouden frame wacht op een descriptor die de NIC
-                // vrijgeeft zonder interrupt: elke poll-periode kijken, niet
-                // pas bij de vangrail.
-                Some(line) if self.held.is_some() => {
-                    select(self.bell.wait(), select(line.wait(), exec.after(NIC_POLL))).await;
-                }
-                Some(line) => {
-                    let grid = u64::try_from(IRQ_GUARD.as_nanos()).unwrap_or(u64::MAX);
-                    let guard =
-                        exec.until((exec.now() / grid).saturating_add(1).saturating_mul(grid));
-                    select(self.bell.wait(), select(line.wait(), guard)).await;
-                }
-                None => {
-                    select(self.bell.wait(), exec.after(NIC_POLL)).await;
-                }
+                // vrijgeeft, niet elke NIC met een interrupt: de poll van
+                // docs/description.md §4.11.
+                select(self.bell.wait(), select(line.wait(), exec.after(NIC_POLL))).await;
+            } else {
+                select(self.bell.wait(), line.wait()).await;
             }
         }
     }
@@ -225,10 +215,10 @@ mod tests {
     use super::*;
     use crate::{Egress, Ingress};
     use netdev::Mac;
-    use std::cell::Cell;
     use std::collections::VecDeque;
 
     struct FakeNic {
+        line: &'static Signal,
         rx: VecDeque<Vec<u8>>,
         tx: Vec<Vec<u8>>,
         flushes: usize,
@@ -261,6 +251,9 @@ mod tests {
                 ..netdev::Stats::default()
             }
         }
+        fn irq(&self) -> Option<&'static Signal> {
+            Some(self.line)
+        }
     }
 
     fn leak<T>(v: T) -> &'static T {
@@ -274,6 +267,7 @@ mod tests {
         let door = leak(Signal::new());
         let stats = leak(Stats::new());
         let nic = FakeNic {
+            line: leak(Signal::new()),
             rx: (0..40u8).map(|i| vec![i; 60]).collect(),
             tx: Vec::new(),
             flushes: 0,
@@ -287,7 +281,8 @@ mod tests {
             door,
             leak(Xoff::new()),
             stats,
-        );
+        )
+        .unwrap();
         assert!(p.pass());
         assert_eq!(ing_rx.len(), RX_BATCH, "één burst is RX_BATCH frames");
         assert_eq!(p.nic().flushes, 1, "één doorbell per burst");
@@ -309,6 +304,7 @@ mod tests {
         let (_eg_tx, eg_rx) = leak(Egress::new()).split().unwrap();
         let stats = leak(Stats::new());
         let nic = FakeNic {
+            line: leak(Signal::new()),
             rx: (0..UPLINK_QUEUE + 5).map(|_| vec![1; 60]).collect(),
             tx: Vec::new(),
             flushes: 0,
@@ -322,7 +318,8 @@ mod tests {
             leak(Signal::new()),
             leak(Xoff::new()),
             stats,
-        );
+        )
+        .unwrap();
         while p.pass() {}
         assert_eq!(ing_rx.len(), UPLINK_QUEUE);
         assert_eq!(
@@ -342,6 +339,7 @@ mod tests {
         let (mut eg_tx, eg_rx) = leak(Egress::new()).split().unwrap();
         let stats = leak(Stats::new());
         let nic = FakeNic {
+            line: leak(Signal::new()),
             rx: VecDeque::new(),
             tx: Vec::new(),
             flushes: 0,
@@ -355,7 +353,8 @@ mod tests {
             leak(Signal::new()),
             leak(Xoff::new()),
             stats,
-        );
+        )
+        .unwrap();
         for i in 0..3u8 {
             assert!(eg_tx.try_send(Frame::from_slice(&[i; 42]).unwrap()).is_ok());
         }
@@ -395,6 +394,9 @@ mod tests {
             fn mac(&self) -> Mac {
                 Mac([2, 0, 0, 0, 0, 9])
             }
+            fn irq(&self) -> Option<&'static Signal> {
+                Some(leak(Signal::new()))
+            }
         }
         let (ing_tx, _ing_rx) = leak(Ingress::new()).split().unwrap();
         let (mut eg_tx, eg_rx) = leak(Egress::new()).split().unwrap();
@@ -403,7 +405,7 @@ mod tests {
             free: 1,
             tx: Vec::new(),
         };
-        let mut p = Pump::new(nic, ing_tx, eg_rx, leak(Signal::new()), door, xoff, stats);
+        let mut p = Pump::new(nic, ing_tx, eg_rx, leak(Signal::new()), door, xoff, stats).unwrap();
         for i in 0..4u8 {
             assert!(eg_tx.try_send(Frame::from_slice(&[i; 42]).unwrap()).is_ok());
         }
@@ -430,22 +432,17 @@ mod tests {
         );
     }
 
-    thread_local! {
-        static NOW: Cell<u64> = const { Cell::new(0) };
-    }
-    fn fake_now() -> u64 {
-        NOW.with(Cell::get)
-    }
-
-    /// De lus pollt zonder lijn op zijn eigen klok.
+    /// De lus slaapt op de lijn: zonder bel geen ronde, en de bel van de
+    /// lijn haalt het frame op.
     #[test]
-    fn poll_lus_pakt_een_frame_na_de_poll_periode() {
+    fn de_lijn_wekt_de_pomp() {
         let exec: &'static Executor<4, 4> = leak(Executor::new());
-        exec.set_clock(fake_now);
         let (ing_tx, ing_rx) = leak(Ingress::new()).split().unwrap();
         let (_eg_tx, eg_rx) = leak(Egress::new()).split().unwrap();
         let stats = leak(Stats::new());
+        let line = leak(Signal::new());
         let nic = FakeNic {
+            line,
             rx: VecDeque::new(),
             tx: Vec::new(),
             flushes: 0,
@@ -459,18 +456,22 @@ mod tests {
             leak(Signal::new()),
             leak(Xoff::new()),
             stats,
-        );
+        )
+        .unwrap();
         p.nic().rx.push_back(vec![7; 64]);
         // De taak bezit de pomp; de test kijkt via de rij en de tellers.
         exec.spawn(async move { p.run(exec).await }).unwrap();
         while exec.step() {}
         assert_eq!(ing_rx.len(), 1, "het frame kwam niet door");
-        assert!(stats.rx_idle.load(Relaxed) >= 1);
-        NOW.with(|n| n.set(NIC_POLL.as_nanos() as u64 + 1));
+        let idle = stats.rx_idle.load(Relaxed);
         while exec.step() {}
-        assert!(
-            stats.rx_idle.load(Relaxed) >= 2,
-            "de poll-timer wekte de pomp niet"
+        assert_eq!(stats.rx_idle.load(Relaxed), idle, "zonder bel geen ronde");
+        line.set();
+        while exec.step() {}
+        assert_eq!(
+            stats.rx_idle.load(Relaxed),
+            idle + 1,
+            "de lijn wekte de pomp niet"
         );
     }
 }

@@ -267,6 +267,8 @@ const PCI_LOG_MAX: usize = 32;
 
 /// De bel van de NIC-lijn (MSI-X of INTx), zie [`Uefi::probe_nic`].
 static NIC_BELL: Signal = Signal::new();
+/// De bel van de schijflijn (MSI-X), zie [`Uefi::probe_disk`].
+static DISK_BELL: Signal = Signal::new();
 
 /// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
 /// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
@@ -376,6 +378,29 @@ fn ecams() -> impl Iterator<Item = (Ecam, u16, u8)> {
         // als Device (`boot::build_map`).
         (unsafe { Ecam::new(Pa(base), start, end) }, seg, start)
     })
+}
+
+/// De lijn van een virtio-functie: MSI-X vector 0 via de ITS (geen ack:
+/// een MSI is een flank), als het transport de vector bij elke queue
+/// aannam (`msix_ok`). Zonder MSI-X geen lijn.
+fn wire_virtio(
+    msix_ok: bool,
+    e: &Ecam,
+    seg: u16,
+    root_bus: u8,
+    f: &Function,
+    bell: &'static Signal,
+) -> Result<irq::Wired, &'static str> {
+    if !msix_ok {
+        return Err("the device refused the MSI-X vector");
+    }
+    let at = irq::At {
+        ecam: e,
+        seg,
+        root_bus,
+        f,
+    };
+    irq::wire(&at, irq::Mode::Msix, bell, irq::no_ack, irq::no_ack)
 }
 
 /// De eerste virtio-functie van type `ty` op een van de segmenten, met
@@ -720,7 +745,7 @@ impl Board for Uefi {
             .claims(Line(facts::TIMER_PPI.load(Relaxed)))
             .saturating_add(pass.claims(Line(facts::HYP_TIMER_PPI.load(Relaxed))));
         let kick = pass.claims(Line(KICK_SGI));
-        let disk = match pcie::NVME_LPI.load(Relaxed) {
+        let disk = match pcie::DISK_LPI.load(Relaxed) {
             0 => 0,
             l => pass.claims(Line(l)),
         };
@@ -740,8 +765,8 @@ impl Board for Uefi {
     }
 
     /// De eerste virtio-net over PCI, op MSI-X via de ITS (vector 0 voor
-    /// beide queues), anders gepold op de vangrail (`hopos.nicirq=off`
-    /// kiest het tweede).
+    /// beide queues). Zonder MSI-X geen lijn, en dan een fout
+    /// (docs/sequence-hopos.md §14.1 O3).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
         if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
@@ -751,33 +776,19 @@ impl Board for Uefi {
         };
         // SAFETY: zie `probe_disk`.
         let mut t = unsafe { Pci::new(&e, &f) }.map_err(|_| Error::Nic("virtio-pci transport"))?;
-        let mode = irq::nic_mode(irq::Mode::Auto);
-        if matches!(mode, irq::Mode::Auto | irq::Mode::Msix) {
-            // De queues krijgen vector 0 bij hun opzet; zonder MSI-X aan
-            // op de functie negeert het device hem (dan INTx of pollen).
-            t.use_msix(0);
-        }
+        // De queues krijgen vector 0 bij hun opzet; zonder MSI-X aan op de
+        // functie negeert het device hem.
+        t.use_msix(0);
         // SAFETY: NET_DMA is van deze driver alleen, Normal-NC gemapt.
         let mut nic =
             unsafe { VirtioNet::with_transport(t, NET_DMA.base, NET_DMA.size, cpu::idle::now) }
                 .map_err(|_| Error::Nic("virtio-net init failed"))?;
         // Alleen MSI-X: INTx op virtio-pci vraagt een ack die het
         // ISR-register leest, en QEMU's `_PRT` loopt via link-devices die
-        // `fw::aml` luid weigert. Zonder MSI-X pollt de pomp.
-        let mode = match mode {
-            irq::Mode::Auto | irq::Mode::Msix if nic.transport().msix_ok() => irq::Mode::Msix,
-            _ => irq::Mode::Off,
-        };
-        let at = irq::At {
-            ecam: &e,
-            seg,
-            root_bus,
-            f: &f,
-        };
-        let wired = irq::wire(&at, mode, &NIC_BELL, irq::no_ack, irq::no_ack);
-        if !matches!(wired, irq::Wired::Polled(_)) {
-            nic.set_irq(&NIC_BELL);
-        }
+        // `fw::aml` luid weigert.
+        let wired = wire_virtio(nic.transport().msix_ok(), &e, seg, root_bus, &f, &NIC_BELL)
+            .map_err(|_| Error::Irq("virtio-net-pci has no MSI-X line"))?;
+        nic.set_irq(&NIC_BELL);
         cpu::println!(
             "net: virtio-net-pci at {}, {wired}, queue {} HOPOS_NIC_IRQ",
             f.bdf,
@@ -788,23 +799,38 @@ impl Board for Uefi {
     }
 
     /// Vindt en initialiseert de schijf (virtio-blk over PCI) in de
-    /// schijf-helft van de DMA-regio. `Ok(None)` = geen schijf; één keer.
+    /// schijf-helft van de DMA-regio, op MSI-X via de ITS zoals de NIC.
+    /// `Ok(None)` = geen schijf; één keer.
     fn probe_disk(&self) -> Result<Option<VirtioBlk<Pci>>, Error> {
         if DISK_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_disk"));
         }
-        let Some((e, f, _, _)) = find_virtio(2) else {
+        let Some((e, f, seg, root_bus)) = find_virtio(2) else {
             return Ok(None);
         };
         // SAFETY: de BAR's van een door de firmware geconfigureerde functie
         // liggen onder 1 TB of in een expliciet gemapt venster (Device).
-        let t = unsafe { Pci::new(&e, &f) }.map_err(|_| Error::Disk("virtio-pci transport"))?;
+        let mut t = unsafe { Pci::new(&e, &f) }.map_err(|_| Error::Disk("virtio-pci transport"))?;
+        t.use_msix(0);
         // SAFETY: BLK_DMA is van deze driver alleen, Normal-NC gemapt.
-        let disk =
+        let mut disk =
             unsafe { VirtioBlk::with_transport(t, BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
                 .map_err(|_| Error::Disk("virtio-blk init failed"))?;
+        let wired = wire_virtio(
+            disk.transport().msix_ok(),
+            &e,
+            seg,
+            root_bus,
+            &f,
+            &DISK_BELL,
+        )
+        .map_err(|_| Error::Irq("virtio-blk-pci has no MSI-X line"))?;
+        if let irq::Wired::Msix { lpi, .. } = wired {
+            pcie::DISK_LPI.store(lpi, Relaxed);
+        }
+        disk.set_irq(&DISK_BELL);
         cpu::println!(
-            "disk: virtio-blk-pci at {}, {} sectors, flush {}",
+            "disk: virtio-blk-pci at {}, {wired}, {} sectors, flush {}",
             f.bdf,
             disk.sectors(),
             if disk.can_flush() { "yes" } else { "no" }

@@ -104,17 +104,19 @@ volgorde (`board_uefi::irq`, `hopos.nicirq=auto`):
    link-device luid weigert), na de swizzle door de bridges. Op de O6N zegt
    de DSDT precies wat de device tree zegt (host-test tegen
    de echte DSDT: 477 voor bus 0x30, en de vier andere root-poorten).
-3. **Pollen** op 300 µs, met de reden op de regel.
+3. **Geen lijn** is een fout, met de reden op de regel: het device start
+   niet (01-11, O3). Pollen bestaat niet meer.
 
-`hopos.nicirq=` in `hopos.cfg`: `auto` (standaard), `msix`, `intx`, `off`
-(of `0`), of een INTID (bordkennis die de DSDT niet heeft).
+`hopos.nicirq=` in `hopos.cfg`: `auto` (standaard), `msix`, `intx`, of een
+INTID (bordkennis die de DSDT niet heeft). De virtio-net en de virtio-blk
+van QEMU gaan altijd op MSI-X.
 
 De verwachte regels (QEMU/EDK2, 29-09):
 
 ```
 irq: ITS IIDR 0x43b TYPER 0x1f0001efb1, 16 DeviceID bits, device table flat (4 KB pages), doorbell 0x8090040, LPIs enabled on the redistributor at 0x80a0000 HOPOS_ITS_UP
 net: virtio-net-pci at 00:02.0, MSI-X via the ITS, LPI 8192 (DeviceID 0x10), queue 256 HOPOS_NIC_IRQ
-net: pump on the nic (irq line, 10 ms guard), uplink queues 2x128 HOPOS_NET_PUMP
+net: pump on the nic's irq line, uplink queues 2x128 HOPOS_NET_PUMP
 HOPOS_TICK 2 sleeps=1120 polls=2070 irq(timer=0 nic=17 other=0) os(...) temp=-
 ```
 
@@ -308,11 +310,11 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   477 (L80: één interrupt per frame, rtt p50 156-201 µs). Met
   `hopos.nicirq=intx` meet je de terugval los.
 - **De NVMe-lijn op ijzer is onbewezen.** Vector 0 (de admin-CQ en de
-  I/O-CQ, IEN) via de ITS van zijn root-complex, `board_uefi::pcie::wire_nvme`
-  na `start_interrupts` (de bench en de mount pollen ervoor), met een
-  zelftest (een Get Features op de admin-CQ): wat niet aankomt, pollt met de
-  reden. De wachter van `blkdev::Queue` slaapt dan op de bel, met 10 ms
-  vangrail, in plaats van na elke submit 100 us per ronde te pollen.
+  I/O-CQ, IEN) via de ITS van zijn root-complex, in `probe_nvme` (de
+  interrupts staan sinds 01-11 vóór de opslag), met een zelftest (een Get
+  Features op de admin-CQ): wat niet aankomt, is een schijf zonder lijn en
+  de kern start niet (`HOPOS_DISK_FAIL`). De wachter van `blkdev::Queue`
+  slaapt op de bel, met de termijn van 5 s (`blkdev::TERM`).
 - **De `_CPC`-klassenbron**: nu MADT, anders de MPIDR-tabel.
 - **De header-UART** (0x040d0000) als spiegel: de console is die van de SPCR.
 - **De kern-core in het klokbeleid**: zijn idle-tijd staat in de slaper van
@@ -333,7 +335,7 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
 5. Temperatuur: `temp=` op de tik en `HOPOS_CLOCK`, en of die bij
    belasting stijgt.
 6. Interrupts: `nic=` in de tik tegen de pakketten; rtt p50 met MSI-X tegen
-   INTx (`hopos.nicirq=intx`) tegen gepold (`off`); geen `stray`-regel.
+   INTx (`hopos.nicirq=intx`); geen `stray`-regel.
 7. Klok: `HOPOS_CLOCK_EDGE` naar quiet na 30 s idle, en binnen ~20 ms terug
    naar vol onder last (v2 L83: 867 tegen 267 Msteps/s).
 8. Watchdog: armed-regel (de echte timeout), `HOPOS_CANARY_LIVE`; dan de
@@ -372,10 +374,11 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   afhankelijk van de SKU).
 - `irq: ITS IIDR ... doorbell 0x100100130040, for 01:00.0 (the IORT's ITS for its root complex), collection on the redistributor at ... HOPOS_ITS_MORE`
   (de igb hangt aan ITS 7 van de acht),
-- `net: igb 8086:1533 at ... link 1000 Mbps full duplex, MSI-X via the ITS, LPI 8224 (DeviceID 0x70100), first interrupt after N us, pump on the line with a 10 ms guard HOPOS_NIC_IRQ`,
-  dan `HOPOS_NIC_UP`, `HOPOS_NET_PUMP` met `irq line, 10 ms guard` en
+- `net: igb 8086:1533 at ... link 1000 Mbps full duplex, MSI-X via the ITS, LPI 8224 (DeviceID 0x70100), first interrupt after N us HOPOS_NIC_IRQ`,
+  dan `HOPOS_NIC_UP`, `HOPOS_NET_PUMP` met `the nic's irq line` en
   `HOPOS_NET_UP`. Komt de afgevuurde vector niet aan:
-  `polled (the forced interrupt (EICS) did not arrive within 50 ms)`.
+  `no line: the forced interrupt (EICS) did not arrive within 50 ms`, en
+  dan start de NIC niet (01-11, O3: geen gepolde terugval).
   Daarvoor dan één regel `net: igb MSI-X diag: ... HOPOS_NIC_IRQ_DIAG`: de
   DeviceID en de IORT-weg (SMMUv3 met CR0 en GBPA, de ITS die de groep
   noemt tegen de onze uit de MADT), of MAPD/MAPTI/INV/SYNC in dit kernleven
@@ -399,8 +402,8 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   `hopos.nicirq=msix`: vector 0 via de ITS, de driver in de MSI-X-modus van
   Linux `igb_configure_msix` met één vector (GPIE, IVAR0 voor RX-queue 0,
   EIAC/EIAM/EIMS; ack EIMC, de pomp heropent bij een lege ring), en een
-  zelftest met EICS: wat niet aankomt, pollt met de reden.
-  `hopos.nicirq=off` in `hopos.cfg` is de terugweg zonder herbouw. Nooit
+  zelftest met EICS: wat niet aankomt, is een NIC zonder lijn en die start
+  niet (01-11, O3). Nooit
   INTx: de `_PRT`-INTx doodt de SoC (L83, 19-09, UART-bewijs); `intx` en
   een INTID weigert het board (`board_altra::nic_irq_mode`).
 - **De NVMe-lijn**: zoals op de O6N, nooit INTx (de functie staat vanaf de
@@ -412,8 +415,7 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
 ### Wat je meet
 
 1. Boot tot `HOPOS_NET_UP`/`HOPOS_FS_UP`; de igb-variant en de link.
-2. Doorvoer en rtt p50/p99 op MSI-X tegen `hopos.nicirq=off` (netmeter en
-   bench pull).
+2. Doorvoer en rtt p50/p99 op MSI-X (netmeter en bench pull).
 3. NVMe zoals op de O6N; de BAR ligt hoog: klopt `map_device`?
 4. Het aantal cores en de pool-grootte tegen de firmware-memory-map.
 
@@ -424,5 +426,5 @@ De igb-driver is QEMU-testbaar (82576), MSI-X inbegrepen. Met de hand
 dat script, met `-cpu max` en `-device igb,netdev=n0,romfile=` in plaats van
 virtio-net. Dan `MSI-X via the ITS, LPI 8192 (DeviceID 0x10), first
 interrupt after ~120 us`, DHCP en `HOPOS_NET_UP` over de lijn, en de
-NIC-interrupts lopen op met het verkeer; met `hopos.nicirq=off` gepold. Nog
+NIC-interrupts lopen op met het verkeer. Nog
 geen script (een `NIC=igb`-variant van `tools/qemu-uefi-test.sh`).

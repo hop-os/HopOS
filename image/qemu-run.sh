@@ -10,10 +10,10 @@
 # kern zet 8080 en 9080 van de uplink door naar het slot van Hop (DNAT).
 #
 #   image/qemu-run.sh                Hop in slot 1 (standaard)
-#   APP=appspike image/qemu-run.sh   een app uit deze werkruimte, twee keer
-#                                    door de kern geplaatst (het ABI-bewijs)
-#   APP=/pad/naar/elf ROLE=0|1 image/qemu-run.sh   een kant-en-klare ELF
-#   APP= image/qemu-run.sh           zonder app-image
+#   APP=/pad/naar/elf image/qemu-run.sh   een kant-en-klare Hop
+#   APP= image/qemu-run.sh           zonder image: de kern plaatst alleen
+#                                    Hop (01-11, O7); een app plaatst Hop
+#                                    (ARTIFACT hieronder)
 #   image/qemu-run.sh -s -S          extra argumenten gaan naar QEMU (gdb)
 #   SMP=2 image/qemu-run.sh          twee cores: de kern en Hop delen de
 #                                    OS-core, de andere is een volle
@@ -24,20 +24,15 @@
 #                                    FDT-bootargs); de kern boot op core 0
 #                                    en verhuist er vóór de eerste bewoner
 #                                    heen. Standaard geen: de boot-core
-#   APP=appspike APPENV=GUI=display image/qemu-run.sh
-#                                    de env van de gestagede app
-#                                    (bootparameter hopos.appenv; meer
-#                                    sleutels met komma's). Het glas zelf
-#                                    vraagt een gui-kern en ramfb: zie
-#                                    GUI=display hieronder
-#   GUI=display APP=display APPENV=GUI=display image/qemu-run.sh
+#   GUI=display ARTIFACT=display image/qemu-run.sh
 #                                    de gui-kern (`--features gui`) met
 #                                    `-device ramfb` in een venster, en de
 #                                    USB-invoer: `-device qemu-xhci` met
 #                                    `usb-kbd` en `usb-mouse` erachter
 #                                    (docs/gui.md). Klik in het venster en
 #                                    typ: de kern leest de toetsen en de
-#                                    muis en de display-app tekent ze.
+#                                    muis en de display-app tekent ze (de
+#                                    job van docs/gui.md naar Hop).
 #                                    QDISPLAY=cocoa|gtk|sdl kiest de
 #                                    weergave (standaard die van QEMU)
 #   WIRE=1 image/qemu-run.sh         een trage draad met vertraging, zoals
@@ -195,7 +190,6 @@ fi
 # Eén -append: een tweede zou de eerste vervangen.
 ARGS=""
 [ -n "${OSCORE:-}" ] && ARGS="hopos.oscore=$OSCORE"
-[ -n "${APPENV:-}" ] && ARGS="${ARGS:+$ARGS }hopos.appenv=$APPENV"
 # BOOTARGS: meer bootparameters, letterlijk (tools/qemu-test-store.sh geeft
 # er `hopos.s3.*` mee voor Hop).
 [ -n "${BOOTARGS:-}" ] && ARGS="${ARGS:+$ARGS }$BOOTARGS"

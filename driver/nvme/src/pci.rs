@@ -20,7 +20,6 @@ use super::{
 };
 use core::convert::Infallible;
 use dev::Pa;
-use sync::Signal;
 
 /// Hoeveel van BAR0 het board moet mappen: registers en de doorbells van
 /// queue 0 en 1, bij de grootste stride die we accepteren.
@@ -36,7 +35,6 @@ pub struct Pci;
 
 impl super::Transport for Pci {
     type Error = Infallible;
-    const IRQ: bool = true;
 }
 
 /// Get Features: Number of Queues. Geen data, mag altijd.
@@ -82,11 +80,6 @@ impl Nvme<Pci> {
         n.create_io_queues()?;
         n.started = true;
         Ok(n)
-    }
-
-    /// Vanaf nu wekt `bell` de wachter: het board bedraadde vector 0.
-    pub fn set_irq(&mut self, bell: &'static Signal) {
-        self.irq = Some(bell);
     }
 
     /// De zelftest van de lijn: één admin-opdracht zonder data (Get
@@ -160,11 +153,11 @@ mod tests {
         assert_eq!((r(0x1020), r(0x1030)), (1, 1));
     }
 
-    /// Zonder lijn pollt de wachter; met de bel van het board slaapt hij
-    /// erop. De zelftest is één admin-opdracht op CID 0 zonder data.
+    /// Het board hangt de bel eraan; de wachter slaapt erop. De zelftest
+    /// is één admin-opdracht op CID 0 zonder data.
     #[test]
     fn the_board_wires_the_bell_and_the_self_test_is_one_admin_command() {
-        static BELL: Signal = Signal::new();
+        static BELL: sync::Signal = sync::Signal::new();
         let (_m, n) = new(1023, 9);
         let mut n = n.unwrap();
         assert!(n.irq().is_none());

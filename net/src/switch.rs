@@ -50,22 +50,6 @@ pub const EGRESS_HEADROOM: usize = 2;
 /// en een niet-lezende poort kan de switch niet blokkeren.
 const TX_BACKPRESSURE: u64 = 10_000_000;
 
-/// De failsafe van de lus. De bel is level-triggered via de deur van de
-/// executor, maar die kijkt alleen als HOP níets te doen heeft. Is HOP bezig
-/// (een 1 MiB-write naar de NVMe, een S3-transfer), dan mist de SEV van een
-/// app zijn WFE en ligt het frame tot deze failsafe. 1 ms is dan de klok,
-/// zoals de waker die al heeft; korter zou pollen zijn, 10 ms een zichtbare
-/// hik in elk request. Weg zodra een app-core HOP een IPI kan sturen, en
-/// zolang [`Stats::work_by_timer`] zegt dat hij nog geraakt wordt.
-///
-/// Hij is uitstelbaar (`Executor::after_deferrable`): hij vuurt in elke
-/// ronde die de core toch draait, maar wekt een slapende core niet. Wie
-/// slaapt, heeft de [`Doorbell`] al: die kijkt vóór en tijdens elke slaap in
-/// de TX-ringen. Als gewone timer wekte hij een stille OS-core elke
-/// milliseconde, met `by failsafe 0/s` (QEMU 30-09: ~710 naar ~450 wekken
-/// per seconde), en via de SEV van elke wek ook elke app-core in WFE.
-pub const FAILSAFE: Duration = Duration::from_millis(1);
-
 /// De diepte van de brievenbus van de switch.
 pub const COMMANDS: usize = 16;
 
@@ -345,7 +329,7 @@ impl Default for Xoff {
 /// Waarom dit bestaat (gemeten 30-09): de kick van een app (SEV plus HVC 6)
 /// haalt de OS-core wel uit zijn WFE of uit de beurt van Hop, maar niemand
 /// zette daarna de bel van de switch: `ready()` van de executor kent alleen
-/// taken. Elk frame van een app lag dan tot de [`FAILSAFE`] van 1 ms (QEMU:
+/// taken. Elk frame van een app lag dan tot de failsafe van 1 ms (QEMU:
 /// `switch by door 2/s, by failsafe 875/s` bij 5.561 kicks/s tijdens de
 /// pull, 7,1 MB/s app naar app en een rtt van 2,2 ms; op ijzer ~1 ms per
 /// handshake naar de kern). De deur maakt de kick weer een bel.
@@ -359,15 +343,25 @@ pub struct Doorbell<'a, R, S> {
     inner: S,
     published: &'a Published<R>,
     door: &'a Signal,
+    /// De andere deur van het interne LAN: de outboxen van de slots (de
+    /// kern luidt hun servicers; `true` = er werd gebeld).
+    outboxes: fn() -> bool,
 }
 
 impl<'a, R: Reader, S: Sleeper> Doorbell<'a, R, S> {
-    /// De slaper `inner` met de deur over `published` naar `door`.
-    pub const fn new(inner: S, published: &'a Published<R>, door: &'a Signal) -> Self {
+    /// De slaper `inner` met de deur over `published` naar `door`, en de
+    /// deur van de outboxen.
+    pub const fn new(
+        inner: S,
+        published: &'a Published<R>,
+        door: &'a Signal,
+        outboxes: fn() -> bool,
+    ) -> Self {
         Self {
             inner,
             published,
             door,
+            outboxes,
         }
     }
 }
@@ -377,13 +371,16 @@ impl<R: Reader, S: Sleeper> Sleeper for Doorbell<'_, R, S> {
         // Werk dat er al lag, ziet de slaper zelf: zijn eerste `ready()`
         // (met de maskers dicht) belt dan en hij keert meteen terug. Een
         // eigen blik hier ervoor was dezelfde blik twee keer (03-10).
-        let (published, door) = (self.published, self.door);
-        self.inner
-            .sleep(now, until, &|| ready() || published.ring(door));
-        // Terug uit een beurt van een bewoner van de OS-core (of een wek):
-        // wat hij schreef, meteen naar de switch, zonder eerst een lege
-        // ronde van de executor en een tweede slaapvraag (03-10).
+        let (published, door, outboxes) = (self.published, self.door, self.outboxes);
+        self.inner.sleep(now, until, &|| {
+            ready() || published.ring(door) || outboxes()
+        });
+        // Terug uit een beurt van een bewoner van de OS-core (of een wek, de
+        // kick van een app-core): wat hij schreef, meteen naar de switch en
+        // de servicers, zonder eerst een lege ronde van de executor en een
+        // tweede slaapvraag (03-10).
         published.ring(door);
+        outboxes();
     }
 }
 
@@ -809,27 +806,17 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
 
     /// De lus: commando's, een switch-ronde, de uplink-doorbell, dan
     /// `yield_now` zodat de doelnetstack consumeert vóór een nieuwe volle
-    /// burst. Niets te doen: wachten op de bel, een commando of de
-    /// failsafe. Keert niet terug; de kern-flip leest de NAT via de
-    /// brievenbus (`SnapshotNat`).
-    pub async fn run<const T: usize, const M: usize>(
-        &mut self,
-        exec: &'static Executor<T, M>,
-        buf: &mut [u8],
-    ) {
-        let mut by_timer = false;
+    /// burst. Niets te doen: wachten op de bel of een commando, verder
+    /// niets (de failsafe van 1 ms is weg sinds de kick en de deur van de
+    /// executor elke publicatie zien, docs/sequence-hopos.md §13.3). Keert
+    /// niet terug; de kern-flip leest de NAT via de brievenbus
+    /// (`SnapshotNat`).
+    pub async fn run(&mut self, buf: &mut [u8]) {
         loop {
             let cmds = self.drain_commands();
             if self.switch_pass(buf) {
                 self.flush_uplink();
-                // Werk ná de failsafe in plaats van na een bel is een SEV die
-                // HOP's WFE miste: een frame dat tot een milliseconde lag.
-                let c = if by_timer {
-                    &self.core.stats.work_by_timer
-                } else {
-                    &self.core.stats.work_by_door
-                };
-                c.fetch_add(1, Relaxed);
+                self.core.stats.work_by_door.fetch_add(1, Relaxed);
                 // Nog werk in een TX-ring (een burst die de grens raakte, een
                 // app die intussen schreef): na de anderen nog een ronde.
                 // Anders meteen wachten: een lege tweede ronde was op de
@@ -847,15 +834,8 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 continue;
             }
             let commands = self.commands;
-            let idle = select(
-                commands.recv(),
-                select(self.door.wait(), exec.after_deferrable(FAILSAFE)),
-            )
-            .await;
-            match idle {
-                Either::Left(cmd) => self.handle(cmd),
-                Either::Right(Either::Left(())) => by_timer = false,
-                Either::Right(Either::Right(())) => by_timer = true,
+            if let Either::Left(cmd) = select(commands.recv(), self.door.wait()).await {
+                self.handle(cmd);
             }
         }
     }

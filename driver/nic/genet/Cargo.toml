@@ -9,6 +9,7 @@ description = "De Broadcom GENET v5: de geïntegreerde gigabit-NIC van de Pi 4 (
 [dependencies]
 dev = { path = "../../../dev" }
 netdev = { path = "../../../netdev" }
+sync = { path = "../../../sync" }
 driver-mdio = { path = "../mdio" }
 
 [lints]

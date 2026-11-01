@@ -147,7 +147,8 @@ hop_elf() {
 # vectortabel van applib moeten in Hop zitten, de eerste Pi 5-boot van
 # 30-09; HOP_PATCH=0 bouwt de tag van de hop-repo); een pad is die ELF;
 # anders een app uit deze werkruimte. Zet $IMAGE (leeg = geen) en $ROLE
-# (zonder ROLE: hop voor Hop, anders app).
+# (zonder ROLE: hop, behalve voor een app uit deze werkruimte). De kern
+# plaatst alleen Hop (01-11, O7): een image met de rol app blijft liggen.
 pick_app() {
 	APP="${APP-$1}"
 	IMAGE=""
@@ -160,7 +161,7 @@ pick_app() {
 		;;
 	*/*)
 		IMAGE="$APP"
-		ROLE="${ROLE:-app}"
+		ROLE="${ROLE:-hop}"
 		;;
 	*)
 		(cd "$DIR" && cargo build --quiet --release --target "$TARGET" -p "$APP")
@@ -206,8 +207,8 @@ PY
 
 # hop_virt [VAR=waarde...] [-- QEMU-argumenten]: image/qemu-run.sh op de
 # achtergrond, met Hop ($HOP_ELF) in slot 1, de poorten en de schijf van de
-# toets, en de VAR=waarde-paren erachter (SMP, BOOTARGS, DISKLAT, CFG, of
-# APP=... ROLE=0 voor een app in plaats van Hop); de console in $LOG, QEMU
+# toets, en de VAR=waarde-paren erachter (SMP, BOOTARGS, DISKLAT, CFG); de
+# console in $LOG, QEMU
 # in $QPID (qemu-run.sh doet exec).
 hop_virt() {
 	(

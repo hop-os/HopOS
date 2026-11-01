@@ -22,13 +22,6 @@ use executor::Sleeper;
 /// eronder is op elk bekend board ~1 ms (zie [`event_stream`]).
 pub const EVENT_STREAM_MAX_NS: u64 = 1_500_000;
 
-/// De vangrail van de WFI-slaap zonder deadline: 10 ms.
-///
-/// Een SEV van een andere core wekt WFI niet (alleen WFE), en "geen timer"
-/// als oneindig lezen is geen zuinigheid maar een hang (idle.go `wakeAt`):
-/// zolang niets anders wekt, pollt de core dus op deze korrel.
-pub const WFI_CAP_NS: u64 = 10_000_000;
-
 /// Nanoseconden per seconde.
 const NS_PER_S: u64 = 1_000_000_000;
 
@@ -195,8 +188,8 @@ pub fn hyp_timer_off() {
 pub enum Mode {
     /// WFE tot werk of de deadline ([`wfe_until`]), met de event-stream
     /// (~1 ms) als klok: de default, want hij wekt op elk silicium dat we
-    /// kennen (behalve de M4). Zonder deadline houdt
-    /// [`WFI_CAP_NS`] de vangrail.
+    /// kennen (behalve de M4). Een poll met een reden: docs/description.md
+    /// §4.11.
     Wfe,
     /// WFI met de fysieke timer op de deadline. Alleen kiezen waar het board
     /// bewezen heeft dat de timer-PPI de WFI wekt: een slaap die niet wekt
@@ -348,10 +341,8 @@ impl ArmSleeper {
                 // interrupt tussen de toets en de WFE eindigt in een
                 // exception return, en die zet het event-register.
                 arch::restore(daif);
-                let cap = now.saturating_add(WFI_CAP_NS);
-                let u = until.map_or(cap, |u| u.min(cap));
                 wfe_until(
-                    deadline_ticks(now, u, self.hz),
+                    deadline_ticks(now, until.unwrap_or(u64::MAX), self.hz),
                     ready,
                     &mut arch::wfe,
                     &arch::counter,
@@ -366,9 +357,11 @@ impl ArmSleeper {
                     arch::restore(daif);
                     return 0;
                 }
-                let cap = now.saturating_add(WFI_CAP_NS);
-                let u = until.map_or(cap, |u| u.min(cap));
-                let slept = arch::wfi_until(deadline_ticks(now, u, self.hz));
+                // Geen deadline: alleen een interrupt wekt (de executor
+                // heeft altijd een timer, de tik van 1 s), geen vangrail
+                // ernaast (docs/sequence-hopos.md §13.3).
+                let slept =
+                    arch::wfi_until(deadline_ticks(now, until.unwrap_or(u64::MAX), self.hz));
                 arch::restore(daif);
                 slept
             }

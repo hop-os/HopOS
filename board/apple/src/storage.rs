@@ -22,6 +22,12 @@
 //!    Lezen mag de hele schijf (de GPT); schrijven weigert de driver buiten
 //!    het venster.
 //!
+//! De lijnen (docs/sequence-hopos.md §14.1 O3, [`wire_lines`]): de
+//! completion van de NVMe en de ontvangst van de mailbox van de
+//! coprocessor (die wacht op een bevestiging vóór hij verder DMA doet),
+//! allebei op de AIC, allebei vastgehouden tot de driver ze bediende
+//! (`cpu::irq::enable_held`). ONGETOETST op ijzer.
+//!
 //! De thermometer is de SMC ([`temp_milli_c`]). Welke sleutel de
 //! temperatuur draagt, staat nergens en verschilt per machine; eerst de
 //! namen van deze generatie, anders de warmste `T`-sleutel. Alleen met
@@ -31,13 +37,16 @@
 
 use crate::{BLK_DMA, fwinfo, pmgr};
 use board::Error;
+use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use cpu::idle::now;
+use cpu::irq::Line;
 use cpu::println;
 use dev::Pa;
 use driver_nvme::apple::{self as ans, Ans, Config, Coprocessor};
 use driver_rtkit::{Rtkit, ignore, sart::Sart};
 use driver_smc::{Smc, key};
+use sync::Signal;
 
 /// De ANS-coprocessor voor `driver_nvme::apple`, op RTKit.
 pub struct AnsRtkit(pub Rtkit);
@@ -47,8 +56,18 @@ impl Coprocessor for AnsRtkit {
     fn boot(&mut self) -> Result<(), Self::Error> {
         self.0.boot(&mut ignore)
     }
+    /// De mailbox leeg, en daarna de lijnen weer open ([`wire_lines`]):
+    /// de driver roept dit bij elke submit en bij elke bel zolang er iets
+    /// loopt.
     fn service(&mut self) -> Result<(), Self::Error> {
-        self.0.poll(&mut ignore).map(drop)
+        let r = self.0.poll(&mut ignore).map(drop);
+        for l in &ANS_LINES {
+            match l.load(Relaxed) {
+                0 => {}
+                n => cpu::irq::release(Line(n)),
+            }
+        }
+        r
     }
     fn sleep(&mut self) -> Result<(), Self::Error> {
         self.0.sleep(&mut ignore)
@@ -86,6 +105,66 @@ const _: () = {
 };
 
 static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// De bel van de schijf: de completion van de NVMe en de ontvangst van de
+/// mailbox luiden hem, de wachter van `blkdev::Queue` slaapt erop.
+static DISK_BELL: Signal = Signal::new();
+
+/// De AIC-lijnen van de ANS die [`AnsRtkit::service`] weer opent: de
+/// ontvangst van de mailbox en de NVMe; 0 = (nog) niet bedraad.
+static ANS_LINES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
+/// Hoe lang een stille ANS stil moet blijven na het aanzetten van zijn
+/// lijnen: een lijn die dan al vuurt, is niet de onze.
+const QUIET_NS: u64 = 1_000_000;
+
+/// Zet de ANS op zijn lijnen: uit `/arm-io/ans` "interrupts", in de
+/// volgorde die Linux' devicetree van de M1 er ook heeft (t8103.dtsi): de
+/// vier van de mailbox (send-empty, send-not-empty, recv-empty,
+/// recv-not-empty) en daarna die van de NVMe. Wij nemen recv-not-empty
+/// (woord 3) en de laatste. Beide zijn level en alleen de driver laat ze
+/// zakken (de CQ-deurbel, de mailbox leeglezen): de dispatch houdt ze
+/// dicht tot [`AnsRtkit::service`]. Daarna de toets: een idle ANS met een
+/// lege mailbox vuurt niet. ONGETOETST op ijzer: de volgorde is die van de
+/// M1, op de M4 niet gezien.
+fn wire_lines(ints: &[u8], disk: &mut Disk) -> Result<(), Error> {
+    let word = |i: usize| {
+        let w = ints.get(i * 4..i * 4 + 4)?;
+        Some(u32::from_le_bytes(w.try_into().ok()?))
+    };
+    let n = ints.len() / 4;
+    let (Some(mbox), Some(nvme)) = (word(3), n.checked_sub(1).and_then(word)) else {
+        return Err(Error::Irq("/arm-io/ans has fewer than four interrupts"));
+    };
+    if n < 5 {
+        return Err(Error::Irq("/arm-io/ans has fewer than five interrupts"));
+    }
+    for (slot, n) in ANS_LINES.iter().zip([mbox, nvme]) {
+        cpu::irq::enable_held(Line(n), &DISK_BELL)
+            .map_err(|_| Error::Irq("the AIC refused an ANS line"))?;
+        slot.store(n, Relaxed);
+    }
+    disk.coprocessor().service().map_err(|e| {
+        println!("disk: ans: {e}");
+        Error::Disk("the ANS mailbox failed")
+    })?;
+    let _ = DISK_BELL.take();
+    if crate::irq::hits_within(&DISK_BELL, QUIET_NS) > 0 {
+        println!(
+            "disk: ans lines {mbox} and {nvme} of {n}: one fires on an idle ANS HOPOS_ANS_IRQ"
+        );
+        return Err(Error::Irq("an ANS line fires on an idle ANS"));
+    }
+    disk.coprocessor()
+        .service()
+        .map_err(|_| Error::Disk("the ANS mailbox failed"))?;
+    disk.set_irq(&DISK_BELL);
+    println!(
+        "disk: ans on AIC lines {mbox} (mailbox recv) and {nvme} (NVMe), words 3 and {} of {n} HOPOS_ANS_IRQ",
+        n - 1
+    );
+    Ok(())
+}
 
 /// Eén poging: de mailbox, de controller, en `start`. Weigert `start`, dan
 /// gaat de coprocessor eerst netjes in slaap (m1n1's volgorde: slaap, dán
@@ -211,6 +290,7 @@ pub(crate) fn probe_disk(off: bool) -> Result<Option<Disk>, Error> {
         first + count - 1,
         (count * ans::BLOCK) >> 20
     );
+    wire_lines(t.prop(node, "interrupts").unwrap_or(&[]), &mut disk)?;
     Ok(Some(disk))
 }
 

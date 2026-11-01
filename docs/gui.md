@@ -138,12 +138,12 @@ geeft `GuiGrants` mee in de gui-smaak en `NoGrants` kaal. Past de env met de
 `FB_*`-regels niet op de control-page (`CTRL_ENV_MAX`), dan gaat de grant
 terug en draait de app headless (`HOPOS_FB_ENV` of `HOPOS_GRANT_ENV`).
 
-Op QEMU: `GUI=display sh tools/qemu-test.sh` zet de display-app op de
-staging met `hopos.appenv=GUI=display,DISPLAY_QUIT=27` en de USB-apparaten
-erbij, en loopt de hele levensloop: per slot `HOPOS_FB_GRANT` en
-`HOPOS_FB_ARM`, de app op het glas en aan de invoer, en na Escape
-`HOPOS_FB_RELEASE` (de console terug) en een tweede houder in slot 2 (zie
-de checklist).
+Op QEMU: `GUI=display sh tools/qemu-test.sh` laat Hop de display-app
+plaatsen (een job met `"env":{"GUI":"display","DISPLAY_QUIT":"27"}`; de kern
+plaatst sinds 01-11 alleen Hop, O7), met de USB-apparaten erbij, en loopt de
+hele levensloop: per ronde `HOPOS_FB_GRANT` en `HOPOS_FB_ARM`, de app op het
+glas en aan de invoer, en na Escape `HOPOS_FB_RELEASE` (de console terug) en
+een tweede houder: Hop herstart de service (zie de checklist).
 
 ## De display-app
 
@@ -195,11 +195,11 @@ Bouwen en draaien:
 
 ```sh
 cargo build --release --target aarch64-unknown-none-softfloat -p display
-# QEMU met een venster: klik erin en typ.
-GUI=display APP=display APPENV=GUI=display image/qemu-run.sh
+# QEMU met een venster en Hop: klik erin en typ, na de job hieronder.
+GUI=display ARTIFACT=display image/qemu-run.sh
 ```
 
-Met Hop (de jobspec van welcome, met het glas erbij):
+De jobspec (die van welcome, met het glas erbij):
 
 ```json
 {"name":"display","driver":"hop",
@@ -281,7 +281,9 @@ Elke stap met de consoleregel die erbij hoort.
 - [x] De levensloop: `sendkey esc`, `HOPOS_DISPLAY_QUIT`, `HOPOS_SLOT_DONE
   slot=1 exit=0`, `HOPOS_FB_RELEASE`; de kern plaatst hem opnieuw in slot
   2: `HOPOS_FB_GRANT`, `input: 10.100.0.3 connected`, en na een toets en
-  een beweging `slot 2: ... HOPOS_DISPLAY_INPUT keys=1 moves=1`.
+  een beweging `slot 2: ... HOPOS_DISPLAY_INPUT keys=1 moves=1`. Sinds
+  01-11 plaatst Hop de app (O7): beide rondes in slot 2, de tweede is de
+  herstart van de service door Hop.
 
 **UEFI op QEMU (EDK2)**
 

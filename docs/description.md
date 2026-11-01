@@ -70,8 +70,8 @@ net kent geen kern. Alleen hopos kent alles en verbindt het.
 - **Faalbaar alloceren.** `BoundedVec` geeft `Full`, `try_reserve` in plaats
   van `push`, de executor boxt met `try_box`.
 - **Een gebeurtenis, geen klok.** Taken slapen op een `Signal` of een
-  deadline, niet in een poll-lus (`docs/apps.md`). Waar dat niet lukt is het
-  een kandidaat in §8.
+  deadline, niet in een poll-lus (`docs/apps.md`). Wat toch pollt, staat met
+  zijn reden in §4.11; verder pollt niets.
 
 ## 4. Van stroom aan tot een app op de draad
 
@@ -329,8 +329,9 @@ geadopteerd werd, houdt zijn root.
 `OP_SYNC` is een bevestigde barrière (`docs/storage-sync.md`). De committer
 legt elke 10 s vast, of zodra een slot stopt.
 
-Onder hopfs: `blkdev::Queue` (blk-mq in het klein, één pacer pollt het
-device en wekt de anderen) over nvme of virtioblk.
+Onder hopfs: `blkdev::Queue` (blk-mq in het klein, één pacer kijkt op de
+bel van de lijn naar het device en wekt de anderen) over nvme of
+virtioblk.
 
 ### 4.9 De kern-flip
 
@@ -377,6 +378,46 @@ procedure).
   Een gevuld venster wint van de oude bronnen (ESP-`hopos.cfg`, initrd,
   0xF000 op de M4, bootargs). `kern/src/nodecfg.rs` maakt er de env van Hop
   van.
+
+### 4.11 Wat pollt en waarom
+
+De kern wacht op een bel (R1 van docs/sequence-hopos.md §13.1): de NIC, de
+kick van een app-core (het interne LAN: de TX-ringen en de outboxen), de
+schijf, en de timer van een deadline. Elke NIC en elke schijf heeft een
+lijn (§14.1 O3); een board dat er geen bedraadt, start niet. Daarnaast
+wacht elke wacht hoogstens zijn termijn (de 5 s van een blok-opdracht,
+`blkdev::TERM`), en dat is geen poll. Wat wél op een klok kijkt in plaats
+van op een bel, staat hier, met de reden. De code verwijst bij elke poll
+naar deze tabel. Verder pollt niets (O4, 01-11).
+
+| Wat | Waar | Ritme | Waarom geen bel |
+| --- | --- | --- | --- |
+| De USB-invoer | `gui/usbin` (`POLL_INTERVAL_NS`), alleen met `gui` | 4 ms | Besluit O4: een optioneel vlak, en een poll houdt de flip eenvoudiger dan een extra lijn (xHCI) |
+| De codec | `kern/src/codecabi.rs` (`POLL_PUMP`), alleen met `media` | 1 ms, alleen tijdens een wachtende `OP_CODEC_POLL` | Besluit O4: de engine heeft hier geen interrupt (`media/mve`); de VPU-lijn (intid 358 op de O6N) vraagt ijzer |
+| Een frame dat de NIC niet nam | `net/src/pump.rs` (`NIC_POLL`) | 300 µs, alleen zolang de pomp een frame vasthoudt | Niet elke NIC-driver zet een interrupt op een vrijgekomen TX-descriptor (virtio wel, de rest is niet nagegaan). Open: per driver de TX-completion als lijn, dan kan dit weg |
+| De slaap van de kern op de LicheeRV | `cpu::riscv::idle::WFI_CAP_NS` (`board/licheerv`) | hoogstens 2 ms | IJzer: op de SG2002 wekt een `wfi` op `mtimecmp` niet betrouwbaar (01-08), en de C906L heeft geen bel naar de C906B. Na elke slaap kijkt de deur in de ringen en de outboxen |
+| De slaap van de kern op WFE | `cpu::idle::Mode::Wfe`: de Pi's, de M4 als de timer-FIQ zijn core niet bereikt | de event-stream, ~1 ms | IJzer: WFI op de timer is op de Pi's niet gemeten, en op de M4 bereikt de timer-FIQ een door de kern opgebrachte core niet (29-08). Een slaap die niet wekt is een hang |
+| De wekker van de app-cores op de M4 | `hopos/src/cage.rs` (`WAKE_EVERY`) | 1 ms | IJzer: een app-core die in de WFI van de switcher slaapt, wekt geen eigen timer-FIQ (02-09); de kern is de enige die hem wekt |
+| De p-states op de M4 | `board/apple/src/lib.rs` (`PSTATE_WATCH_EVERY`) | 2 s | Een meting, alleen-lezen: de APSC heeft geen melding naar ons |
+
+Geen poll maar een klok, omdat de klok het werk is: het aaien van de
+watchdog (2 s), `HOPOS_TICK` (1 s), de telemetrie (1 s), de flow-expiry van
+de NAT (30 s), de commit van hopfs (`COMMIT_EVERY`), de meetregel van de
+schijf (10 s), de timers van TCP en de vernieuwing van de DHCP-lease.
+
+Nog een poll, bij een andere agent van 01-11 (§14.8); weg of naar een bel,
+of anders deze tabel in:
+
+| Wat | Waar | Ritme | Eigenaar |
+| --- | --- | --- | --- |
+| De stop wacht op een stille context | `kern/src/slots.rs` (`STOP_POLL`) | 10 ms | D (de exit-kick bestaat nu: de stop kan op de kick wachten) |
+| Hop bewaken, en wachten tot hij weg is | `hopos/src/slots.rs` (`HOP_WATCH`, `LEAVE_POLL`) | 1 s, 50 ms | A/D (§13.4) |
+| De TCP-lezers van de console | `kern/src/conport.rs` (`POLL`) | 100 ms | B (§14.5) |
+| De UART-pomp zolang de UART achterloopt | `hopos/src/conport.rs` (`UART_STEP`) | 1 ms | B (§14.5) |
+| De input-listener op de stack | `hopos/src/net.rs` (`STACK_RETRY`) | 100 ms | A/C (§13.3) |
+| De lease-lus, `nic_retry` | `hopos/src/net.rs`, `main.rs` | 5 s | A (§13.3) |
+| De slaap van een app-core in de yield | de switcher (`SCHED_SLEEP_CAP`, 10 ms op QEMU riscv), §8.12 | 10 ms | open: de kern zet bij een stop de wek-latch van de keten |
+| De beurt van een bewoner van de OS-core | `cpu::el2::TURN_CAP_NS` | 10 ms | open: het kwantum van de gedeelde OS-core, zie het rapport van E |
 
 ## 5. De lagen één voor één
 

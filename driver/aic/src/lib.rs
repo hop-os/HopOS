@@ -344,6 +344,10 @@ impl Controller for Aic {
     fn complete(&self, l: Line) {
         self.write_bit(Table::MaskClr, l.0);
     }
+
+    /// Niets: de claim maskeerde de lijn al, en `complete` zou hem weer
+    /// openen. `enable` zet hem open.
+    fn hold(&self, _l: Line) {}
 }
 
 #[cfg(test)]

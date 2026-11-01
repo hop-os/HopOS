@@ -74,8 +74,8 @@ impl Clint {
 
     /// De probe van het eigen hart, zoals de Go-kern hem deed (`ProbeCLINT`):
     /// houdt `mtimecmp` een waarde vast en leest hij hem terug? Het vuren
-    /// zelf bewijst de eerste slaap (die met een vangrail van
-    /// [`super::idle::WFI_CAP_NS`] loopt, dus een wekker die niet vuurt is
+    /// zelf bewijst de eerste slaap (op de LicheeRV met de grens van
+    /// [`super::idle::WFI_CAP_NS`], dus een wekker die niet vuurt is daar
     /// een trage node en geen dode).
     ///
     /// WAAROM EEN PROBE: op 30-07 bleek de helft van de SiFive-indeling op dit

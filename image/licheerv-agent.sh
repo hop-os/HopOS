@@ -30,11 +30,6 @@
 #                                          → met die features van hopos
 #                                            achter board-licheerv (zoals
 #                                            uefi-run.sh)
-#   APP=appspike image/licheerv-agent.sh   → met appspike in de kern
-#                                            gebakken als app (ROLE=app): de
-#                                            kern plaatst hem bij de boot
-#                                            twee keer op de C906L (het
-#                                            ABI-bewijs op ijzer)
 #
 # hopos.cfg: de FSBL geeft geen DTB en geen bootargs, en de kern leest (nog)
 # geen SD-kaart, dus de config gaat IN het image, in het venster van 16 KiB

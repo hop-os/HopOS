@@ -435,7 +435,9 @@ global_asm!(
     b .L\p\()_sleep
 
 // exited: HVC 0, de coöperatieve exit. Dead en meteen roteren, zonder slaap:
-// er is net een plek vrij en een boot-pending buur mag direct.
+// er is net een plek vrij en een boot-pending buur mag direct. De kick zegt
+// het de kern: zijn servicer leest de laatste woorden en ziet de dode
+// context zonder te pollen (docs/sequence-hopos.md §13.3).
 .L\p\()_exited:
     ldr x0, [sp, #{sp_current}]
     ldr x1, [sp, #{sp_s2pa}]
@@ -443,6 +445,11 @@ global_asm!(
     mov x2, #{st_dead}
     str x2, [x1, #{state}]
     dsb sy
+    .if \apple
+    hopos_el2_kick_os_apple
+    .else
+    hopos_el2_kick_os
+    .endif
     b .L\p\()_rotate
 
 // fault: elke andere vector, een stage-2-fault, een getrapte SMC, of HOP's
@@ -465,6 +472,11 @@ global_asm!(
     mov x2, #{st_dead}
     str x2, [x1, #{state}]
     dsb sy
+    .if \apple
+    hopos_el2_kick_os_apple
+    .else
+    hopos_el2_kick_os
+    .endif
     b .L\p\()_rotate
 
 // sleep: de idle-slaap van de core, één WFE op EL2. De event stream van de

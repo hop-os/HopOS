@@ -31,27 +31,29 @@
 #                   een NIEUWE regel HOPOS_SYSTEM_REFUSED. EOF alleen bewijst
 #                   niets (slirp sluit ook als de gast niet luistert), de
 #                   marker wel. Drie keer, op willekeurige momenten van de
-#                   keten: meteen na HOPOS_SYSTEM_UP, zodra de app van slot 1
+#                   keten: meteen na HOPOS_SYSTEM_UP, zodra de app van slot 2
 #                   zijn netwerk heeft (vlak voor zijn NET-toets, die dan met
 #                   de toets van buiten samenvalt), en na de stop van slot 2
 #                   (bewijst dat de listener na de keten niet hangt).
 #   het zaad        HOPOS_RNG_SLOTS source=jitter (de kern zaait zijn DRBG
-#                   uit jitter, virt heeft geen TRNG) en in slot 1
+#                   uit jitter, virt heeft geen TRNG) en in slot 2
 #                   "applib: rng seed from the kernel (gen N) is jitter ...
 #                   HOPOS_APP_RNG source=jitter": de app kreeg zaad op zijn
 #                   control-page (CTRL_RNG_SEED), niet "geen zaad";
-#   appspike        het ABI-bewijs: appspike (door QEMU gestaged, zie
-#                   image/qemu-run.sh; zonder rolwoord op STAGE_ROLE_PA is
-#                   het een gewone app, dus plaatst de kern hem zelf; de
-#                   kring met Hop staat in tools/qemu-test-hop.sh) draait in slot 1 op een app-core in
-#                   zijn stage-2-kooi, al zijn toetsen groen via de servicer
-#                   op de console (HOPOS_APPSPIKE_DONE pass=9 fail=0, met
+#   Hop en appspike het ABI-bewijs langs de echte weg (sinds 01-11,
+#                   docs/sequence-hopos.md §14.1 O7: de kern plaatst alleen
+#                   Hop): Hop staat gestaged in slot 1 (HOP_UP, HOP_LEADER),
+#                   en van buiten gaat er één jobspec naar zijn leader. Hop
+#                   haalt appspike van een artifact-server op de host en
+#                   plaatst hem in slot 2 op een app-core in zijn
+#                   stage-2-kooi, al zijn toetsen groen via de servicer op de
+#                   console (HOPOS_APPSPIKE_DONE pass=9 fail=0, met
 #                   HOPOS_APPSPIKE_FS: schrijven, stat, lezen, lijst en weg in
-#                   de eigen root via de system-API naar hopfs), en de kern
-#                   ziet exit 0 (HOPOS_SLOT_DONE); daarna hetzelfde in slot 2
-#                   op de warm geparkeerde core, met zijn logregel over de
-#                   system-API (die bleef vóór 29-09 hangen achter de
-#                   half-open verbinding van slot 1).
+#                   de eigen root via de system-API naar hopfs), en de
+#                   bevestigde stop (HOPOS_SLOT_STOPPED). appspike stopt met
+#                   code 0 en Hop herstart een service: de tweede ronde loopt
+#                   op de warm geparkeerde core (twee keer
+#                   HOPOS_APPSPIKE_DONE).
 #
 # Faalt er een, dan drukt het script de hele console af en faalt: rood is
 # rood. Een HOPOS_PANIC of HOPOS_EXCEPTION is meteen rood.
@@ -66,9 +68,9 @@
 #                               USB-invoer (docs/gui.md): QEMU krijgt ook
 #                               `-device qemu-xhci` met `usb-kbd` en
 #                               `usb-mouse`, en in plaats van appspike
-#                               staat apps/display op de staging, met
-#                               `GUI=display,DISPLAY_QUIT=27` in zijn env
-#                               (bootparameter hopos.appenv). Per slot
+#                               plaatst Hop apps/display, met
+#                               `GUI=display` en `DISPLAY_QUIT=27` in de
+#                               env van de job. Per ronde
 #                               eist het script HOPOS_FB_GRANT (de console
 #                               gaat van het glas), HOPOS_FB_ARM (het
 #                               venster in de kooi), HOPOS_DISPLAY_UP en
@@ -76,14 +78,14 @@
 #                               input-listener van de kern); dan een toets
 #                               en een muisbeweging via de monitor
 #                               (`sendkey`, `mouse_move`) en
-#                               HOPOS_DISPLAY_INPUT keys>=1 moves>=1. In
-#                               slot 1 volgt een screendump waarop de app
-#                               tekende (zijn achtergrond, tekst en cursor;
-#                               niet de console), dan Escape: de app stopt
-#                               (HOPOS_DISPLAY_QUIT, exit 0), de grant gaat
-#                               terug (HOPOS_FB_RELEASE), en de kern plaatst
-#                               hem opnieuw in slot 2, die het glas en de
-#                               invoer overneemt (een nieuwe verbinding van
+#                               HOPOS_DISPLAY_INPUT keys>=1 moves>=1. Na de
+#                               eerste ronde volgt een screendump waarop de
+#                               app tekende (zijn achtergrond, tekst en
+#                               cursor; niet de console), dan Escape: de app
+#                               stopt (HOPOS_DISPLAY_QUIT, exit 0), de grant
+#                               gaat terug (HOPOS_FB_RELEASE), en Hop
+#                               herstart hem, die het glas en de invoer
+#                               overneemt (een tweede verbinding van
 #                               10.100.0.3). De slotscreendump toont weer
 #                               de app.
 #   SHOT_KEEP=pad.ppm           bewaart die screendump (met GUI=1 of display)
@@ -100,15 +102,15 @@ GUI="${GUI:-0}"
 FEATURES=board-qemuvirt
 QGUI="-monitor none"
 QUSB=""
-APPEND=""
-# Het gestagede image: appspike (het ABI-bewijs), of met GUI=display de
+# De app van de job: appspike (het ABI-bewijs), of met GUI=display de
 # display-app.
 APP_PKG=appspike
+APP_ENV=""
 case "$GUI" in
 0 | 1) ;;
 display)
 	APP_PKG=display
-	APPEND="hopos.appenv=GUI=display,DISPLAY_QUIT=27"
+	APP_ENV=',"env":{"GUI":"display","DISPLAY_QUIT":"27"}'
 	QUSB="-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0"
 	;;
 *)
@@ -117,7 +119,7 @@ display)
 	;;
 esac
 # De display-keten heeft twee plaatsingen met invoer ertussen: iets meer tijd.
-if [ "$GUI" = display ]; then TIMEOUT="${TIMEOUT:-45}"; else TIMEOUT="${TIMEOUT:-30}"; fi
+if [ "$GUI" = display ]; then TIMEOUT="${TIMEOUT:-75}"; else TIMEOUT="${TIMEOUT:-60}"; fi
 scratch qemu
 KCFG="$ART/kern"
 CFGWIN="$ART/cfg"
@@ -130,7 +132,8 @@ if [ "$GUI" != 0 ]; then
 	QGUI="-device ramfb -monitor unix:$MON,server,nowait"
 	trap 'cleanup; rm -f "$MON"' EXIT INT TERM
 fi
-ports SYS # de host-kant van de hostfwd naar de system-API
+# De system-API, de agent en de leader van Hop, en de artifact-server.
+ports SYS AGENT LEADER ART
 # Een verse, ijle schijf van 64 MiB: hopfs begint leeg.
 dd if=/dev/zero of="$DISK" bs=1048576 count=0 seek=64 2>/dev/null
 
@@ -145,11 +148,15 @@ printf '# de bordlaag erachter: de laatste waarde wint\nhopos.hop.sharegroup=hop
 cp "$DIR/target/$TARGET/release/hopos" "$KCFG"
 python3 "$DIR/image/hopcfg.py" set "$KCFG" "$CFGWIN" "$CFGBORD"
 KERNEL="$KCFG"
-echo "== bouwen: $APP_PKG"
-cargo build --quiet --release --target "$TARGET" -p "$APP_PKG" 2>/dev/null ||
-	cargo build --release --target "$TARGET" -p "$APP_PKG"
-SPIKE="$DIR/target/$TARGET/release/$APP_PKG"
-SPIKE_SIZE=$(wc -c <"$SPIKE" | tr -d ' ')
+echo "== bouwen: $APP_PKG en agentd-hopos"
+apps "$APP_PKG"
+hop_elf
+# Hop op de staging, zonder debug-info, met de rol Hop (1).
+strip_elf "$HOP_ELF" "$ART/hop.elf"
+fits "$ART/hop.elf" agentd-hopos
+HOP_SIZE=$(wc -c <"$ART/hop.elf" | tr -d ' ')
+serve
+JOB='{"name":"'"$APP_PKG"'","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/'"$APP_PKG"'.elf"}],"memory_limit":33554432'"$APP_ENV"'}'
 SLOT_MARKS="HOPOS_DISK_UP model=virtio-blk blocks=131072|HOPOS_FS_UP fresh=1"
 SLOT_MARKS="$SLOT_MARKS|cfg: hopos.cfg from the window in the kernel image, [0-9]+ bytes HOPOS_CFG_WINDOW|slots: Hop in the sharegroup hop \(hopos.hop.sharegroup\) HOPOS_HOP_GROUP"
 # De acties op de monitor (GUI=display), elk op zijn moment (grep -E), in
@@ -160,38 +167,42 @@ if [ "$GUI" = display ]; then
 	# De USB-keten van de kern: de qemu-xhci op PCIe, beide apparaten, de
 	# listener op 10.100.0.1:7879.
 	SLOT_MARKS="$SLOT_MARKS|usb: xHCI 1b36:000d at .* on PCIe|HOPOS_USB_UP|usb: qemu-xhci port [0-9]+: keyboard|usb: qemu-xhci port [0-9]+: mouse|HOPOS_INPUT_UP"
-	# Per slot: het glas, de app erop, zijn verbinding met de invoer, en
-	# een toets en een beweging die hem bereiken.
-	for i in 1 2; do
-		SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=$i|slot $i: fb granted .*HOPOS_FB_GRANT|slot $i: fb window mapped at ipa .*HOPOS_FB_ARM|slot $i: display: window 0x20000000.* mapped Normal-NC|slot $i: display: glass 1280x800 .*HOPOS_DISPLAY_UP w=1280 h=800|input: 10.100.0.$((i + 1)) connected .*HOPOS_INPUT_CONN|slot $i: display: input stream .*HOPOS_DISPLAY_CONN|slot $i: display: .*HOPOS_DISPLAY_INPUT keys=[1-9][0-9]* moves=[1-9]"
-	done
-	# Slot 1 stopt op Escape: exit 0, en het glas terug aan de console.
-	SLOT_MARKS="$SLOT_MARKS|slot 1: display: quit key 27.*HOPOS_DISPLAY_QUIT|HOPOS_SLOT_DONE slot=1 exit=0|slot 1: fb grant released, console back on glass HOPOS_FB_RELEASE"
-	ACT_AT="slot 1: .*HOPOS_DISPLAY_CONN;sendkey a;mouse_move 40 30"
-	ACT_AT="$ACT_AT|slot 1: .*HOPOS_DISPLAY_INPUT keys=[1-9][0-9]* moves=[1-9];shot;sendkey esc"
-	ACT_AT="$ACT_AT|slot 2: .*HOPOS_DISPLAY_CONN;sendkey b;mouse_move -20 10"
+	# Per ronde (de eerste en de herstart door Hop, allebei in slot 2):
+	# het glas, de app erop, zijn verbinding met de invoer, en een toets en
+	# een beweging die hem bereiken.
+	SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=2|slot 2: fb granted .*HOPOS_FB_GRANT|slot 2: fb window mapped at ipa .*HOPOS_FB_ARM|slot 2: display: window 0x20000000.* mapped Normal-NC|slot 2: display: glass 1280x800 .*HOPOS_DISPLAY_UP w=1280 h=800|input: 10.100.0.3 connected .*HOPOS_INPUT_CONN|slot 2: display: input stream .*HOPOS_DISPLAY_CONN|slot 2: display: .*HOPOS_DISPLAY_INPUT keys=[1-9][0-9]* moves=[1-9]"
+	# De eerste ronde stopt op Escape: exit 0, en het glas terug aan de
+	# console; Hop herstart de service.
+	SLOT_MARKS="$SLOT_MARKS|slot 2: display: quit key 27.*HOPOS_DISPLAY_QUIT|slot 2: fb grant released, console back on glass HOPOS_FB_RELEASE|slot 2: stopped.*HOPOS_SLOT_STOPPED"
+	# Een moment "2*patroon" is de tweede keer dat het patroon er staat.
+	ACT_AT="slot 2: .*HOPOS_DISPLAY_CONN;sendkey a;mouse_move 40 30"
+	ACT_AT="$ACT_AT|slot 2: .*HOPOS_DISPLAY_INPUT keys=[1-9][0-9]* moves=[1-9];shot;sendkey esc"
+	ACT_AT="$ACT_AT|2*slot 2: .*HOPOS_DISPLAY_CONN;sendkey b;mouse_move -20 10"
+	# De tweede ronde: weer de invoer, nu op de herstarte app.
+	TWICE="slot 2: .*HOPOS_DISPLAY_CONN|slot 2: display: .*HOPOS_DISPLAY_INPUT keys=[1-9][0-9]* moves=[1-9]"
 	# De momenten van de toets van buiten (grep -E), in volgorde.
-	PROBE_AT="HOPOS_SYSTEM_UP|slot 1: .*HOPOS_APPNET_UP|slot 2: .*HOPOS_DISPLAY_CONN"
+	PROBE_AT="HOPOS_SYSTEM_UP|slot 2: .*HOPOS_DISPLAY_CONN"
 else
 	# De markers van het ABI-bewijs (grep -E): het aantal toetsen groeit met
 	# appspike, dus "alles groen" is fail=0.
 	# Het zaad (hopos/src/seed.rs, applib::rand): virt heeft geen TRNG
 	# (cortex-a53, geen EL3), dus de kern zaait uit jitter en zegt dat, en
 	# de app ziet zaad uit jitter, niet "geen zaad".
-	SLOT_MARKS="$SLOT_MARKS|trng: WARNING the kernel DRBG is seeded from timer jitter.*HOPOS_RNG_INSECURE|HOPOS_RNG_SLOTS source=jitter|slot 1: applib: rng seed from the kernel \(gen [0-9]+\) is jitter.*HOPOS_APP_RNG source=jitter"
-	SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=1|slot 1: HOPOS_APPSPIKE_NETLOG|slot 1: HOPOS_APPSPIKE_FS ok|slot 1: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=1 exit=0|slot 1: stopped.*HOPOS_SLOT_STOPPED"
-	SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=2|slot 2: HOPOS_APPSPIKE_NETLOG|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=2 exit=0|slot 2: stopped.*HOPOS_SLOT_STOPPED"
+	SLOT_MARKS="$SLOT_MARKS|trng: WARNING the kernel DRBG is seeded from timer jitter.*HOPOS_RNG_INSECURE|HOPOS_RNG_SLOTS source=jitter|slot 2: applib: rng seed from the kernel \(gen [0-9]+\) is jitter.*HOPOS_APP_RNG source=jitter"
+	SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=2|slot 2: HOPOS_APPSPIKE_NETLOG|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|slot 2: stopped.*HOPOS_SLOT_STOPPED"
+	# De tweede ronde (Hop herstart de service) op de warm geparkeerde core.
+	TWICE="slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0"
 	# De momenten van de toets van buiten (grep -E), in volgorde.
-	PROBE_AT="HOPOS_SYSTEM_UP|slot 1: .*HOPOS_APPNET_UP|slot 2: stopped.*HOPOS_SLOT_STOPPED"
+	PROBE_AT="HOPOS_SYSTEM_UP|slot 2: .*HOPOS_APPNET_UP|slot 2: stopped.*HOPOS_SLOT_STOPPED"
 fi
 
 echo "== booten op QEMU virt (tot ${TIMEOUT}s)"
 # shellcheck disable=SC2086
 qemu_virt 4 -nographic $QGUI $QUSB \
 	-drive "if=none,format=raw,file=$DISK,id=disk0" \
-	-device "loader,file=$SPIKE,addr=0xb0200000,force-raw=on" \
-	-device "loader,addr=0xb0100000,data=$SPIKE_SIZE,data-len=8" \
-	${APPEND:+-append "$APPEND"} \
+	-device "loader,file=$ART/hop.elf,addr=0xb0200000,force-raw=on" \
+	-device "loader,addr=0xb0100000,data=$HOP_SIZE,data-len=8" \
+	-device "loader,addr=0xb0100008,data=1,data-len=8" \
 	-kernel "$KERNEL" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 
@@ -244,17 +255,42 @@ PY
 # Wachten tot alle markers er zijn en alle toetsen van buiten gedaan,
 # iets roods verschijnt, QEMU stopt, of de tijd op is.
 NEED="HOPOS_BOOT|HOPOS_TICK 3|HOPOS_NIC_UP|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_SYSTEM_REFUSED|HOPOS_WD_CANARY_OK"
+# Hop staat, dan de job naar zijn leader.
+BOOT_MARKS="HOPOS_SYSTEM_UP|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
+NEED="$NEED|$BOOT_MARKS"
+POSTED=""
+# Elk patroon van $TWICE staat er twee keer (de herstart door Hop)?
+twice() {
+	IFS_WAS="$IFS"
+	IFS='|'
+	for m in $TWICE; do
+		[ "$(count "$m")" -ge 2 ] || {
+			IFS="$IFS_WAS"
+			return 1
+		}
+	done
+	IFS="$IFS_WAS"
+}
 ACTS=""
 next_act=1
 nacts=0
 [ -n "$ACT_AT" ] && nacts=$(echo "$ACT_AT" | awk -F'|' '{print NF}')
 elapsed=0
 while :; do
+	# De job naar de leader zodra Hop staat.
+	if [ -z "$POSTED" ] && all "$BOOT_MARKS"; then
+		post_job "$JOB" || break
+	fi
 	# De acties op de monitor, elk op zijn moment.
 	if [ "$next_act" -le "$nacts" ]; then
 		act=$(echo "$ACT_AT" | cut -d'|' -f"$next_act")
 		at="${act%%;*}"
-		if has "$at"; then
+		seen=0
+		case "$at" in
+		2\**) [ "$(count "${at#2?}")" -ge 2 ] && seen=1 ;;
+		*) has "$at" && seen=1 ;;
+		esac
+		if [ "$seen" = 1 ]; then
 			cmds="${act#*;}"
 			IFS_WAS="$IFS"
 			IFS=';'
@@ -283,6 +319,7 @@ while :; do
 	probe_due && continue
 	ok=1
 	all "$NEED|$SLOT_MARKS" || ok=0
+	twice || ok=0
 	probes_left && ok=0
 	[ "$next_act" -le "$nacts" ] && ok=0
 	[ "$ok" = 1 ] && break
@@ -317,6 +354,19 @@ qemu_stop
 
 fail=0
 marks "$NEED" "$SLOT_MARKS"
+if twice; then
+	echo "   ok  de tweede ronde (de herstart door Hop): $TWICE"
+else
+	echo "   ROOD de tweede ronde ontbreekt: $TWICE"
+	fail=1
+fi
+case "$POSTED" in
+*" HTTP 2"*) echo "   ok  POST /v1/jobs:$POSTED" ;;
+*)
+	echo "   ROOD POST /v1/jobs: ${POSTED:-nooit gedaan}"
+	fail=1
+	;;
+esac
 probes_report
 [ -n "$ACTS" ] && echo "${ACTS#?}"
 case "$ACTS" in

@@ -10,7 +10,6 @@
 #                                           image/cfg/default.cfg, apple.cfg
 #                                           en headless.cfg; CFG= zonder pad:
 #                                           een leeg venster)
-#   APP=appspike image/apple-m4.sh          + een app-ELF voor de staging
 #   APP=hop image/apple-m4.sh               + Hop (../hop/hop, rol hop)
 #   image/apple/boot-cycle.sh target/apple-m4/hopos-apple.img [s]
 #                                           → via m1n1's proxy laden en starten

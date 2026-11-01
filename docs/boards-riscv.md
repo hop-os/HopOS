@@ -123,8 +123,9 @@ slot 2: stopped, partition and core released HOPOS_SLOT_STOPPED
 
 "EL3" op de boot-regel is de privilege-modus: 3 = machine mode. De
 `dial_us` (5,4 ms) is hoger dan op arm64 (2,9 ms): een app kan de kern-hart
-nog niet bellen (geen HVC #6-tegenhanger), dus een TX wacht op de failsafe
-van de switch.
+nog niet bellen (geen HVC #6-tegenhanger), dus een TX wachtte op de failsafe
+van de switch. (Sinds 01-11 is de failsafe weg en belt de app met de
+kick-ecall, a7 = 2.)
 
 ### De donor van de LicheeRV
 
@@ -438,10 +439,11 @@ watchdog of de stroom, en de kaart start de oude kern.
   `ETH0_SBD_INTR_O` op NA; daarom staat de kern op de C906B. Daar hangt de
   dwmac aan PLIC-bron 31 (Linux `cv180x.dtsi`
   `SOC_PERIPHERAL_IRQ(15)` = 15 + 16, vendor-DTS 31, TRM "Master RISCV
-  C906" 31 Ethnet0), met de vangrail van 10 ms; dan hoort de kern een app
-  op de failsafe van 1 ms in plaats van de poll, want er is geen bel.
-  `HOPOS_NIC_IRQ` zegt bij boot welke van de twee het werd; NOG NIET OP
-  IJZER (de rolverdeling van punt 11 is de eerste kaart die het toont).
+  C906" 31 Ethnet0). Wil de PLIC hem niet, dan start de NIC niet (01-11,
+  O3). Een app op de C906L hoort de kern na elke slaap van hooguit 2 ms
+  (`WFI_CAP_NS`), want er is geen bel van de C906L naar de C906B.
+  `HOPOS_NIC_IRQ` zegt het bij boot; NOG NIET OP IJZER (de rolverdeling
+  van punt 11 is de eerste kaart die het toont).
 - **SMP-apps** op riscv64: één core per bewoner. Meerdere bewoners op één
   hart kan wel (sinds 3.0.3 telt een kooi niet als core): de switcher
   bewaart sinds 02-10 f0..f31 en `fcsr`, en de kill-tick is op een gedeeld

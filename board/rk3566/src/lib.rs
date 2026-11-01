@@ -719,11 +719,12 @@ impl Board for Rk3566 {
                     cpu::println!("net: {e} HOPOS_NIC_FAIL");
                     Error::Nic("dwmac4 start failed")
                 })?;
-        // 9. De lijn. Een lijn die niet aan wil, laat de NIC pollen.
+        // 9. De lijn. Een lijn die niet aan wil, is een fout: de pomp pollt
+        // niet (docs/sequence-hopos.md §14.1 O3).
         NIC_ACK.set(nic.irq_ack());
-        if cpu::irq::enable(Line(GMAC1_INTID), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
-            nic.set_irq(&NIC_BELL);
-        }
+        cpu::irq::enable(Line(GMAC1_INTID), Some(nic_ack), Some(&NIC_BELL))
+            .map_err(|_| Error::Irq("dwmac4 line refused"))?;
+        nic.set_irq(&NIC_BELL);
         cpu::println!(
             "net: dwmac4 at {:#x} version {version:#x}, PHY {phy}, link {link}, intid {GMAC1_INTID}, rings {}+{} in {:#x}",
             GMAC1.0,

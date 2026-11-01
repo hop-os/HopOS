@@ -214,8 +214,6 @@ pub enum Wired {
         /// De INTID.
         intid: u32,
     },
-    /// Geen lijn: pollen, met de reden.
-    Polled(&'static str),
 }
 
 impl core::fmt::Display for Wired {
@@ -225,15 +223,15 @@ impl core::fmt::Display for Wired {
                 write!(f, "MSI-X via the ITS, LPI {lpi} (DeviceID {dev_id:#x})")
             }
             Self::Intx { intid } => write!(f, "INTx on INTID {intid} (SPI {})", intid - 32),
-            Self::Polled(why) => write!(f, "polled ({why})"),
         }
     }
 }
 
-/// Wat `hopos.nicirq` vraagt.
+/// Wat `hopos.nicirq` vraagt. Er is geen "pollen": elke NIC heeft een lijn
+/// (docs/sequence-hopos.md §14.1 O3).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// MSI-X, anders INTx, anders pollen.
+    /// MSI-X, anders INTx.
     Auto,
     /// Alleen MSI-X.
     Msix,
@@ -241,13 +239,11 @@ pub enum Mode {
     Intx,
     /// Deze INTID als INTx (bordkennis die de DSDT niet heeft).
     Line(u32),
-    /// Pollen.
-    Off,
 }
 
 impl Mode {
     /// De modus uit de configwaarde; leeg = `dflt`. Een onzinwaarde is
-    /// pollen, luid (de aanroeper meldt hem).
+    /// `dflt`, luid (de aanroeper meldt hem).
     #[must_use]
     pub fn parse(v: &str, dflt: Mode) -> (Mode, bool) {
         match v {
@@ -255,10 +251,9 @@ impl Mode {
             "auto" => (Mode::Auto, true),
             "msix" | "msi" => (Mode::Msix, true),
             "intx" => (Mode::Intx, true),
-            "off" | "0" => (Mode::Off, true),
             n => match n.parse::<u32>() {
                 Ok(id) if (32..1020).contains(&id) => (Mode::Line(id), true),
-                _ => (Mode::Off, false),
+                _ => (dflt, false),
             },
         }
     }
@@ -302,9 +297,9 @@ fn device_id(at: &At<'_>) -> (u32, bool) {
 /// uit), en de LPI wordt een lijn met `bell` en `ack`.
 ///
 /// Zonder IORT-weg is de DeviceID een gok (de requester-id), en een gok die
-/// mis is, is stil: de ITS gooit de schrijf weg en de pomp leeft op zijn
-/// vangrail van 10 ms, trager dan pollen. Daarom alleen met `guess` (de
-/// operator vroeg `hopos.nicirq=msix`); anders is het INTx.
+/// mis is, is stil: de ITS gooit de schrijf weg en de pomp hoort niets.
+/// Daarom alleen met `guess` (de operator vroeg `hopos.nicirq=msix`);
+/// anders is het INTx.
 pub fn wire_msix(
     at: &At<'_>,
     bell: &'static Signal,
@@ -368,36 +363,34 @@ pub fn intx_line(at: &At<'_>) -> Result<u32, &'static str> {
     Err(last)
 }
 
-/// Bedraadt `at` volgens `mode`: MSI-X, INTx of niets. `msix_ack` en
-/// `intx_ack` draaien in de dispatch vóór de EOI (bij INTx de ack die de
-/// level-lijn laat vallen). Faalt alles, dan [`Wired::Polled`] met de
-/// reden: interrupts zijn een verbetering, geen voorwaarde.
+/// Bedraadt `at` volgens `mode`: MSI-X of INTx. `msix_ack` en `intx_ack`
+/// draaien in de dispatch vóór de EOI (bij INTx de ack die de level-lijn
+/// laat vallen). Faalt alles, dan de reden: een device zonder lijn is een
+/// fout, geen poll (docs/sequence-hopos.md §14.1 O3).
 pub fn wire(
     at: &At<'_>,
     mode: Mode,
     bell: &'static Signal,
     msix_ack: fn(),
     intx_ack: fn(),
-) -> Wired {
-    let mut why = "hopos.nicirq=off";
+) -> Result<Wired, &'static str> {
+    let mut why = "MSI-X not tried";
     if matches!(mode, Mode::Auto | Mode::Msix) {
         match wire_msix(at, bell, msix_ack, mode == Mode::Msix) {
-            Ok(w) => return w,
+            Ok(w) => return Ok(w),
             Err(e) => why = e,
         }
     }
-    let intid = match mode {
-        Mode::Line(id) => Ok(id),
-        Mode::Auto | Mode::Intx => intx_line(at),
-        Mode::Msix | Mode::Off => return Wired::Polled(why),
+    let id = match mode {
+        Mode::Line(id) => id,
+        Mode::Auto => intx_line(at).map_err(|_| why)?,
+        Mode::Intx => intx_line(at)?,
+        Mode::Msix => return Err(why),
     };
-    match intid {
-        Ok(id) => match crate::Uefi::new().enable_line(id, bell, intx_ack) {
-            Ok(()) => Wired::Intx { intid: id },
-            Err(_) => Wired::Polled("INTx line refused"),
-        },
-        Err(e) => Wired::Polled(if mode == Mode::Auto { why } else { e }),
-    }
+    crate::Uefi::new()
+        .enable_line(id, bell, intx_ack)
+        .map_err(|_| "INTx line refused")?;
+    Ok(Wired::Intx { intid: id })
 }
 
 /// `hopos.nicirq` uit `hopos.cfg`, met `dflt` als hij er niet staat.
@@ -406,7 +399,7 @@ pub fn nic_mode(dflt: Mode) -> Mode {
     let v = board::Board::boot_param(&crate::Uefi::new(), "hopos.nicirq");
     let (m, ok) = Mode::parse(v, dflt);
     if !ok {
-        cpu::println!("irq: hopos.nicirq={v:?} is not auto, msix, intx, off or an INTID; polling");
+        cpu::println!("irq: hopos.nicirq={v:?} is not auto, msix, intx or an INTID; {m:?}");
     }
     m
 }
@@ -660,14 +653,14 @@ mod tests {
 
     #[test]
     fn the_config_picks_the_mode() {
-        assert_eq!(Mode::parse("", Mode::Off), (Mode::Off, true));
+        assert_eq!(Mode::parse("", Mode::Msix), (Mode::Msix, true));
         assert_eq!(Mode::parse("", Mode::Auto), (Mode::Auto, true));
-        assert_eq!(Mode::parse("msix", Mode::Off), (Mode::Msix, true));
-        assert_eq!(Mode::parse("intx", Mode::Off), (Mode::Intx, true));
-        assert_eq!(Mode::parse("0", Mode::Auto), (Mode::Off, true));
+        assert_eq!(Mode::parse("msix", Mode::Auto), (Mode::Msix, true));
+        assert_eq!(Mode::parse("intx", Mode::Auto), (Mode::Intx, true));
         assert_eq!(Mode::parse("477", Mode::Auto), (Mode::Line(477), true));
-        assert_eq!(Mode::parse("20", Mode::Auto), (Mode::Off, false));
-        assert_eq!(Mode::parse("fast", Mode::Auto), (Mode::Off, false));
+        assert_eq!(Mode::parse("off", Mode::Auto), (Mode::Auto, false));
+        assert_eq!(Mode::parse("20", Mode::Auto), (Mode::Auto, false));
+        assert_eq!(Mode::parse("fast", Mode::Msix), (Mode::Msix, false));
         assert!(is_lpi(8192) && !is_lpi(477));
     }
 }

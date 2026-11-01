@@ -56,7 +56,6 @@ use blkdev::Op;
 use core::fmt;
 use core::mem::{offset_of, size_of};
 use core::task::Poll;
-use core::time::Duration;
 use dev::{Pa, Reg};
 use sync::Signal;
 
@@ -451,13 +450,6 @@ pub trait Transport {
     const LINEAR: bool = false;
     /// De uitlijning van de DMA-regio.
     const DMA_ALIGN: u64 = PAGE;
-    /// Zonder lijn: hoe lang de wachter per ronde pollt en daarna op welke
-    /// periode (`blkdev::AsyncBlockDevice::poll_pace`).
-    const PACE: (u64, Duration) = (blkdev::POLL_SPIN_NS, blkdev::POLL_PERIOD);
-    /// De I/O-CQ meldt zijn completions met een interrupt (IEN, vector 0,
-    /// zoals de admin-CQ altijd doet), zodat het board de wachter op een
-    /// lijn kan zetten. PCI ja; de ANS pollt (zijn lijn loopt over de AIC).
-    const IRQ: bool = false;
 
     /// De SQE op plek `slot` van `q` staat klaar (met een barrière erna):
     /// zet hem op de controller. Een ring hoeft niets.
@@ -671,6 +663,12 @@ impl<T: Transport> Nvme<T> {
         })
     }
 
+    /// Vanaf nu wekt `bell` de wachter: het board bedraadde vector 0 (de
+    /// ITS bij PCI, de AIC bij de ANS).
+    pub fn set_irq(&mut self, bell: &'static Signal) {
+        self.irq = Some(bell);
+    }
+
     fn regs(&self) -> &'static Regs {
         // SAFETY: de voorwaarde van de constructor van het transport: `base`
         // is het registervenster, gemapt als Device voor altijd.
@@ -790,8 +788,8 @@ impl<T: Transport> Nvme<T> {
     }
 
     /// Meldt het I/O-queue-paar aan: CQ eerst, fysiek aaneengesloten, met
-    /// interrupts op vector 0 als het transport dat zegt ([`Transport::IRQ`],
-    /// Linux `adapter_alloc_cq`).
+    /// interrupts op vector 0 (Linux `adapter_alloc_cq`): elke schijf heeft
+    /// een lijn (docs/sequence-hopos.md §14.1 O3).
     fn create_io_queues(&mut self) -> Result<(), T::Error> {
         let q = u32::from(Q_ENTRIES - 1) << 16;
         let id = u32::from(self.io.id);
@@ -799,7 +797,7 @@ impl<T: Transport> Nvme<T> {
             opc: ADM_CREATE_CQ,
             prp1: self.io.cq.0,
             cdw10: q | id,
-            cdw11: Q_PC | if T::IRQ { CQ_IEN } else { 0 }, // IV 0
+            cdw11: Q_PC | CQ_IEN, // IV 0
             ..Cmd::default()
         })?;
         self.admin(Cmd {
@@ -1572,10 +1570,6 @@ impl<T: Transport> blkdev::Disk for Nvme<T> {
 impl<T: Transport> blkdev::AsyncBlockDevice for Nvme<T> {
     fn max_transfer(&self) -> usize {
         self.step()
-    }
-
-    fn poll_pace(&self) -> (u64, Duration) {
-        T::PACE
     }
 
     fn irq(&self) -> Option<&'static Signal> {

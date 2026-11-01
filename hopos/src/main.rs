@@ -369,6 +369,14 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
             }
         );
     }
+    // De interrupts vóór elk device: de schijf en de NIC bedraden hun lijn
+    // in hun probe (docs/sequence-hopos.md §14.1 O3). Een controller die
+    // faalt, is het ijzer dat faalt (§13.3).
+    let bell = board
+        .start_interrupts()
+        .unwrap_or_else(|e| cpu::fatal!("irq: {e}"));
+    exec.spawn(irq_dispatch(board, bell)).expect("spawn irq");
+
     // De opslag vóór de system-API: die krijgt de hopfs-actor alleen als
     // er een schijf is (anders weigert elke bestandscall luid).
     let disk = storage::start(exec, storage::probe());
@@ -377,19 +385,6 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     codec::up(exec);
     let system = system(privilege, disk.is_some(), slot_count(board));
 
-    // De IRQ-dispatch spawnt als eerste: hij is de pomp van alle lijnen.
-    // Een controller die faalt, is het ijzer dat faalt (§13.3).
-    // De schijf kwam ervóór op (de mount pollt); zijn lijn
-    // komt nu.
-    match board.start_interrupts() {
-        Ok(bell) => {
-            exec.spawn(irq_dispatch(board, bell)).expect("spawn irq");
-            if let Some(q) = disk {
-                q.with_dev(|d| board.wire_disk(d));
-            }
-        }
-        Err(e) => cpu::fatal!("irq: {e}"),
-    }
     exec.spawn(tick(exec)).expect("spawn tick");
     // De taak van de node-watchdog (gewapend aan het begin) en de
     // telemetrie: thermiek en klokbeleid.
@@ -450,19 +445,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // FLIP: na een landing adopteren de slots de bewoners in plaats van
     // Hop opnieuw te plaatsen; de flip-taak en de guard spawnen hier.
     flip::start(exec, landing.is_some());
-    // De env van een gestagede app (appspike op QEMU): `hopos.appenv`.
-    let app_env = match role {
-        Ok(StagedRole::App) => slots::app_env(board.boot_param("hopos.appenv")),
-        _ => alloc::vec::Vec::new(),
-    };
-    slots::start(
-        exec,
-        role,
-        landing.map(|h| h.slots),
-        app_env,
-        node_cfg,
-        system,
-    );
+    slots::start(exec, role, landing.map(|h| h.slots), node_cfg, system);
 
     // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
     // over zijn bewoners (Hop). Zonder rotatie draait Hop nooit (§13.3).
@@ -489,8 +472,12 @@ fn nic_up(
         slot_wake: slots::wake,
         resident: slots::resident,
     };
-    if let Err(e) = net::start(exec, nic, params, system_api(system)) {
-        println!("net: {e} HOPOS_NET_FAIL");
+    match net::start(exec, nic, params, system_api(system)) {
+        Ok(()) => {}
+        // Een NIC zonder lijn is het board dat faalt (§14.1 O3): de pomp
+        // pollt niet, dus zonder lijn geen net.
+        Err(e @ net::Error::NoLine) => cpu::fatal!("net: {e}"),
+        Err(e) => println!("net: {e} HOPOS_NET_FAIL"),
     }
 }
 
@@ -822,8 +809,8 @@ async fn tick(exec: &'static Executor) {
         let o = &cpu::el2::OS_STATS;
         // De laatste beurt en de langste sinds de vorige tik (30-09: de
         // stilte van de hoplb-kring was niet te lezen zonder te weten wie de
-        // OS-core het laatst had), en de switch: werk na de bel tegen werk
-        // na de failsafe, volle en gedropte RX, en wat de NAT weggooide.
+        // OS-core het laatst had), en de switch: werk na de bel, volle en
+        // gedropte RX, en wat de NAT weggooide.
         let last = o.last.load(Relaxed);
         let long_us = o.longest.swap(0, Relaxed) / (OS_HZ() / 1_000_000).max(1);
         let sw = &net::STATS;
@@ -859,7 +846,7 @@ async fn tick(exec: &'static Executor) {
             continue;
         }
         println!(
-            "HOPOS_TICK {n} late_ms={late_ms} busy_ms={busy_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} xoff={} flowfull={} natin={} natmiss={}) nic(bad={} full={} held={} err={} bells={}) waker(rounds={} seen={} kicks={} rx={}) temp={}",
+            "HOPOS_TICK {n} late_ms={late_ms} busy_ms={busy_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} rxfull={} rxdrop={} big={} noroute={} txdrop={} xoff={} flowfull={} natin={} natmiss={}) nic(bad={} full={} held={} err={} bells={}) waker(rounds={} seen={} kicks={} rx={}) temp={}",
             s.sleeps.load(Relaxed),
             s.polls.load(Relaxed),
             IRQS[0].load(Relaxed),
@@ -878,7 +865,6 @@ async fn tick(exec: &'static Executor) {
             last & 0xff,
             cpu::el2::Back::name_of((last >> 8) & 0xff),
             sw.work_by_door.load(Relaxed),
-            sw.work_by_timer.load(Relaxed),
             sw.rx_full.load(Relaxed),
             sw.rx_drops.load(Relaxed),
             sw.nat_oversize.load(Relaxed),

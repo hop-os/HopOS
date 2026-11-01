@@ -407,11 +407,17 @@ impl<T: Transport> VirtioBlk<T> {
         self.t.ack_interrupt()
     }
 
-    /// Hangt de bel van de IRQ-lijn aan de driver: de wachter wacht er dan
-    /// op (met de vangrail van `blkdev::IRQ_GUARD`) in plaats van te
-    /// pollen. Het board luidt hem vanuit zijn dispatch, na [`IrqAck::ack`].
+    /// Hangt de bel van de IRQ-lijn aan de driver: de wachter wacht erop
+    /// (met de termijn `blkdev::TERM`). Het board luidt hem vanuit zijn
+    /// dispatch, na [`IrqAck::ack`].
     pub fn set_irq(&mut self, bell: &'static Signal) {
         self.irq = Some(bell);
+    }
+
+    /// Het transport, voor het board (nam het de MSI-X-vector aan?).
+    #[must_use]
+    pub fn transport(&self) -> &T {
+        &self.t
     }
 
     fn set_desc(&self, i: u16, addr: Pa, len: u32, flags: u16, next: u16) {

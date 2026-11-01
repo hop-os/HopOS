@@ -100,9 +100,6 @@ pub type LogFn = fn(fmt::Arguments<'_>);
 pub struct Stats {
     /// Switch-rondes mét werk na een bel.
     pub work_by_door: AtomicU64,
-    /// Switch-rondes mét werk na de failsafe: een SEV die HOP's WFE miste,
-    /// en dus een frame dat tot een milliseconde lag.
-    pub work_by_timer: AtomicU64,
     /// Een RX-ring zat vol (backpressure begonnen).
     pub rx_full: AtomicU64,
     /// Frames gedropt op een volle RX-ring.
@@ -169,7 +166,6 @@ impl Stats {
     pub const fn new() -> Self {
         Self {
             work_by_door: AtomicU64::new(0),
-            work_by_timer: AtomicU64::new(0),
             rx_full: AtomicU64::new(0),
             rx_drops: AtomicU64::new(0),
             nat_oversize: AtomicU64::new(0),

@@ -199,9 +199,8 @@ fn spin_limit(now: u64, ticks: u64, hz: u64) -> u64 {
 /// zelftest.
 const CTX_WORDS: usize = (CTX_FP_END / 8) as usize;
 
-/// De langste beurt zonder deadline: 10 ms, dezelfde vangrail als de
-/// WFI-slaap (`cpu::idle::WFI_CAP_NS`). "Geen deadline" als oneindig lezen
-/// is geen zuinigheid maar een hang.
+/// De langste beurt van een bewoner van de OS-core: 10 ms. "Geen deadline"
+/// als oneindig lezen is geen zuinigheid maar een hang.
 pub const TURN_CAP_NS: u64 = 10_000_000;
 
 /// Waardoor de kern zijn core terugkreeg.

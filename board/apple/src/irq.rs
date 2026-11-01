@@ -86,24 +86,22 @@ fn find_target() -> Option<u32> {
     hit
 }
 
-/// Hoe de tg3 zijn interrupt krijgt (`hopos.nicirq`).
+/// Hoe de tg3 zijn interrupt krijgt (`hopos.nicirq`). Er is geen "pollen":
+/// elke NIC heeft een lijn (docs/sequence-hopos.md §14.1 O3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NicIrq {
     /// Leeg of `auto`: INTA van de ethernet-poort, uit de ADT
     /// (`pcie::port_irq_base` + `pcie::INTA`).
     Auto,
-    /// `0` of `off`: pollen.
-    Off,
     /// Een getal: die AIC-lijn.
     Line(u32),
 }
 
 impl NicIrq {
-    /// `None` = geen van de drie.
+    /// `None` = geen van de twee.
     pub(crate) fn parse(v: &str) -> Option<Self> {
         match v {
             "" | "auto" => Some(Self::Auto),
-            "0" | "off" => Some(Self::Off),
             n => n.parse().ok().filter(|&n| n > 0).map(Self::Line),
         }
     }
@@ -128,9 +126,8 @@ const NIC_TEST_NS: u64 = 50_000_000;
 /// Maakt AIC-lijn `line` de lijn van de tg3, maar alleen als hij aankomt:
 /// lijn scherp, de NIC open (`set_irq` dwingt meteen een interrupt af), en
 /// dan de dispatch draaien tot de lijn vuurt. Dat is Go's "gevonden door
-/// aflevering" (19-09) als zelftest: een verkeerd nummer kost geen 10 ms
-/// per frame op de vangrail van de pomp, maar wordt een gepolde NIC met
-/// een reden. Geeft de microseconden tot de aflevering, of de reden met
+/// aflevering" (19-09) als zelftest: een verkeerd nummer is een NIC zonder
+/// lijn, met een reden, en geen pomp die nooit iets hoort. Geeft de microseconden tot de aflevering, of de reden met
 /// INTSTAT en INTMSK van de poort, gelezen vóór de NIC weer dichtgaat (bij
 /// een poort die INTA wél zag, staat bit 0 dan nog).
 pub(crate) fn wire_nic(nic: &mut Tg3, line: u32) -> Result<u64, (&'static str, (u32, u32))> {
@@ -169,7 +166,7 @@ const NIC_QUIET_NS: u64 = 1_000_000;
 const NIC_QUIET_MAX: u32 = 4;
 
 /// Het aantal dispatch-rondes in `ns` waarin `bell` ging.
-fn hits_within(bell: &Signal, ns: u64) -> u32 {
+pub(crate) fn hits_within(bell: &Signal, ns: u64) -> u32 {
     let t0 = cpu::idle::now();
     let mut hits = 0;
     while cpu::idle::now().saturating_sub(t0) <= ns {
@@ -328,11 +325,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nicirq_reads_auto_off_or_a_line() {
+    fn nicirq_reads_auto_or_a_line() {
         assert_eq!(NicIrq::parse(""), Some(NicIrq::Auto));
         assert_eq!(NicIrq::parse("auto"), Some(NicIrq::Auto));
-        assert_eq!(NicIrq::parse("0"), Some(NicIrq::Off));
-        assert_eq!(NicIrq::parse("off"), Some(NicIrq::Off));
+        assert_eq!(NicIrq::parse("0"), None);
+        assert_eq!(NicIrq::parse("off"), None);
         assert_eq!(NicIrq::parse("1253"), Some(NicIrq::Line(1253)));
         assert_eq!(NicIrq::parse("intx"), None);
         assert_eq!(NicIrq::parse("-1"), None);

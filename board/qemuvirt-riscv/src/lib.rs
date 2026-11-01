@@ -38,7 +38,7 @@ use cpu::riscv::csr;
 use cpu::riscv::plic::{Plic, machine_context};
 use dev::Pa;
 use driver_ns16550::Ns16550;
-use driver_virtioblk::VirtioBlk;
+use driver_virtioblk::{IrqAck as BlkAck, VirtioBlk};
 use driver_virtionet::{IrqAck, VirtioNet};
 use sync::{Local, Signal};
 
@@ -113,6 +113,19 @@ static NIC_IRQ: Local<Cell<Option<(u32, IrqAck)>>> = Local::new(Cell::new(None))
 /// De device-ack van de NIC-lijn bij de dispatcher: virtio InterruptACK.
 fn nic_ack() {
     if let Some((_, a)) = NIC_IRQ.get().get() {
+        a.ack();
+    }
+}
+
+/// De bel van de schijf: de dispatch luidt hem, de hopfs-actor wacht erop
+/// tijdens een blok-verzoek (de wachter van `blkdev::Queue`).
+static DISK_BELL: Signal = Signal::new();
+/// De ack van de schijflijn, gezet door `probe_disk`.
+static DISK_ACK: Local<Cell<Option<BlkAck>>> = Local::new(Cell::new(None));
+
+/// De device-ack van de schijflijn bij de dispatcher: virtio InterruptACK.
+fn disk_ack() {
+    if let Some(a) = DISK_ACK.get().get() {
         a.ack();
     }
 }
@@ -354,7 +367,6 @@ impl Board for QemuVirtRiscv {
     fn sleeper(&self) -> Self::Sleeper {
         let clint = CLINT_OK.load(Relaxed).then_some(CLINT_DEV);
         cpu::riscv::idle::RvSleeper::new(clint, self.this_core())
-            .with_cap(cpu::riscv::idle::WFI_CAP_QEMU_NS)
     }
 
     fn mem_total(&self) -> u64 {
@@ -394,7 +406,8 @@ impl Board for QemuVirtRiscv {
     fn dispatch_interrupts(&self) -> Dispatched {
         // De kick: de `msip` wissen, dan staat de bron weer open.
         CLINT_DEV.set_msip(self.this_core(), false);
-        // De PLIC: de NIC heeft een lijn, wat verder vuurt gaat uit.
+        // De PLIC: de NIC en de schijf hebben een lijn, wat verder vuurt
+        // gaat uit.
         let pass = cpu::irq::global().dispatch();
         // De ingang liet MEIE en MSIE dicht; de ronde is klaar.
         csr::mie_set(csr::MIP_MEIP | csr::MIP_MSIP);
@@ -423,9 +436,9 @@ impl Board for QemuVirtRiscv {
             unsafe { VirtioNet::new(base, NET_DMA.base, NET_DMA.size, cpu::riscv::idle::now) }
                 .map_err(|_| Error::Nic("virtio-net init failed"))?;
         NIC_IRQ.get().set(Some((irq, nic.irq_ack())));
-        if cpu::irq::enable(Line(irq), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
-            nic.set_irq(&NIC_BELL);
-        }
+        cpu::irq::enable(Line(irq), Some(nic_ack), Some(&NIC_BELL))
+            .map_err(|_| Error::Irq("virtio-net source refused by the PLIC"))?;
+        nic.set_irq(&NIC_BELL);
         cpu::println!(
             "net: virtio-net at {:#x}, plic source {irq}, queue {}",
             base.0,
@@ -474,12 +487,13 @@ impl Board for QemuVirtRiscv {
         DTB.fdt().and_then(|f| f.bootargs()).unwrap_or("")
     }
 
-    /// Vindt en initialiseert de schijf (virtio-blk). Eén keer.
+    /// Vindt en initialiseert de schijf (virtio-blk), met zijn bron op de
+    /// PLIC (de PLIC staat al: `start_interrupts` komt eerst). Eén keer.
     fn probe_disk(&self) -> Result<Option<VirtioBlk>, Error> {
         if DISK_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_disk"));
         }
-        let Some((base, _irq)) = Self::find_virtio(|base| {
+        let Some((base, irq)) = Self::find_virtio(|base| {
             // SAFETY: `find_virtio` geeft alleen adressen in het
             // virtio-mmio-venster van virt.
             unsafe { driver_virtioblk::is_modern_blk(base) }
@@ -487,12 +501,16 @@ impl Board for QemuVirtRiscv {
             return Ok(None);
         };
         // SAFETY: `base` is een virtio-mmio-transport van virt, en BLK_DMA is
-        // van deze driver alleen. De lijn blijft uit: de driver pollt.
-        let disk =
+        // van deze driver alleen.
+        let mut disk =
             unsafe { VirtioBlk::new(base, BLK_DMA.base, BLK_DMA.size, cpu::riscv::idle::now) }
                 .map_err(|_| Error::Disk("virtio-blk init failed"))?;
+        DISK_ACK.get().set(Some(disk.irq_ack()));
+        cpu::irq::enable(Line(irq), Some(disk_ack), Some(&DISK_BELL))
+            .map_err(|_| Error::Irq("virtio-blk source refused by the PLIC"))?;
+        disk.set_irq(&DISK_BELL);
         cpu::println!(
-            "disk: virtio-blk at {:#x}, {} sectors, flush {}",
+            "disk: virtio-blk at {:#x}, plic source {irq}, {} sectors, flush {}",
             base.0,
             disk.sectors(),
             if disk.can_flush() { "yes" } else { "no" }

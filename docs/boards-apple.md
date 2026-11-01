@@ -231,8 +231,12 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
     `PORT_INT_INTx`, gelezen vóór de NIC weer dichtgaat; staat bit 0, dan
     zag de poort INTA en klopt het AIC-nummer niet, en `hopos.nicirq=<n>`
     probeert een ander). De zelftest is Go's
-    "gevonden door aflevering" (19-09). Daarna: `HOPOS_NET_PUMP` zegt `irq
-    line, 10 ms guard`, en `hopos.nicirq=off` is de A/B tegen pollen.
+    "gevonden door aflevering" (19-09). Komt de lijn niet, dan start de NIC
+    niet: er is geen gepolde terugval meer (01-11, O3), en `hopos.nicirq=off`
+    bestaat niet meer. Daarna: `HOPOS_NET_PUMP` zegt `the nic's irq line`.
+    De schijf (ANS) hangt sinds 01-11 ook aan de AIC: `HOPOS_ANS_IRQ` noemt
+    de lijn van de mailbox en die van de NVMe (woord 3 en het laatste van
+    `/arm-io/ans` "interrupts", de volgorde van de M1). NOG NIET OP IJZER.
 12. **DHCP** (`HOPOS_NET_UP`) en de tik: `HOPOS_TICK n sleeps=...`.
     Wekken per seconde rond 954 (29-08): `HOPOS_APPLE_IDLE` moet dan `Wfi`
     zeggen. Veel meer: WFE op de event-stream; controleer EVNTIS (ECV).

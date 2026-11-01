@@ -12,6 +12,14 @@
 //! geen HFB. Boardvast bewezen in de Go-kern op 11-07, één boot: v5-rev,
 //! MAC-reset, PHY op adres 1, autoneg, ring-16-DMA, DHCP-lease.
 //!
+//! De lijn (docs/sequence-hopos.md §14.1 O3; Linux `bcmgenet_isr0` en
+//! `bcmgenet_rx_ring16_int_enable`): ring 16 meldt een ontvangen frame als
+//! `RXDMA_MBDONE` in INTRL2_0 (GIC SPI 157 op de BCM2711), met een drempel
+//! van één frame. Het ritme is dat van NAPI ([`netdev`]): de ack zet het
+//! bit in het masker en wist de status, [`receive`](netdev::Device::receive)
+//! zet het masker weer open als de ring leeg is en kijkt dan nog één keer.
+//! ONGETOETST op ijzer: QEMU `raspi4b` heeft geen GENET.
+//!
 //! De valkuilen zitten als commentaar bij de code; de twee grootste: elke
 //! TX-descriptor MOET QTAG 0x3F<<7 dragen (anders eet de arbiter het
 //! frame), en de prod/cons-indexen zijn vrijlopende 16-bit-tellers (mod
@@ -44,6 +52,7 @@ use core::mem::{offset_of, size_of};
 use dev::{Pa, Reg};
 use driver_mdio::{Link, Mdio};
 use netdev::{Mac, TxError};
+use sync::Signal;
 
 #[cfg(test)]
 mod tests;
@@ -132,7 +141,8 @@ struct RxDma {
     _start_hi: u32,
     end: Reg<u32>,
     _end_hi: u32,
-    _thresh: u32,
+    /// DMA_MBUF_DONE_THRESH: na zoveel frames een `RXDMA_MBDONE`.
+    mbuf_done_thresh: Reg<u32>,
     xon_xoff: Reg<u32>,
     read_ptr: Reg<u32>,
     _rp_hi: u32,
@@ -200,6 +210,7 @@ const _: () = {
     assert!(offset_of!(RxDma, prod) == 0x08);
     assert!(offset_of!(RxDma, buf_size) == 0x10);
     assert!(offset_of!(RxDma, end) == 0x1c);
+    assert!(offset_of!(RxDma, mbuf_done_thresh) == 0x24);
     assert!(offset_of!(RxDma, xon_xoff) == 0x28);
     assert!(offset_of!(RxDma, read_ptr) == 0x2c);
     assert!(offset_of!(RxDma, ring_cfg) == 0x40);
@@ -235,6 +246,8 @@ const DMA_ENABLE_MASK: u32 = 1 | (0xffff << 1) | (1 << 17);
 const DMA_DISABLED: u32 = 1;
 /// Ring 16 in de enable-bits (valkuil 10).
 const RING16_EN: u32 = 1 << 17;
+/// INTRL2_0: ring 16 ontving (`UMAC_IRQ_RXDMA_MBDONE`).
+const IRQ_RXDMA_DONE: u32 = 1 << 13;
 /// Hoe lang een DMA-stop mag duren.
 const DMA_STOP_NS: u64 = 5_000_000;
 /// Hoe lang een MDIO-transactie mag duren: ~25 µs typisch; de grens van
@@ -292,6 +305,27 @@ pub struct Genet {
     rx_cons: u32,
     tx_prod: u32,
     now: fn() -> u64,
+    /// De bel van de lijn, als het board hem bedraadde.
+    irq: Option<&'static Signal>,
+}
+
+/// Het interrupt-pad van de GENET, los van de ringen (`netdev::IrqAck`).
+#[derive(Copy, Clone, Debug)]
+pub struct IrqAck {
+    base: Pa,
+}
+
+impl netdev::IrqAck for IrqAck {
+    /// Laat de lijn los: `RXDMA_MBDONE` in het masker en de status gewist
+    /// (`bcmgenet_isr0`, `bcmgenet_rx_ring16_int_disable`). De driver zet
+    /// het masker weer open als de pomp de ring leeg las.
+    fn ack(&self) {
+        // SAFETY: `base` kwam uit [`Genet::new`], dat een gemapt blok eiste;
+        // het INTRL2-blok deelt niets met de ringen.
+        let i: &Intrl2 = unsafe { dev::regs(self.base.add(INTRL2_0)) };
+        i.mask_set.write(IRQ_RXDMA_DONE);
+        i.clear.write(IRQ_RXDMA_DONE);
+    }
 }
 
 impl Genet {
@@ -322,7 +356,34 @@ impl Genet {
             rx_cons: 0,
             tx_prod: 0,
             now,
+            irq: None,
         }
+    }
+
+    /// Het interrupt-pad, voor de dispatch van het board.
+    #[must_use]
+    pub const fn irq_ack(&self) -> IrqAck {
+        IrqAck { base: self.base }
+    }
+
+    /// Hangt de bel van de lijn aan de driver en zet `RXDMA_MBDONE` open.
+    /// Na [`init`](Self::init); de RX-pomp wacht dan op de bel.
+    pub fn set_irq(&mut self, bell: &'static Signal) {
+        self.irq = Some(bell);
+        self.rearm();
+    }
+
+    /// Status gewist, masker open (`bcmgenet_rx_ring16_int_enable`).
+    fn rearm(&self) {
+        let i: &Intrl2 = self.at(INTRL2_0);
+        i.clear.write(IRQ_RXDMA_DONE);
+        i.mask_clear.write(IRQ_RXDMA_DONE);
+    }
+
+    /// Staat `RXDMA_MBDONE` in het masker (de ack sloot hem)?
+    fn masked(&self) -> bool {
+        let i: &Intrl2 = self.at(INTRL2_0);
+        i.mask_status.read() & IRQ_RXDMA_DONE != 0
     }
 
     fn at<R>(&self, off: u64) -> &'static R {
@@ -521,6 +582,8 @@ impl Genet {
         rx.cons.write(self.rx_cons);
         rx.buf_size.write(((N_BD as u32) << 16) | BUF_SIZE as u32);
         rx.xon_xoff.write((5 << 16) | (N_BD as u32 >> 4));
+        // Een `RXDMA_MBDONE` per frame (Linux `bcmgenet_init_rx_ring`).
+        rx.mbuf_done_thresh.write(1);
         rx.ring_cfg.write(1 << 16);
     }
 
@@ -614,11 +677,35 @@ impl netdev::Device for Genet {
         Ok(())
     }
 
-    /// Eén frame, of `None`. Alleen complete, foutvrije frames; ALIGN_2B
-    /// zet 2 pad-bytes vóór het frame, in de lengte meegeteld (valkuil 6).
-    /// Een kapot frame gaat terug naar de DMA en de volgende ronde kijkt
-    /// verder.
+    /// Eén frame, of `None`. Met een lijn is de ring bij `None` leeg en het
+    /// masker weer open, en daarna is er nog één keer gekeken (NAPI: een
+    /// frame tussen de lege lees en het openen blijft niet liggen).
     fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
+        if let Some(n) = self.receive_one(buf) {
+            return Some(n);
+        }
+        if self.irq.is_none() || !self.masked() {
+            return None;
+        }
+        self.rearm();
+        self.receive_one(buf)
+    }
+
+    fn mac(&self) -> Mac {
+        Mac(self.mac)
+    }
+
+    fn irq(&self) -> Option<&'static Signal> {
+        self.irq
+    }
+}
+
+impl Genet {
+    /// Eén frame uit de ring, of `None`. Alleen complete, foutvrije frames;
+    /// ALIGN_2B zet 2 pad-bytes vóór het frame, in de lengte meegeteld
+    /// (valkuil 6). Een kapot frame gaat terug naar de DMA en de volgende
+    /// ronde kijkt verder.
+    fn receive_one(&mut self, buf: &mut [u8]) -> Option<usize> {
         let rx = self.rx();
         loop {
             if rx.prod.read() & 0xffff == self.rx_cons {
@@ -644,10 +731,6 @@ impl netdev::Device for Genet {
                 return Some(n);
             }
         }
-    }
-
-    fn mac(&self) -> Mac {
-        Mac(self.mac)
     }
 }
 

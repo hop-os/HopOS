@@ -123,7 +123,7 @@ De haken in de lifecycle (`kern::grants::Grants`, geïmplementeerd door
 | na de claim, vóór de env op de control-page | `env` | `Request::Env` aan de lifecycle-actor, vlak vóór `Stream::put_env` in `Stream::arm` (`kern/src/system.rs`), voor een start van Hop en voor de boot-plaatsing (`kern::system::place`) |
 | na de kooibouw, vóór de dispatch | `arm` | `Lifecycle::arm` (`kern/src/slots.rs`); faalt hij, dan is het een startfout: poorten dicht, grant terug |
 | bij de adoptie na een flip | `adopt` | `Lifecycle::adopt`, na alle eigendomsclaims en vóór de servicers |
-| na een bevestigde stop, en bij een abort | `release` | `Lifecycle::stop` (niet in quarantaine) en `Lifecycle::abort` |
+| na een bevestigde stop, en bij een abort | `release` | `Lifecycle::stop` en `Lifecycle::abort` |
 
 De actor bezit de aanbieder (`Lifecycle<…, G: Grants>`): `hopos/src/slots.rs`
 geeft `GuiGrants` mee in de gui-smaak en `NoGrants` kaal. Past de env met de

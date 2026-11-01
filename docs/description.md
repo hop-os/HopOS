@@ -151,7 +151,7 @@ Wie wat bezit:
    `Lifecycle::claim` kiest cores (`kern/src/pool.rs`: dedicated, een
    sharegroep, of de OS-core als groep `system`), alloceert een partitie
    (`kern/src/partmem.rs`, best-fit op 2 MiB, levensloop als type
-   `Partition<Free|Owned|Quarantined>`) en scrubt die in brokken.
+   `Partition<Free|Owned>`) en scrubt die in brokken.
 2. **Stromen.** Hop stroomt de ELF met `STREAM_IMAGE`. `Placer`
    (`kern/src/system.rs`) schrijft elk segment rechtstreeks in de partitie,
    leest daarna de symbolen, en `abi::place::build` zet de vier woorden die
@@ -160,8 +160,8 @@ Wie wat bezit:
 3. **Wapenen.** `Lifecycle::arm`: poorten publiceren bij de switch, de kooi
    bouwen (en de ringen aan de switch hangen), grants, de servicer
    registreren, dispatch, en wachten tot de boot niet meer pending is. Een
-   fout vóór de dispatch is een rollback; een onzekere dispatch zet het slot
-   in quarantaine.
+   fout vóór de dispatch is een rollback; een onzekere dispatch is
+   `HOPOS_FATAL` (de watchdog reset, docs/sequence-hopos.md §13.5).
 4. **Draaien.** De servicer leest de outbox (logregels naar de console en
    `NEXT_LOG`, SMP-verzoeken naar de lifecycle).
 5. **Stop.** `STOP_SLOT` met een termijn (Hop: 3 s): de kill-vlag met die
@@ -170,7 +170,7 @@ Wie wat bezit:
    wachten houdt de app zijn net, zijn generatie (dus de system-API) en zijn
    outbox-lezer: dat is zijn gratie, SIGTERM vóór SIGKILL. Dan pas evict
    uit de tabel en de ringen van de switch. Stil: partitie en cores vrij.
-   Niet stil: quarantaine. De committer ziet de generatie verdwijnen en
+   Niet stil: `HOPOS_FATAL`. De committer ziet de generatie verdwijnen en
    legt hopfs vast.
 
 **Hop zelf.** Hop is de bewoner van slot 1, en de kern is zijn supervisor
@@ -346,18 +346,22 @@ procedure).
    springen zonder adoptie.
 3. De nieuwe kern leest het blob (`kernflip::adopted`), houdt de poorten
    vast vóór de eerste switch-ronde, adopteert de bewoners, publiceert de
-   poorten opnieuw, zet de NAT terug, en draait 120 s een boot-guard.
+   poorten opnieuw, zet de NAT terug; de guard van de watchdog (120 s,
+   voor elke boot) bewaakt de landing.
 
 ### 4.10 Rondom: watchdog, telemetrie, console, config
 
 - **Watchdog** (`hopos/src/watchdog.rs`, beleid in `kern/src/watchdog.rs`):
-  elke 2 s een verse TCP-verbinding naar Hop; beweegt de hartslag niet, dan
+  gewapend als eerste stap van `setup`, met één guard van 120 s voor elke
+  boot: zonder levensteken binnen die termijn geen pets meer. Daarna elke
+  2 s een verse TCP-verbinding naar Hop; beweegt de hartslag niet, dan
   stopt het aaien en reset de hardware-watchdog de node. De hardware zit per
-  board; op QEMU virt is het de i6300esb op PCIe, alleen met `WDT=1`
-  (`driver/i6300esb`, `board/qemuvirt/src/wdt.rs`). Dit is ook wat een
-  falende Hop opvangt (§4.3): de kern laat hem liggen, de watchdog reset, en
-  de koude boot start de Hop van het bootmedium
-  (`tools/qemu-test-hop-fail.sh`).
+  board; op QEMU virt is het de i6300esb op PCIe, in elke ring
+  (`driver/i6300esb`, `board/qemuvirt/src/wdt.rs`). Hard falen loopt
+  erover: `cpu::fatal!` geeft één regel `HOPOS_FATAL <reden>` en parkeert,
+  de pets stoppen, de watchdog reset. Zo ook een falende Hop (§4.3):
+  `HOPOS_HOP_DOWN`, `HOPOS_FATAL`, en de koude boot start de Hop van het
+  bootmedium (`tools/qemu-test-hop-fail.sh`).
 - **Telemetrie** (`hopos/src/telemetry.rs`): thermiek en klokbeleid per
   board, met `driver/dvfs` als governor.
 - **Console**: de tee gaat naar zwarte doos, UART, een ring van 256 KiB en
@@ -411,7 +415,7 @@ nooit een panic.
 | Opslag | `virtiopci` (transport mmio en pci), `virtioblk`, `nvme` (pci en Apple-ANS) |
 | Firmware | `rtkit` (Apple-coprocessoren), `smc` (Apple), `scmi` (O6N, Radxa), `smpro` (Altra), `vcmail` (Pi) |
 | RNG | `rkrng` (Radxa), `rng200` (Pi) |
-| Watchdog | `dwwdt` (Radxa, LicheeRV), `i6300esb` (QEMU virt, `WDT=1`); de andere zitten in hun board |
+| Watchdog | `dwwdt` (Radxa, LicheeRV), `i6300esb` (QEMU virt, in elke ring); de andere zitten in hun board |
 | USB | `usb/xhci`, `usb/dwc3`, `usb/hid` |
 | Geen driver | `dvfs` (klokbeleid), `codec` (het videocodec-contract) |
 

@@ -335,15 +335,6 @@ pub fn insecure(cfg: &NodeCfg<'_>) -> bool {
     }
 }
 
-/// `hopos.replay=N`: elke N seconden zet de kern zijn console-ring opnieuw
-/// op de UART (hopos `conport::rewind`), voor een board
-/// waarvan de lezer pas na de boot aanhaakt (de M4 over de dockchannel,
-/// 30-09). 0 of niets = uit.
-#[must_use]
-pub fn replay_after(cfg: &NodeCfg<'_>) -> u64 {
-    cfg.one("hopos.replay").parse().unwrap_or(0)
-}
-
 /// De env van Hop uit `cfg` en de feiten van de kern, zonder te loggen:
 /// eerst alles behalve de init-jobs, dan de init-jobs als het geheel nog
 /// past.
@@ -528,9 +519,9 @@ mod tests {
     fn the_file_wins_from_the_bootargs_and_the_bootargs_from_qemu() {
         // De Radxa: hopos.cfg in de initrd en een APPEND met dezelfde
         // sleutel; het bestand wint (Go: rk3566.BootParam).
-        let cfg = NodeCfg::new("hopos.node=radxa-2", "hopos.node=radxa-1 hopos.replay=30");
+        let cfg = NodeCfg::new("hopos.node=radxa-2", "hopos.node=radxa-1 hopos.tick=1");
         assert_eq!(cfg.one("hopos.node"), "radxa-2");
-        assert_eq!(replay_after(&cfg), 30);
+        assert_eq!(cfg.one("hopos.tick"), "1");
         // QEMU: QEMU_CFG vóór de bootargs, dus een tweede node heet anders.
         let qemu = NodeCfg::new("", "hopos.node=hopos-qemu-2 hopos.apikey=k root=/dev/vda")
             .on_bank(QEMU_CFG);

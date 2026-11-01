@@ -71,9 +71,6 @@ pub(crate) static RING: Ring = Ring::new(&Place, LEN);
 /// geen lijn op deze kern (R1), en een FIFO van 16 tekens is op 115200 baud
 /// na 1,4 ms leeg.
 const UART_STEP: Duration = Duration::from_millis(1);
-/// Zo lang mag de UART niets aannemen voor de pomp hem opgeeft en de
-/// console weer wachtend schrijft (een UART zonder klok).
-const UART_STUCK_NS: u64 = 1_000_000_000;
 /// Hoeveel achterstand een wachtende schrijver eerst wegzet (de boot, een
 /// noodregel): 8 KiB, 0,7 s op 115200. De rest staat op 5555.
 const FLUSH_MAX: u64 = 8 * 1024;
@@ -137,42 +134,13 @@ pub(crate) async fn drain(exec: &'static Executor) {
         return;
     };
     PUMPING.store(true, Release);
-    let (mut at, mut since) = (RING.uart(), exec.now());
     loop {
-        let more = cpu::console::locked(|| RING.pump(put));
-        let now = exec.now();
-        if RING.uart() != at || !more {
-            (at, since) = (RING.uart(), now);
-        }
-        if !more {
-            // Eén regel per achterstand, pas als de UART weer bij is.
-            let lost = RING.take_lost();
-            if lost != 0 {
-                println!(
-                    "console: the UART lost {lost} bytes the ring overwrote first; tcp/5555 had them HOPOS_CONSOLE_DROPPED"
-                );
-                continue;
-            }
+        if cpu::console::locked(|| RING.pump(put)) {
+            exec.after(UART_STEP).await;
+        } else {
             BEHIND.wait().await;
-            continue;
         }
-        if now.saturating_sub(since) >= UART_STUCK_NS {
-            PUMPING.store(false, Release);
-            println!(
-                "console: the UART took nothing for {} ms, writing it waiting again HOPOS_CONSOLE_STUCK",
-                UART_STUCK_NS / 1_000_000
-            );
-            return;
-        }
-        exec.after(UART_STEP).await;
     }
-}
-
-/// De UART begint opnieuw bij de oudste byte van de ring, voor een lezer
-/// die pas na de boot aanhaakt (`hopos.replay`, de M4 over de dockchannel).
-pub(crate) fn rewind() {
-    cpu::console::locked(|| RING.uart_rewind());
-    BEHIND.set();
 }
 
 /// De keuze van de config, vóór de listener (net.rs).

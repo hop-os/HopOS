@@ -736,7 +736,7 @@ Grotendeels opgelost op 04-10 (67e5a3a, "De drivers").
 - **Eén bump-allocator**, `dev::Bump`, voor virtionet, xhci, rtkit en
   `pcie::MmioWindow`. H.
 - **Eén consolebeleid**, `dev::Stall` (herstellen), voor pl011, ns16550 en
-  de M4; een UART die niets neemt, meldt `HOPOS_CONSOLE_STUCK`. H.
+  de M4. H.
 - **Het rearm-moment** ligt vast: de lijn gaat weer open in `receive` als
   die `None` geeft. H.
 - De PCCT staat in `fw::acpi::pcct_subspace`, de AML van de O6N-klok in

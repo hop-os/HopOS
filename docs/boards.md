@@ -17,7 +17,7 @@ lagen:
 
 | Laag | Bestand | Wat erin staat |
 | --- | --- | --- |
-| 1, de default | `image/cfg/default.cfg` | voor elke node: `hopos.cluster=hopos`, `hopos.insecure=1` en `hopos.console=1` (open op het eigen LAN), `hopos.cages=on`, `hopos.replay=0`, `hopos.storage=stateless` (een device begint schoon en vergeet alles; `stateful` in een eigen laag laadt de boom van de schijf en laat Hop's staat op `/hop/` een herstart overleven; `HOPOS_FS_STATELESS` op de console zegt dat de boot leeg begon) |
+| 1, de default | `image/cfg/default.cfg` | voor elke node: `hopos.cluster=hopos`, `hopos.insecure=1` en `hopos.console=1` (open op het eigen LAN), `hopos.cages=on`, `hopos.storage=stateless` (een device begint schoon en vergeet alles; `stateful` in een eigen laag laadt de boom van de schijf en laat Hop's staat op `/hop/` een herstart overleven; `HOPOS_FS_STATELESS` op de console zegt dat de boot leeg begon) |
 | 2, het bord | `image/cfg/<board>.cfg` (`rpi4`, `rpi5`, `radxa`, `o6n`, `altra`, `apple`, `licheerv`) | alleen wat per bord afwijkt, de plaatsing van Hop: `hopos.hop.sharegroup=system` op de Pi's en de Radxa (Hop op de OS-core naast de kern; een storm van RPC's van apps kan hem daar uithongeren), `hopos.hop.sharegroup=hop` met `hopos.hop.core-class=small` op de O6N, de Altra en de M4 (een eigen app-core, een zuinige waar het bord klassen heeft: de A520 op de O6N, een E-core op de M4; de Altra kent geen klassen), en `hop` zonder klasse op de LicheeRV (de C906L) |
 | 3, de smaak | `image/cfg/headless.cfg` of `image/cfg/headfull.cfg` | alleen init-jobs: headless geen, headfull welcome op poort 80 van de release `apps`, en de display-app als regel met een hekje |
 

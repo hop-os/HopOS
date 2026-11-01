@@ -416,7 +416,6 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         node_cfg = node_cfg.on_bank(kern::nodecfg::QEMU_CFG);
     }
     conport::enable(kern::nodecfg::console_enabled(&node_cfg));
-    REPLAY_AT.store(kern::nodecfg::replay_after(&node_cfg), Relaxed);
     TICK_LOG.store(node_cfg.one("hopos.tick") == "1", Relaxed);
     OS_ASID.store(node_cfg.one("hopos.oscore.asid") != "0", Relaxed);
 
@@ -711,9 +710,6 @@ fn stack_high_water() -> u64 {
 
 /// De hartslag: elke seconde één regel met het tiknummer en de meetlat van
 /// de executor.
-/// `hopos.replay=N` (kern::nodecfg): de tik waarop de kern het begin van zijn
-/// console herhaalt; 0 = nooit.
-static REPLAY_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// `hopos.tick=1`: de tikregel elke seconde op de console, niet alleen de eerste drie.
 static TICK_LOG: AtomicBool = AtomicBool::new(false);
 /// `hopos.oscore.asid=0`: op riscv64 een TLB-flush bij elke wissel op de
@@ -733,16 +729,6 @@ async fn tick(exec: &'static Executor) {
     let (mut refused, mut dropped) = (0u64, 0u64);
     loop {
         n += 1;
-        // Een late lezer (de M4 over de dockchannel) krijgt de ring alsnog:
-        // elke N tikken zet de UART hem opnieuw, zodat een lezer die pas na
-        // een kabel-herplug aanhaakt er een vangt.
-        let replay_at = REPLAY_AT.load(Relaxed);
-        if replay_at != 0 && n.is_multiple_of(replay_at) {
-            println!(
-                "console: replaying the ring for a late reader (hopos.replay={replay_at}) HOPOS_CONSOLE_REPLAY"
-            );
-            conport::rewind();
-        }
         // De diagnose van de NIC op 5 en 30 s (de RP1-keten van de Pi 5, de
         // flip-jacht van 30-09): een koude boot geeft de referentie, een
         // landing het verschil.

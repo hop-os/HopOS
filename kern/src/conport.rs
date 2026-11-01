@@ -79,8 +79,6 @@ pub struct Ring {
     next: AtomicU64,
     uart: AtomicU64,
     hop: AtomicU64,
-    /// Bytes die de ring overschreef voor de UART ze had.
-    lost: AtomicU64,
     seats: AtomicU8,
     wakers: [AtomicWaker; MAX_READERS as usize],
     /// Nieuwe bytes voor Hop (`NEXT_STORE` met `NEXT_STORE_LOGS`).
@@ -100,7 +98,6 @@ impl Ring {
             next: AtomicU64::new(0),
             uart: AtomicU64::new(0),
             hop: AtomicU64::new(0),
-            lost: AtomicU64::new(0),
             seats: AtomicU8::new(0),
             wakers: [const { AtomicWaker::new() }; MAX_READERS as usize],
             news: Signal::new(),
@@ -222,8 +219,6 @@ impl Ring {
         let mut buf = [0u8; 64];
         loop {
             let at = self.uart.load(Acquire);
-            let gone = self.oldest().saturating_sub(at);
-            self.lost.fetch_add(gone, Release);
             let (n, next) = self.read(at, &mut buf);
             if n == 0 && next == at {
                 return false;
@@ -243,23 +238,12 @@ impl Ring {
         self.uart.load(Acquire)
     }
 
-    /// De bytes die de UART verloor sinds de vorige vraag.
-    pub fn take_lost(&self) -> u64 {
-        self.lost.swap(0, AcqRel)
-    }
-
     /// De UART staat bij, op hoogstens `max` bytes na: wat daarvoor ligt,
     /// krijgt hij niet meer (een wachtende schrijver zet de rest eerst weg).
     pub fn uart_skip(&self, max: u64) {
         let at = self.uart.load(Acquire).max(self.head().saturating_sub(max));
         self.uart.store(at, Release);
         self.set(W_UART, at);
-    }
-
-    /// De UART begint opnieuw bij de oudste byte (een lezer die pas later
-    /// aanhaakt, `hopos.replay`).
-    pub fn uart_rewind(&self) {
-        self.uart.store(self.oldest(), Release);
     }
 
     /// De volgende regel voor Hop (`NEXT_LOG` 0) in `dst`, zonder `\n`; een
@@ -434,7 +418,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_uart_takes_what_fits_and_counts_what_it_lost() {
+    fn the_uart_takes_what_fits_and_skips_what_the_ring_overwrote() {
         let (r, _) = at(8, None);
         r.open();
         r.append(b"0123");
@@ -444,23 +428,18 @@ pub(crate) mod tests {
             wire.extend_from_slice(&b[..n]);
             n
         });
-        assert_eq!((more, r.take_lost(), &wire[..]), (true, 0, &b"01"[..]));
+        assert_eq!((more, &wire[..]), (true, &b"01"[..]));
         r.append(b"456789ab"); // de UART ligt nu een hele ring achter.
         wire.clear();
         let more = r.pump(|b| {
             wire.extend_from_slice(b);
             b.len()
         });
-        assert_eq!(
-            (more, r.take_lost(), &wire[..]),
-            (false, 2, &b"456789ab"[..])
-        );
+        assert_eq!((more, &wire[..]), (false, &b"456789ab"[..]));
         r.append(b"cd");
         r.uart_skip(0);
         assert!(!r.pump(|_| panic!("nothing is due")));
-        r.uart_rewind();
-        assert!(!r.pump(|b| b.len()));
-        assert_eq!((r.uart(), r.take_lost()), (14, 0));
+        assert_eq!(r.uart(), 14);
     }
 
     #[test]

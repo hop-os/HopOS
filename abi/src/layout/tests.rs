@@ -344,11 +344,8 @@ fn tail_rekent_uit_twee_waarden() {
 #[test]
 fn slot_en_core_hebben_een_bewezen_bereik() {
     assert!(Slot::new(0).is_none());
-    assert!(Slot::new(SLOT_CAP + 1).is_none());
-    let s = Slot::new(SLOT_CAP).unwrap();
-    assert_eq!(s.get(), 128);
-    assert_eq!(Slot::FIRST.base(), LINK_BASE);
-    assert_eq!(Slot::new(2).unwrap().base(), SLOTS_BASE + SLOT_STRIDE);
+    assert!(Slot::new(SLOT_MAX + 1).is_none());
+    assert_eq!(Slot::new(SLOT_MAX).unwrap().get(), 65533);
     assert_eq!(Core::new(2).unwrap().smp_context_id(), Some(129));
     assert_eq!(Core::new(128).unwrap().smp_context_id(), Some(255));
     assert_eq!(Core::new(1).unwrap().smp_context_id(), None);
@@ -366,13 +363,18 @@ fn net_plan_is_deterministisch() {
     assert_eq!(port_ip4(0), HOST_IP4);
     assert_eq!(port_ip4(1), 0x0A64_0002);
     assert_eq!(port_mac(0), HOST_MAC);
-    for i in 0..=SLOT_CAP {
+    for i in (0..=SLOT_MAX).step_by(97).chain([255, 256, SLOT_MAX]) {
         assert_eq!(ip4_port(port_ip4(i)), Some(i));
         if let Some(s) = Slot::new(i) {
             assert_eq!((slot_ip4(s), slot_mac(s)), (port_ip4(i), port_mac(i)));
         }
     }
-    assert_eq!(ip4_port(HOST_IP4 - 1), None, ".0");
+    // Boven de 254 loopt het slot de derde byte in: /16, niet /24.
+    assert_eq!(Ip4(port_ip4(255)).to_string(), "10.100.1.0");
+    assert_eq!(Ip4(port_ip4(SLOT_MAX)).to_string(), "10.100.255.254");
+    assert_eq!(port_mac(300), [2, 0, 0, 0, 1, 44]);
+    assert_eq!(ip4_port(HOST_IP4 - 1), None, "het netadres");
+    assert_eq!(ip4_port(0x0A64_FFFF), None, "de broadcast");
     assert_eq!(ip4_port(0x0A65_0002), None, "ander subnet");
 }
 

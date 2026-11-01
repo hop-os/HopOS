@@ -257,8 +257,6 @@ pub(crate) fn switch_up() -> bool {
 
 /// De vaste instellingen van het netwerkvlak, uit `main`.
 pub(crate) struct Params {
-    /// Het hoogste slotnummer van dit board.
-    pub(crate) max_slots: usize,
     /// De klok van het board (monotone nanoseconden).
     pub(crate) now: Clock,
     /// De kick van slot `i` na een leeg-naar-niet-leeg-schrijf in zijn
@@ -345,7 +343,6 @@ pub(crate) fn start<D: Device + 'static>(
 
     let mut sw = Switch::new(
         switch::Config {
-            max_slots: p.max_slots,
             now: p.now,
             log: log_line,
             slot_wake: p.slot_wake,
@@ -364,7 +361,7 @@ pub(crate) fn start<D: Device + 'static>(
         },
     )
     .map_err(Error::Net)?;
-    sw.attach_host(sw_tx, sw_rx);
+    sw.attach_host(sw_tx, sw_rx).map_err(Error::Net)?;
 
     // De stop van de switch ([`net::switch::Xoff`]): de pomp opent hem als
     // de NIC weer frames neemt.
@@ -392,15 +389,14 @@ pub(crate) fn start<D: Device + 'static>(
     exec.spawn(switch::flow_expiry(exec, &COMMANDS))
         .map_err(|_| Error::Spawn("flow expiry"))?;
     println!(
-        "net: switch up, ports 0..={}, host rings 2x{} bytes HOPOS_SWITCH_UP",
-        p.max_slots, HOST_RING_DATA
+        "net: switch up, host rings 2x{} bytes HOPOS_SWITCH_UP",
+        HOST_RING_DATA
     );
 
     let host_buf = boot_buf(MAX_LAN_FRAME)?;
     let node = Node {
         exec,
         mac,
-        max_slots: p.max_slots,
         rx: hop_rx,
         tx: hop_tx,
         buf: host_buf,
@@ -487,7 +483,6 @@ fn boot_buf(n: usize) -> Result<Vec<u8>, Error> {
 struct Node {
     exec: &'static Executor,
     mac: [u8; 6],
-    max_slots: usize,
     rx: RingRx,
     tx: RingTx,
     buf: Vec<u8>,
@@ -557,14 +552,10 @@ impl Node {
         }
 
         let Node {
-            rx,
-            tx,
-            mut buf,
-            max_slots,
-            ..
+            rx, tx, mut buf, ..
         } = self;
         let node = NodeStack { exec };
-        HostPort::new(node, rx, tx, &HOST_BELL, &DOOR, &STATS, mac, ip, max_slots)
+        HostPort::new(node, rx, tx, &HOST_BELL, &DOOR, &STATS, mac, ip)
             .run(exec, &mut buf)
             .await;
     }

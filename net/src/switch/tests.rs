@@ -84,7 +84,6 @@ fn harness() -> H {
     let (egress, from_switch) = leak(Egress::new()).split().unwrap();
     let sw = Switch::new(
         Config {
-            max_slots: SLOT_CAP,
             now: fake_now,
             log: no_log,
             slot_wake: record_wake,
@@ -132,7 +131,7 @@ impl H {
     fn host(&mut self) -> App {
         let (tx_r, tx_w) = mem::pair(RING);
         let (rx_r, rx_w) = mem::pair(RING);
-        self.sw.attach_host(tx_r, rx_w);
+        self.sw.attach_host(tx_r, rx_w).unwrap();
         App { tx: tx_w, rx: rx_r }
     }
 
@@ -341,36 +340,33 @@ fn switch_pending_leest_onder_lock_contention() {
     assert!(!h.published.pending(), "een ontkoppelde poort belt nog");
 }
 
-/// De bitmaps van 03-10: de deur en de ronde kijken alleen naar poorten
-/// die hangen, ook voorbij het eerste woord (slot 100), en een ontkoppelde
-/// poort valt eruit.
+/// De deur en de ronde kijken alleen naar poorten die hangen, ook ver
+/// voorbij de oude grens van 128 slots en over de byte van de MAC heen
+/// (slot 40000: 10.40_000.156.65, `..:9c:40`), en een ontkoppelde poort valt
+/// eruit. Er is geen maximum aantal slots; de tabel groeit mee.
 #[test]
 fn ronde_en_deur_kennen_alleen_de_poorten_die_hangen() {
-    assert_eq!(
-        ports_of([1 << 3 | 1 << 63, 0, 1]).collect::<Vec<_>>(),
-        vec![3, 63, 128]
-    );
     let mut h = harness();
     let mut low = h.attach(2);
-    let mut high = h.attach(100);
+    let mut high = h.attach(40_000);
     assert!(!h.published.pending());
     let f = mk_frame(
         PROTO_TCP,
         port_mac(2),
-        port_mac(100),
-        port_ip4(100),
+        port_mac(40_000),
+        port_ip4(40_000),
         port_ip4(2),
         1,
         2,
         b"x",
     );
     assert!(high.tx.push(KIND_FRAME, &f));
-    assert!(h.published.pending(), "slot 100 belt niet");
+    assert!(h.published.pending(), "slot 40000 belt niet");
     let mut buf = vec![0u8; MAX_LAN_FRAME];
     assert!(h.sw.switch_pass(&mut buf));
     assert_eq!(low.rx.frame().as_deref(), Some(&f[..]));
     assert!(!h.published.pending());
-    h.sw.detach(100).unwrap();
+    h.sw.detach(40_000).unwrap();
     assert!(high.tx.push(KIND_FRAME, &f));
     assert!(!h.published.pending(), "een ontkoppelde poort belt nog");
     assert!(

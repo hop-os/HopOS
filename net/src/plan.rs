@@ -1,21 +1,29 @@
 //! Het interne net-plan: subnet, per-slot IP en MAC, de gateway, en de
 //! framematen van het slot-LAN.
 //!
-//! Deterministisch, geen tabellen die leren: HOP is de gateway op .1, slot
-//! `i` op .(i+1)/24, MAC `02:00:00:00:00:<slot>` (HOP = `..:00`). Eén bron van
+//! Deterministisch, geen tabellen die leren: HOP is de gateway op
+//! 10.100.0.1, slot `i` op 10.100.0.1 + `i` in een /16, MAC
+//! `02:00:00:00:<slot, zestien bits>` (HOP = `..:00:00`). Eén bron van
 //! waarheid, zodat de switch en de app-stacks nooit uiteenlopen; beide kanten
 //! leiden het uit het slotnummer af.
 //!
 //! De waarheid staat in `abi::layout` (Go: `metal/abi/layout`), de
 //! adresfuncties ook: een slotnummer als `usize` waarin 0 de kern is, want
-//! de switch-poorten zijn 0..=`SLOT_CAP` en poort 0 bestaat als poort, niet
-//! als app (`abi::layout::Slot` begint bij 1). Dit bestand voegt de
-//! framematen van het slot-LAN toe.
+//! poort 0 bestaat als poort, niet als app (`abi::layout::Slot` begint bij
+//! 1). Dit bestand voegt de framematen van het slot-LAN toe.
 
-pub use abi::layout::{HOST_MAC, NET_PREFIX, SLOT_CAP, ip4_port, port_ip4, port_mac};
+pub use abi::layout::{HOST_MAC, NET_PREFIX, ip4_port, port_ip4, port_mac};
 
-/// Het aantal switch-poorten: poort 0 is HOP, 1..=`SLOT_CAP` zijn apps.
-pub const PORTS: usize = SLOT_CAP + 1;
+/// De poort achter een MAC van het slot-LAN (de inverse van [`port_mac`]):
+/// `02:00:00:00` en dan de zestien bits van de poort; `None` voor elke
+/// andere MAC.
+#[must_use]
+pub const fn mac_port(m: [u8; 6]) -> Option<usize> {
+    match m {
+        [0x02, 0, 0, 0, hi, lo] => Some((hi as usize) << 8 | lo as usize),
+        _ => None,
+    }
+}
 
 /// De MTU van het slot-LAN (de frame-ringen). Geen draad, geen bitfouten,
 /// dus zo groot als IPv4 toelaat: één 1 MiB-chunk is dan 16 segmenten in
@@ -40,10 +48,10 @@ pub const fn host_ip4() -> u32 {
     abi::layout::HOST_IP4
 }
 
-/// Ligt `ip` in het interne subnet (10.100.0.0/24)?
+/// Ligt `ip` in het interne subnet (10.100.0.0/16)?
 #[must_use]
 pub const fn is_internal(ip: u32) -> bool {
-    ip >> 8 == host_ip4() >> 8
+    ip >> (32 - NET_PREFIX) == host_ip4() >> (32 - NET_PREFIX)
 }
 
 #[cfg(test)]
@@ -58,6 +66,9 @@ mod tests {
         assert_eq!(MAX_LAN_FRAME, 65553);
         assert!(is_internal(port_ip4(7)));
         assert!(!is_internal(0x0A00_020F));
+        assert!(is_internal(port_ip4(40_000)), "/16, niet /24");
         assert_eq!(HOST_MAC, port_mac(0));
+        assert_eq!(mac_port(port_mac(40_000)), Some(40_000));
+        assert_eq!(mac_port([2, 0, 0, 1, 0, 3]), None);
     }
 }

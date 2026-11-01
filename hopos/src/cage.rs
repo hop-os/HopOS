@@ -19,7 +19,7 @@ use abi::hopabi::{
 };
 use abi::layout::{
     self, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_TARGET, CTX_NEXT_PA, CTX_SMP, CtxState, LINK_BASE,
-    Plan,
+    Plan, SLOT_CAP,
 };
 use board::Board;
 use core::cell::OnceCell;
@@ -475,7 +475,7 @@ fn wake_sleeping(plan: &Plan, now: u64) {
         let mut due = false;
         let _ = roster::residents(plan, c, |id| {
             // Een id voorbij SLOT_CAP is de secundaire van deze core.
-            let ctx = match layout::Slot::new(usize::from(id)) {
+            let ctx = match layout::Slot::new(usize::from(id)).filter(|s| s.get() <= SLOT_CAP) {
                 Some(s) => plan.ctx_pa(s),
                 None => plan.smp_ctx_pa(c),
             };

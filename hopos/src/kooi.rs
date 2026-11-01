@@ -269,7 +269,9 @@ impl<I: Isa> Kooi<I> {
         let mut live = [0u8; SHARE_SCAN];
         let mut n = 0;
         let _ = roster::residents(&self.plan, c, |id| {
-            let Some(slot) = Slot::new(usize::from(id)).filter(|s| Some(*s) != leaving) else {
+            let Some(slot) =
+                Slot::new(usize::from(id)).filter(|s| s.get() <= SLOT_CAP && Some(*s) != leaving)
+            else {
                 return;
             };
             if self.live(slot)
@@ -571,7 +573,7 @@ impl<I: Isa> Cage for Kooi<I> {
         let c = layout::Core::new(core.get()).filter(|_| core != Core::OS)?;
         let at = self.plan.park_mbox_pa(c).ok()?.add(SCHED_CURRENT);
         dev::pull(at, 8);
-        Slot::new(usize::try_from(dev::read64(at)).ok()?)
+        Slot::new(usize::try_from(dev::read64(at)).ok()?).filter(|s| s.get() <= SLOT_CAP)
     }
 
     fn smp_request(&self, slot: Slot) -> u64 {

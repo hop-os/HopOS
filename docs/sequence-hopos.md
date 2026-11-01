@@ -737,7 +737,7 @@ Te wegen:
    2. Een budget.
    3. Zaad.
    4. DNS uit de env.
-   5. Een leannet-stack: IP 10.100.0.(slot+1), MAC 02:00:00:00:00:slot.
+   5. Een leannet-stack: IP 10.100.0.1 + slot in een /16 (slot 1 is 10.100.0.2), MAC 02:00:00:00 met de zestien bits van het slot.
    6. De gateway 10.100.0.1 als statische buur, zonder ARP.
    7. De pomp.
 2. **Een frame naar buiten:**

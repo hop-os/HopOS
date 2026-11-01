@@ -487,7 +487,6 @@ fn nic_up(
 ) {
     println!("net: nic up HOPOS_NIC_UP mac={}", nic.mac());
     let params = net::Params {
-        max_slots: slot_count(board),
         now: board.clock(),
         slot_wake: slots::wake,
         resident: slots::resident,

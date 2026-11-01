@@ -11,7 +11,7 @@ use abi::layout::{CTX_BOOT_PC, CTX_NEXT_PA, CTX_SLEEPS, CTX_SMP, SCHED_COUNT, SC
 /// (`hopos_el2_ctx_of`), om [`context_id`] tegen te toetsen.
 fn context_pa(plan: &Plan, id: u8) -> Result<Pa, Error> {
     let i = usize::from(id);
-    if let Some(slot) = Slot::new(i) {
+    if let Some(slot) = Slot::new(i).filter(|_| i <= SLOT_CAP) {
         return plan.ctx_pa(slot).map_err(Error::Plan);
     }
     let core = i

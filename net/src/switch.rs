@@ -18,22 +18,23 @@
 
 use crate::nat::{Nat, NatIo, Neighbors, Proto, Uplink};
 use crate::plan::{
-    HOST_MAC, MAX_LAN_FRAME, PORTS, SLOT_CAP, UPLINK_MAX_FRAME, host_ip4, port_ip4, port_mac,
+    HOST_MAC, MAX_LAN_FRAME, UPLINK_MAX_FRAME, host_ip4, mac_port, port_ip4, port_mac,
 };
 use crate::ring::{InPlace, KIND_FRAME, KIND_UPLINK, Reader, Writer};
 use crate::wire::{ET_ARP, ET_IPV4, ET_IPV6, ETH_LEN, be16, be32, byte, mac_at, put_mac, put16};
 use crate::{Error, Frame, LogFn, Result, Stats, UPLINK_QUEUE};
+use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 use core::sync::atomic::{
-    AtomicBool, AtomicU64,
+    AtomicBool,
     Ordering::{AcqRel, Relaxed, Release},
 };
 use core::time::Duration;
 use executor::{Executor, Sleeper};
 use sync::mpsc::Mailbox;
 use sync::spsc::{Receiver, Sender};
-use sync::{Either, Oneshot, Signal, select, yield_now};
+use sync::{Either, LocalCell, Oneshot, Signal, select, yield_now};
 
 /// Het aantal frames per poort per switch-ronde, zodat één drukke poort de
 /// rest niet verhongert.
@@ -67,7 +68,7 @@ pub enum Command<'a, R, W> {
     /// Koppelt slot `slot` aan de switch met zijn twee ringen (door de
     /// slot-lifecycle, ná de ring-init). De switch wordt eigenaar.
     Attach {
-        /// Het slot (1..=max).
+        /// Het slot.
         slot: usize,
         /// De TX-ring (app → switch), leeskant.
         tx: R,
@@ -115,41 +116,32 @@ pub enum Command<'a, R, W> {
 }
 
 /// De poortentabel zoals de deur van de executor hem ziet: per poort het
-/// probe-handvat van de TX-ring (plus één; 0 = geen poort).
+/// probe-handvat van de TX-ring (plus één; 0 = geen poort), op poortnummer.
 ///
-/// Gepubliceerd in de zin van het handboek §2.1: de actor schrijft, de deur
-/// leest zonder slot. De grace-periode is "na de volgende ronde van de
-/// executor": de deur draait tussen rondes, nooit tijdens de actor, dus na
-/// een `Detach` ziet geen lezer het oude handvat nog. Een lezer op een andere
-/// core mag racen: een verouderd handvat geeft hooguit een overbodige bel,
-/// en de actor kijkt zelf nog een keer.
+/// De actor schrijft, de deur leest; allebei op de executor van de OS-core
+/// en nooit tegelijk: de deur draait tussen rondes, nooit tijdens de actor
+/// (een [`LocalCell`], handboek §1.1). Na een `Detach` ziet geen lezer het
+/// oude handvat nog. De tabel groeit met het hoogste slotnummer dat ooit
+/// hing, zoals de fd-tabel van Linux: de kern deelt het laagste vrije
+/// nummer uit, dus hij is zo lang als er ooit tegelijk slots waren.
 pub struct Published<R> {
-    tx: [AtomicU64; PORTS],
+    tx: LocalCell<Vec<u64>>,
     /// De uplink staat stil ([`Xoff`]): dan is een volle TX-ring geen werk
     /// voor de switch, en belt de deur niet.
     xoff: Xoff,
-    /// Welke poorten een handvat hebben, bit `i % 64` van woord `i / 64`:
-    /// de deur kijkt alleen daar (de gereed-bits van de executor, Linux'
-    /// `for_each_set_bit`). Tot 03-10 las elke blik alle 129 woorden, en
-    /// de deur kijkt twee keer per beurt van een bewoner van de OS-core.
-    live: [AtomicU64; PORT_WORDS],
     _ring: PhantomData<fn() -> R>,
 }
 
-/// De woorden van een poort-bitmap.
-const PORT_WORDS: usize = PORTS.div_ceil(64);
-
-/// De gezette bits van `words`, oplopend: de poortnummers.
-fn ports_of(words: [u64; PORT_WORDS]) -> impl Iterator<Item = usize> {
-    words.into_iter().enumerate().flat_map(|(w, mut bits)| {
-        core::iter::from_fn(move || {
-            (bits != 0).then(|| {
-                let i = w * 64 + bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                i
-            })
-        })
-    })
+/// Maakt plek `i` in `v` (met `none` erachter), faalbaar: een slot dat de
+/// switch niet kan dragen, wordt geweigerd ("past niet").
+fn reach<T>(v: &mut Vec<T>, i: usize, none: impl FnMut() -> T) -> Result {
+    if i >= v.len() {
+        let more = i + 1 - v.len();
+        v.try_reserve(more)
+            .map_err(|_| Error::OutOfMemory(more * core::mem::size_of::<T>()))?;
+        v.resize_with(i + 1, none);
+    }
+    Ok(())
 }
 
 impl<R: Reader> Published<R> {
@@ -157,9 +149,8 @@ impl<R: Reader> Published<R> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            tx: [const { AtomicU64::new(0) }; PORTS],
+            tx: LocalCell::cell(Vec::new()),
             xoff: Xoff::new(),
-            live: [const { AtomicU64::new(0) }; PORT_WORDS],
             _ring: PhantomData,
         }
     }
@@ -179,17 +170,13 @@ impl<R: Reader> Published<R> {
         if self.xoff.is_stopped() {
             return false;
         }
-        let live = core::array::from_fn(|w| self.live.get(w).map_or(0, |b| b.load(Relaxed)));
-        ports_of(live).any(|i| {
-            let v = self.tx.get(i).map_or(0, |h| h.load(Relaxed));
-            v != 0 && R::probe(v - 1)
-        })
+        self.tx.borrow().iter().any(|&v| v != 0 && R::probe(v - 1))
     }
 
     /// Is de TX-ring van poort `i` zeker leeg, zonder cache-onderhoud gezien
     /// ([`Reader::quiet`])? Dan hoeft een ronde hem niet te openen.
     fn quiet(&self, i: usize) -> bool {
-        let v = self.tx.get(i).map_or(0, |h| h.load(Relaxed));
+        let v = self.tx.borrow().get(i).copied().unwrap_or(0);
         v != 0 && R::quiet(v - 1)
     }
 
@@ -205,17 +192,18 @@ impl<R: Reader> Published<R> {
         work
     }
 
-    fn set(&self, port: usize, handle: Option<u64>) {
-        if let Some(h) = self.tx.get(port) {
-            h.store(handle.map_or(0, |v| v.wrapping_add(1)), Relaxed);
+    fn set(&self, port: usize, handle: u64) -> Result {
+        let mut t = self.tx.borrow_mut();
+        reach(&mut t, port, || 0)?;
+        if let Some(h) = t.get_mut(port) {
+            *h = handle.wrapping_add(1);
         }
-        if let Some(w) = self.live.get(port / 64) {
-            let bit = 1u64 << (port % 64);
-            if handle.is_some() {
-                w.fetch_or(bit, Relaxed);
-            } else {
-                w.fetch_and(!bit, Relaxed);
-            }
+        Ok(())
+    }
+
+    fn clear(&self, port: usize) {
+        if let Some(h) = self.tx.borrow_mut().get_mut(port) {
+            *h = 0;
         }
     }
 }
@@ -367,8 +355,6 @@ struct Port<R, W> {
 /// De vaste instellingen van de switch.
 #[derive(Clone, Copy)]
 pub struct Config {
-    /// Het hoogste slotnummer van dit board (≤ [`SLOT_CAP`]).
-    pub max_slots: usize,
     /// Monotone nanoseconden.
     pub now: fn() -> u64,
     /// De console.
@@ -406,12 +392,9 @@ pub struct Wiring<'a, R: Reader, W: Writer> {
 
 /// De poorten en de uitgangen: alles wat de NAT als [`NatIo`] ziet.
 struct Core<'a, R, W> {
-    ports: [Option<Port<R, W>>; PORTS],
-    /// Welke poorten hangen, als bits ([`ports_of`]): een ronde loopt
-    /// alleen langs die, niet langs alle [`SLOT_CAP`] (03-10: een lege
-    /// ronde kostte 2300 instructies, twee per hop tussen twee bewoners van
-    /// de OS-core).
-    live: [u64; PORT_WORDS],
+    /// De poorten op nummer (0 is de kern), zo lang als het hoogste slot
+    /// dat ooit hing ([`Published`]).
+    ports: Vec<Option<Port<R, W>>>,
     cfg: Config,
     stats: &'a Stats,
     host_bell: Option<&'a Signal>,
@@ -433,14 +416,9 @@ pub struct Switch<'a, R: Reader, W: Writer> {
 impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
     /// Een switch zonder poorten. Alloceert de NAT-tabellen (boot).
     pub fn new(cfg: Config, w: Wiring<'a, R, W>) -> Result<Self> {
-        let cfg = Config {
-            max_slots: cfg.max_slots.min(SLOT_CAP),
-            ..cfg
-        };
         Ok(Self {
             core: Core {
-                ports: core::array::from_fn(|_| None),
-                live: [0; PORT_WORDS],
+                ports: Vec::new(),
                 cfg,
                 stats: w.stats,
                 host_bell: w.host_bell,
@@ -457,9 +435,15 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
     }
 
     /// Hangt HOP's eigen ringen aan poort 0 (bij boot, vóór `run`).
-    pub fn attach_host(&mut self, tx: R, rx: W) {
-        self.published.set(0, Some(tx.probe_handle()));
-        if let Some(p) = self.core.ports.get_mut(0) {
+    pub fn attach_host(&mut self, tx: R, rx: W) -> Result {
+        self.plug(0, tx, rx)
+    }
+
+    /// Hangt ringen aan poort `i`; een oude poort daar wordt gedropt.
+    fn plug(&mut self, i: usize, tx: R, rx: W) -> Result {
+        reach(&mut self.core.ports, i, || None)?;
+        self.published.set(i, tx.probe_handle())?;
+        if let Some(p) = self.core.ports.get_mut(i) {
             *p = Some(Port {
                 tx,
                 rx,
@@ -468,41 +452,27 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 src_warned: false,
             });
         }
-        self.core.set_live(0, true);
+        Ok(())
     }
 
     /// Koppelt slot `i` (de actor-kant van [`Command::Attach`]; vóór `run`
     /// ook direct te roepen). Een oude poort op dat slot wordt gedropt.
     pub fn attach(&mut self, i: usize, tx: R, rx: W) -> Result {
-        if i < 1 || i > self.core.cfg.max_slots {
+        if abi::layout::Slot::new(i).is_none() {
             return Err(Error::SlotRange(i));
         }
-        let handle = tx.probe_handle();
-        let Some(p) = self.core.ports.get_mut(i) else {
-            return Err(Error::SlotRange(i));
-        };
-        *p = Some(Port {
-            tx,
-            rx,
-            rx_blocked: false,
-            tx_warned: false,
-            src_warned: false,
-        });
-        self.published.set(i, Some(handle));
-        self.core.set_live(i, true);
-        Ok(())
+        self.plug(i, tx, rx)
     }
 
     /// Ontkoppelt slot `i`: eerst uit de gepubliceerde tabel, dan gedropt.
     pub fn detach(&mut self, i: usize) -> Result {
-        if i < 1 || i > self.core.cfg.max_slots {
+        if abi::layout::Slot::new(i).is_none() {
             return Err(Error::SlotRange(i));
         }
-        self.published.set(i, None);
+        self.published.clear(i);
         if let Some(p) = self.core.ports.get_mut(i) {
             *p = None;
         }
-        self.core.set_live(i, false);
         Ok(())
     }
 
@@ -529,14 +499,11 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 slot,
                 slot_port,
                 ack,
-            } => {
-                let max = self.core.cfg.max_slots;
-                ack.put(
-                    self.nat
-                        .publish(proto, node_port, slot, slot_port, max)
-                        .map(|()| 0),
-                );
-            }
+            } => ack.put(
+                self.nat
+                    .publish(proto, node_port, slot, slot_port)
+                    .map(|()| 0),
+            ),
             Command::UnpublishSlot { slot, ack } => {
                 self.nat.unpublish_slot(slot);
                 ack.put(Ok(0));
@@ -567,8 +534,11 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
         self.warn_corrupt(0);
         // Een stille coherente ring niet openen: het lezen van kop en staart
         // kost daar per ring een `dc civac` en twee `dsb sy` (03-10, O6N).
-        let (live, published) = (self.core.live, self.published);
-        'ports: for i in ports_of(live).filter(|i| *i != 0 && !published.quiet(*i)) {
+        let published = self.published;
+        'ports: for i in 1..self.core.ports.len() {
+            if !self.core.attached(i) || published.quiet(i) {
+                continue;
+            }
             // Past een hele burst in de egress-rij, dan één blik per poort en
             // niet één per record: het pad van slot naar slot leest per
             // record anders twee indexen van een rij die het nooit raakt.
@@ -721,7 +691,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             p.tx_warned = true;
             // Uit de deur: een dode ring leest daar voor altijd als "werk"
             // (kop voorbij staart), en dan sliep de OS-core nooit meer.
-            self.published.set(i, None);
+            self.published.clear(i);
             log(format_args!("HOPOS_NETRING_TX_CORRUPT: slot {i}: {why}"));
         }
     }
@@ -788,17 +758,6 @@ pub async fn flow_expiry<R: Reader, W: Writer, const T: usize, const M: usize>(
 }
 
 impl<R: Reader, W: Writer> Core<'_, R, W> {
-    fn set_live(&mut self, i: usize, on: bool) {
-        if let Some(w) = self.live.get_mut(i / 64) {
-            let bit = 1u64 << (i % 64);
-            if on {
-                *w |= bit;
-            } else {
-                *w &= !bit;
-            }
-        }
-    }
-
     fn port(&mut self, i: usize) -> Option<&mut Port<R, W>> {
         self.ports.get_mut(i).and_then(Option::as_mut)
     }
@@ -840,11 +799,13 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
     /// (die toetst op zijn eigen kopie en meldt een vreemde bron).
     fn relay(&mut self, src: usize, f: &[u8]) -> bool {
         let n = f.len();
-        if n < ETH_LEN || byte(f, 0) & 1 != 0 || mac_at(f, 0)[..5] != port_mac(0)[..5] {
+        if n < ETH_LEN || byte(f, 0) & 1 != 0 {
             return false;
         }
-        let dst = usize::from(byte(f, 5));
-        if dst == 0 || dst == src || dst > self.cfg.max_slots {
+        let Some(dst) = mac_port(mac_at(f, 0)) else {
+            return false;
+        };
+        if dst == 0 || dst == src {
             return false;
         }
         if !self.port(dst).is_some_and(|p| p.rx.is_normal()) {
@@ -941,7 +902,7 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
 
 impl<R: Reader, W: Writer> NatIo for Core<'_, R, W> {
     fn deliver(&mut self, slot: usize, f: &[u8]) {
-        if f.len() > MAX_LAN_FRAME || slot < 1 || slot > self.cfg.max_slots {
+        if f.len() > MAX_LAN_FRAME || slot < 1 {
             return;
         }
         self.write_rx(slot, KIND_FRAME, f);
@@ -1039,7 +1000,7 @@ fn deliver<R: Reader, W: Writer>(
         if arp_reply_gateway(core, src, p) {
             return true; // who-has de gateway? HOP antwoordt zelf
         }
-        for i in 1..=core.cfg.max_slots {
+        for i in 1..core.ports.len() {
             if i != src && core.attached(i) {
                 core.write_rx(i, KIND_FRAME, p);
             }
@@ -1052,7 +1013,7 @@ fn deliver<R: Reader, W: Writer>(
         }
         return true;
     }
-    if mac_at(p, 0)[..5] != port_mac(0)[..5] {
+    let Some(dst) = mac_port(mac_at(p, 0)) else {
         // Geen switch-MAC. IPv6-unicast van een slot naar een LAN-buur gaat
         // als écht L2-frame de NIC op, mét de slot-MAC als bron: v6 kent
         // geen NAT-pad, NDP heeft de slot al als buur geadverteerd. IPv4
@@ -1061,12 +1022,11 @@ fn deliver<R: Reader, W: Writer>(
             core.uplink_tx(p);
         }
         return true;
-    }
-    let dst = usize::from(byte(p, 5));
+    };
     if dst == 0 {
         return false;
     }
-    if dst != src && dst <= core.cfg.max_slots && core.attached(dst) {
+    if dst != src && core.attached(dst) {
         core.write_rx(dst, KIND_FRAME, p);
     }
     true
@@ -1108,7 +1068,7 @@ fn arp_reply_gateway<R: Reader, W: Writer>(
     src: usize,
     p: &[u8],
 ) -> bool {
-    if src < 1 || src > core.cfg.max_slots || !core.attached(src) {
+    if src < 1 || !core.attached(src) {
         return false;
     }
     if p.len() < ETH_LEN + 28 || be16(p, 12) != ET_ARP {
@@ -1154,16 +1114,14 @@ fn uplink_in<R: Reader, W: Writer>(
     if f.len() >= ETH_LEN && is_ip_multicast(f) {
         // HOP's eigen stack joint geen groepen; de slot-stacks filteren zelf
         // op lidmaatschap, dus dit is een kopie per aangesloten slot.
-        for i in 1..=core.cfg.max_slots {
+        for i in 1..core.ports.len() {
             core.deliver(i, f);
         }
         return;
     }
-    let dst = usize::from(byte(f, 5));
     if f.len() >= ETH_LEN
         && be16(f, 12) == ET_IPV6
-        && mac_at(f, 0)[..5] == port_mac(0)[..5]
-        && (1..=core.cfg.max_slots).contains(&dst)
+        && let Some(dst) = mac_port(mac_at(f, 0)).filter(|&d| d >= 1)
     {
         // De terugweg van het IPv6-L2-pad: een LAN-buur antwoordt de slot
         // rechtstreeks op de MAC die NDP adverteerde.

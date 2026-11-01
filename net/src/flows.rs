@@ -9,7 +9,6 @@
 //! daarvoor pointer-gelijkheid).
 
 use crate::Error;
-use crate::plan::SLOT_CAP;
 use alloc::vec::Vec;
 
 /// De finalizer van splitmix64: goedkoop, en genoeg om opeenvolgende IP's en
@@ -39,8 +38,8 @@ pub const MAX_FLOWS: usize = 4096;
 
 /// Het eerlijke deel per slot ónder het globale plafond. Zonder dit is de
 /// conntrack één gedeelde pot: één app die 4096 verbindingen opent laat elke
-/// buur geen nieuwe meer maken. Ruim gekozen: 128 slots × 512 overschrijdt
-/// het globale plafond bewust (een eerlijkheidsgrens, geen reservering).
+/// buur geen nieuwe meer maken. Ruim gekozen: acht slots × 512 vullen al het
+/// globale plafond (een eerlijkheidsgrens, geen reservering).
 pub const MAX_FLOWS_PER_SLOT: usize = 512;
 
 const EMPTY: u16 = u16::MAX;
@@ -50,7 +49,7 @@ const INDEX: usize = MAX_FLOWS * 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Flow {
     pub(crate) proto: u8,
-    pub(crate) slot: u8,
+    pub(crate) slot: u16,
     /// Slot/client → peer zag FIN.
     pub(crate) fin_fwd: bool,
     /// Peer/dienst → client zag FIN.
@@ -137,7 +136,11 @@ pub(crate) struct FlowTable {
     fwd: Vec<Id>,
     rev: Vec<Id>,
     len: usize,
-    count_by_slot: [u16; SLOT_CAP + 1],
+    /// Per slot met flows het aantal, op slot gesorteerd: hoogstens
+    /// [`MAX_FLOWS`] ingangen (elke ingang heeft minstens één flow), en die
+    /// ruimte is bij boot gereserveerd. Een tabel per slotnummer zou een
+    /// grens op het aantal slots zijn; die is er niet.
+    by_slot: Vec<(u16, u16)>,
     /// Het hoogste aantal flows sinds de laatste compactie: de meetlat van
     /// Go's `flowMapHighWater`.
     pub(crate) high_water: usize,
@@ -157,7 +160,12 @@ impl FlowTable {
             fwd: filled(INDEX, EMPTY)?,
             rev: filled(INDEX, EMPTY)?,
             len: 0,
-            count_by_slot: [0; SLOT_CAP + 1],
+            by_slot: {
+                let mut v = Vec::new();
+                v.try_reserve_exact(MAX_FLOWS)
+                    .map_err(|_| Error::OutOfMemory(MAX_FLOWS * 4))?;
+                v
+            },
             high_water: 0,
         })
     }
@@ -171,8 +179,34 @@ impl FlowTable {
     }
 
     /// Het aantal flows van `slot`.
-    pub(crate) fn count(&self, slot: usize) -> usize {
-        usize::from(self.count_by_slot.get(slot).copied().unwrap_or(0))
+    pub(crate) fn count(&self, slot: u16) -> usize {
+        match self.by_slot.binary_search_by_key(&slot, |e| e.0) {
+            Ok(i) => self.by_slot.get(i).map_or(0, |e| usize::from(e.1)),
+            Err(_) => 0,
+        }
+    }
+
+    /// Telt een flow van `slot` bij (`up`) of eraf. Groeien past altijd: er
+    /// zijn nooit meer ingangen dan flows, en de slab is begrensd.
+    fn tally(&mut self, slot: u16, up: bool) {
+        match self.by_slot.binary_search_by_key(&slot, |e| e.0) {
+            Ok(i) if up => {
+                if let Some(e) = self.by_slot.get_mut(i) {
+                    e.1 += 1;
+                }
+            }
+            Ok(i) => {
+                if self.by_slot.get(i).is_some_and(|e| e.1 <= 1) {
+                    self.by_slot.remove(i);
+                } else if let Some(e) = self.by_slot.get_mut(i) {
+                    e.1 -= 1;
+                }
+            }
+            Err(i) if up && self.by_slot.len() < self.by_slot.capacity() => {
+                self.by_slot.insert(i, (slot, 1));
+            }
+            Err(_) => {}
+        }
     }
 
     pub(crate) fn get(&self, id: Id) -> Option<&Flow> {
@@ -237,9 +271,7 @@ impl FlowTable {
         *self.fwd.get_mut(fp)? = id;
         *self.rev.get_mut(rp)? = id;
         self.len += 1;
-        if let Some(c) = self.count_by_slot.get_mut(usize::from(fl.slot)) {
-            *c += 1;
-        }
+        self.tally(fl.slot, true);
         self.high_water = self.high_water.max(self.len);
         Some(id)
     }
@@ -264,9 +296,7 @@ impl FlowTable {
         // De vrije lijst heeft precies MAX_FLOWS plaatsen; hij kan niet vol.
         self.free.push(id);
         self.len -= 1;
-        if let Some(c) = self.count_by_slot.get_mut(usize::from(fl.slot)) {
-            *c = c.saturating_sub(1);
-        }
+        self.tally(fl.slot, false);
         true
     }
 
@@ -338,7 +368,7 @@ impl FlowTable {
 mod tests {
     use super::*;
 
-    fn fl(slot: u8, sport: u16, np: u16) -> Flow {
+    fn fl(slot: u16, sport: u16, np: u16) -> Flow {
         Flow {
             proto: 6,
             slot,
@@ -358,7 +388,7 @@ mod tests {
         let mut t = FlowTable::new().unwrap();
         let mut ids = Vec::new();
         for i in 0..MAX_FLOWS as u16 {
-            ids.push(t.insert(fl((i % 8) as u8 + 1, i, 20000 + i)).unwrap());
+            ids.push(t.insert(fl(i % 8 + 1, i, 20000 + i)).unwrap());
         }
         assert!(t.is_full());
         assert!(t.insert(fl(1, 60000, 60000)).is_none());
@@ -366,7 +396,7 @@ mod tests {
             assert!(t.remove(*id), "flow {n}");
         }
         for i in 0..MAX_FLOWS as u16 {
-            let f = fl((i % 8) as u8 + 1, i, 20000 + i);
+            let f = fl(i % 8 + 1, i, 20000 + i);
             let present = i % 3 != 0;
             assert_eq!(t.by_fwd(&f.fkey()).is_some(), present, "fwd {i}");
             assert_eq!(t.by_rev(&f.rkey()).is_some(), present, "rev {i}");
@@ -383,5 +413,16 @@ mod tests {
             t.len()
         );
         assert!(t.insert(fl(1, 0, 20000)).is_some());
+    }
+
+    #[test]
+    fn the_count_per_slot_knows_no_slot_ceiling() {
+        let mut t = FlowTable::new().unwrap();
+        let a = t.insert(fl(40_000, 1, 20001)).unwrap();
+        t.insert(fl(40_000, 2, 20002)).unwrap();
+        t.insert(fl(300, 3, 20003)).unwrap();
+        assert_eq!((t.count(40_000), t.count(300), t.count(7)), (2, 1, 0));
+        assert!(t.remove(a));
+        assert_eq!(t.count(40_000), 1);
     }
 }

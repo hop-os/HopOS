@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn canoniek_venster_ligt_op_slot_1() {
         let w = Window::canonical(RAM, 0, RAM);
-        assert_eq!(w.link_base, Slot::FIRST.base());
+        assert_eq!(w.link_base, LINK_BASE);
     }
 
     #[test]

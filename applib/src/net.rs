@@ -6,9 +6,9 @@
 //! `up.go`). De stack zelf staat in [`crate::appnet`] en gebruikt precies
 //! dit; een app die rauwe frames wil ook.
 //!
-//! Het interne net is deterministisch: kern op .1, slot i op .(i+1)/24, MAC
-//! `02:00:00:00:00:<slot>`. Er wordt niets geresolved; beide kanten leiden het
-//! uit het slotnummer af.
+//! Het interne net is deterministisch: kern op 10.100.0.1, slot i op
+//! 10.100.0.1 + i in een /16, MAC `02:00:00:00:<slot, zestien bits>`. Er
+//! wordt niets geresolved; beide kanten leiden het uit het slotnummer af.
 //!
 //! Dit module bezit de TX-producer en de RX-consument van de app. De
 //! deurbel-drempel op de control-page is van de idle ([`crate::sleep`]).

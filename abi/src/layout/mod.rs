@@ -59,12 +59,11 @@ pub const USB_DMA_SIZE: u64 = 0x0020_0000;
 // Het canonieke adresbeeld van een app (IPA).
 // ---------------------------------------------------------------------------
 
-/// De canonieke IPA-basis van slot 1. Elk image is op dit bereik gelinkt;
-/// de stage-2 legt dat venster op de fysieke partitie uit de pool.
+/// De canonieke IPA-basis van elk slot. Elk image is op dit bereik gelinkt;
+/// de stage-2 legt dat venster op de fysieke partitie uit de pool, en het
+/// venster loopt tot de rand van het IPA-regime (`hopos::cage::link_window`).
+/// Er is geen venster per slot: elke kooi ziet hetzelfde beeld.
 pub const SLOTS_BASE: u64 = 0x5000_0000;
-/// Het IPA-venster per slot: 512 MB. Een IPA-vorm, geen fysieke
-/// reservering; de fysieke capaciteit is de pool.
-pub const SLOT_STRIDE: u64 = 0x2000_0000;
 /// De compile-time bovengrens op het aantal slots.
 ///
 /// 128 dekt de Ampere Altra (127 app-cores). De per-slot plan-regio's
@@ -78,7 +77,7 @@ pub const SLOT_CAP: usize = 128;
 /// kooi-blok; een board met een kleine staart (LicheeRV, Radxa) zet het
 /// lager, een board met meer app-cores dan dit neemt die plus één.
 pub const SLOTS_DEFAULT: usize = 32;
-/// De basis waartegen elk app-image gelinkt is: het venster van slot 1.
+/// De basis waartegen elk app-image gelinkt is ([`SLOTS_BASE`]).
 /// [`crate::place::build`] toetst segmenten tegen `[LINK_BASE, LINK_BASE +
 /// app_ram)`.
 pub const LINK_BASE: u64 = SLOTS_BASE;
@@ -86,9 +85,6 @@ pub const LINK_BASE: u64 = SLOTS_BASE;
 /// 64 KB draagt de stage-1-tabellen van de app-runtime.
 pub const LINK_TEXT_OFF: u64 = 0x10000;
 
-// Het venster van slot 128 moet binnen de 39-bit IPA-ruimte van de
-// ARM-stage-2 vallen, anders is SLOT_CAP een leugen.
-const _: () = assert!(SLOTS_BASE + SLOT_CAP as u64 * SLOT_STRIDE <= 1 << 39);
 const _: () = assert!(SLOT_CAP <= u8::MAX as usize);
 
 /// De IPA-basis van de oude control-regio. Wat ervan over is, is de
@@ -140,7 +136,7 @@ const _: () = assert!(BOOT_SCRATCH_LEN <= 0x100);
 /// niet. Alleen de display-houder heeft dit gigabyte.
 pub const FB_IPA: u64 = 0x2000_0000;
 
-const _: () = assert!(FB_IPA + (1 << 30) <= SLOTS_BASE + SLOT_STRIDE);
+const _: () = assert!(FB_IPA < SLOTS_BASE);
 
 // ---------------------------------------------------------------------------
 // De slot-ABI: de staart van de eigen partitie.
@@ -303,39 +299,40 @@ pub const fn stage_addr(ram_base: u64, ram_size: u64, img_size: u64) -> Option<(
 // Slots en cores.
 // ---------------------------------------------------------------------------
 
-/// Een app-slot: 1 tot en met [`SLOT_CAP`]. Slot 0 bestaat niet als app; het
+/// Het hoogste slotnummer dat het slot-LAN kan adresseren: 10.100.0.0/16,
+/// slot `i` op 10.100.0.1 + `i`, en 10.100.255.255 is de broadcast. Een grens
+/// van het adres (zestien bits), geen capaciteit: of er nog een slot bij
+/// kan, is de vraag van de plaatsing (past het geheugen), en de kern deelt
+/// het laagste vrije nummer uit, zoals een fd.
+pub const SLOT_MAX: usize = 0xFFFF - 2;
+
+/// Een app-slot: 1 tot en met [`SLOT_MAX`]. Slot 0 bestaat niet als app; het
 /// is de kern zelf, en die heeft eigen namen ([`HOST_IP4`], [`HOST_MAC`]).
 ///
 /// # Invariants
 ///
-/// `1 <= self.0 <= SLOT_CAP`.
+/// `1 <= self.0 <= SLOT_MAX`.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct Slot(u8);
+pub struct Slot(u16);
 
 impl Slot {
-    /// Slot 1: het linkvenster van elk image.
+    /// Slot 1: Hop.
     pub const FIRST: Slot = Slot(1);
 
-    /// Slot `i`, of `None` buiten `1..=SLOT_CAP`.
+    /// Slot `i`, of `None` buiten `1..=SLOT_MAX`.
     #[must_use]
     pub const fn new(i: usize) -> Option<Slot> {
-        if i == 0 || i > SLOT_CAP {
+        if i == 0 || i > SLOT_MAX {
             return None;
         }
-        // INVARIANT: zojuist begrensd; SLOT_CAP past in een u8.
-        Some(Slot(i as u8))
+        // INVARIANT: zojuist begrensd; SLOT_MAX past in een u16.
+        Some(Slot(i as u16))
     }
 
     /// Het slotnummer, 1-based.
     #[must_use]
     pub const fn get(self) -> usize {
         self.0 as usize
-    }
-
-    /// De canonieke IPA-basis van dit slot.
-    #[must_use]
-    pub const fn base(self) -> u64 {
-        SLOTS_BASE + (self.0 as u64 - 1) * SLOT_STRIDE
     }
 }
 
@@ -759,56 +756,58 @@ const _: () = assert!(CTX_LEN - CTX_SMP == 256);
 // Het interne net: deterministisch, geen tabellen die leren.
 // ---------------------------------------------------------------------------
 
-/// De prefixlengte van het slot-LAN: 10.100.0.0/24.
-pub const NET_PREFIX: u32 = 24;
+/// De prefixlengte van het slot-LAN: 10.100.0.0/16, zestien bits voor het
+/// slot ([`SLOT_MAX`]).
+pub const NET_PREFIX: u32 = 16;
 const NET_A: u32 = 10;
 const NET_B: u32 = 100;
 
-/// Het interne IPv4 van de kern (.1): de gateway van elke app.
+/// Het interne IPv4 van de kern (10.100.0.1): de gateway van elke app.
 pub const HOST_IP4: u32 = NET_A << 24 | NET_B << 16 | 1;
 /// De MAC van de kern: `02:00:00:00:00:00`.
 pub const HOST_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0];
 
-/// Het interne IPv4 van een slot, big-endian als getal: slot i is .(i+1).
-/// Eén bron van waarheid, zodat de switch en de app-stack nooit
-/// uiteenlopen; niemand hoeft het op de control-page te schrijven.
+/// Het interne IPv4 van een slot, big-endian als getal: slot i is
+/// 10.100.0.1 + i (slot 1 is 10.100.0.2, slot 255 is 10.100.1.0). Eén bron
+/// van waarheid, zodat de switch en de app-stack nooit uiteenlopen; niemand
+/// hoeft het op de control-page te schrijven.
 #[must_use]
 pub const fn slot_ip4(slot: Slot) -> u32 {
     port_ip4(slot.get())
 }
 
-/// De MAC van een slot: `02:00:00:00:00:<slot>`.
+/// De MAC van een slot: `02:00:00:00:<slot hoog>:<slot laag>`.
 #[must_use]
 pub const fn slot_mac(slot: Slot) -> [u8; 6] {
     port_mac(slot.get())
 }
 
 /// Het interne IPv4 van poort `i` van het slot-LAN: de kern is poort 0
-/// (.1), slot i is poort i (.(i+1)). De vorm van [`slot_ip4`] voor wie de
-/// kern als 0 telt: de switch (zijn poorten zijn 0..=`SLOT_CAP`) en een app
-/// die zijn slot als getal kent. De afkapping op één byte is die van het
-/// plan (`SLOT_CAP` past erin).
+/// (10.100.0.1), slot i is poort i. De vorm van [`slot_ip4`] voor wie de
+/// kern als 0 telt: de switch en een app die zijn slot als getal kent. De
+/// afkapping op zestien bits is die van het subnet ([`SLOT_MAX`]).
 #[must_use]
 pub const fn port_ip4(i: usize) -> u32 {
-    HOST_IP4 + (i & 0xff) as u32
+    HOST_IP4 + (i & 0xffff) as u32
 }
 
-/// De MAC van poort `i`: `02:00:00:00:00:<i>` (de kern is 0, [`HOST_MAC`]).
+/// De MAC van poort `i`: de zestien bits van het slot in de laatste twee
+/// bytes (de kern is 0, [`HOST_MAC`]).
 #[must_use]
 pub const fn port_mac(i: usize) -> [u8; 6] {
-    [0x02, 0, 0, 0, 0, (i & 0xff) as u8]
+    [0x02, 0, 0, 0, (i >> 8) as u8, i as u8]
 }
 
 /// De inverse van [`port_ip4`]: de poort achter een adres op het slot-LAN
-/// (0 is de kern), of `None` buiten het subnet en voor .0. Wie een app
-/// zoekt, toetst zelf `1..=max_slots`.
+/// (0 is de kern), of `None` buiten het subnet, voor het netadres en voor
+/// de broadcast.
 #[must_use]
 pub const fn ip4_port(ip: u32) -> Option<usize> {
     if ip >> (32 - NET_PREFIX) != HOST_IP4 >> (32 - NET_PREFIX) {
         return None;
     }
-    match (ip & 0xff) as usize {
-        0 => None,
+    match (ip & 0xffff) as usize {
+        0 | 0xffff => None,
         h => Some(h - 1),
     }
 }

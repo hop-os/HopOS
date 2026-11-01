@@ -285,8 +285,11 @@ pub enum PrivOp {
     Flip = 0x46,
     /// De volgende store-opdracht van een app ([`store`]): `n` de langste
     /// wachttijd in ms (0 = niet wachten, de kern kapt af op
-    /// [`store::MAX_WAIT_MS`]). Het antwoord: `size` 1 en een
-    /// [`store::StoreTask`] in `data`, of `size` 0 als er niets klaarstaat.
+    /// [`store::MAX_WAIT_MS`]), `off` de vlaggen. Het antwoord: `size` 1 en
+    /// een [`store::StoreTask`] in `data`, of `size` 0 als er niets
+    /// klaarstaat. Met [`store::NEXT_STORE_LOGS`] in `off` komt de wacht
+    /// ook terug met `size` [`store::LOG_NEWS`] zodra er nieuwe logregels
+    /// zijn (`NEXT_LOG`, slot 0 en de apps): één lange wacht voor beide.
     NextStore = 0x47,
     /// Lees een stuk van het bestand van een opdracht (push): `off` het
     /// ticket, `n` de offset in het bestand, `path` het lokale pad van de

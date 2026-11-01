@@ -84,7 +84,7 @@ use core::future::Future;
 use core::sync::atomic::{AtomicBool, Ordering::AcqRel};
 use core::time::Duration;
 use sync::mpsc::Mailbox;
-use sync::{Either, LocalCell, select};
+use sync::{Either, LocalCell, Signal, select};
 
 // De framing, de kop van een call en het adresplan zijn van `abi`: de kern
 // codeert ze met dezelfde encoders als applib (review 01-10, "abi als
@@ -458,6 +458,8 @@ impl LineRing {
 /// `.await`. Vol is de oudste regel eruit; niets blokkeert.
 pub struct SlotLogs {
     rings: LocalCell<[LineRing; SLOT_CAP + 1]>,
+    /// Een nieuwe regel voor Hop (`NEXT_STORE` met `NEXT_STORE_LOGS`).
+    news: Signal,
 }
 
 impl SlotLogs {
@@ -466,6 +468,7 @@ impl SlotLogs {
     pub const fn new() -> SlotLogs {
         SlotLogs {
             rings: LocalCell::cell([const { LineRing::new() }; SLOT_CAP + 1]),
+            news: Signal::new(),
         }
     }
 
@@ -474,6 +477,12 @@ impl SlotLogs {
         if let Some(r) = self.rings.borrow_mut().get_mut(slot.get()) {
             r.push_app(line);
         }
+        self.news.set();
+    }
+
+    /// De bel voor Hop: er kwam een regel bij sinds hij hem nam.
+    pub fn news(&self) -> &Signal {
+        &self.news
     }
 
     /// Haalt de oudste regel van `slot` in `dst` (afgekapt op de lengte van
@@ -1758,6 +1767,10 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             reply,
             timer,
             log,
+            news: [
+                self.console.map(crate::conport::Ring::news),
+                self.logs.map(SlotLogs::news),
+            ],
         };
         crate::store::serve(&cx, h, buf, out).await
     }

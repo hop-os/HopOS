@@ -31,7 +31,7 @@ use core::sync::atomic::{
 };
 use core::task::Poll;
 use core::time::Duration;
-use sync::{AtomicWaker, Either, select};
+use sync::{AtomicWaker, Either, Signal, select};
 
 /// De plek van de ring: bytes op een offset vanaf zijn begin. `put` gaat
 /// meteen naar DRAM, `get` haalt vers (een andere core of een vorige kern
@@ -81,6 +81,8 @@ pub struct Ring {
     lost: AtomicU64,
     seats: AtomicU8,
     wakers: [AtomicWaker; MAX_READERS as usize],
+    /// Nieuwe bytes voor Hop (`NEXT_STORE` met `NEXT_STORE_LOGS`).
+    news: Signal,
 }
 
 impl Ring {
@@ -98,6 +100,7 @@ impl Ring {
             lost: AtomicU64::new(0),
             seats: AtomicU8::new(0),
             wakers: [const { AtomicWaker::new() }; MAX_READERS as usize],
+            news: Signal::new(),
         }
     }
 
@@ -161,6 +164,12 @@ impl Ring {
         self.head.store(at, Release);
         self.set(W_HEAD, at);
         self.wakers.iter().for_each(AtomicWaker::wake);
+        self.news.set();
+    }
+
+    /// De bel voor Hop: er kwam iets bij sinds hij hem nam.
+    pub fn news(&self) -> &Signal {
+        &self.news
     }
 
     /// Kopieert de bytes vanaf `seen` naar `out`; geeft het aantal en de

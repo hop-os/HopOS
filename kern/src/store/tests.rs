@@ -10,7 +10,7 @@ use crate::system::{Conn, End, FlipBundle, Hooks, HopImage, LogTee, SlotLogs, Sy
 use crate::testutil::FakeTimer;
 use abi::hopabi::{OP_READ as READ, OP_WRITE as WRITE, Req};
 use abi::layout::port_ip4;
-use abi::systemapi::store::{DoneHead, StoreTask, read_len};
+use abi::systemapi::store::{DoneHead, LOG_NEWS, NEXT_STORE_LOGS, StoreTask, read_len};
 use abi::systemapi::{HEADER_LEN as FH, Kind, decode_header, encode_header};
 use core::future::Future;
 use core::pin::pin;
@@ -340,7 +340,55 @@ fn cx_for<'a>(
         reply,
         timer,
         log: con,
+        news: [None, None],
     }
+}
+
+/// H8: één lange wacht voor store en log. Met `NEXT_STORE_LOGS` komt
+/// `NEXT_STORE` terug met `LOG_NEWS` zodra er een regel bij kwam (van de
+/// kern of van een app), één keer per bel; een opdracht gaat voor, en
+/// zonder de vlag wacht hij alleen op opdrachten.
+#[test]
+fn the_long_wait_of_hop_also_returns_for_new_log_lines() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let _a = node(&svc, &con);
+    let (queue, reply, timer, logs) = (
+        StoreQueue::new(),
+        crate::slots::Reply::new(),
+        FakeTimer::default(),
+        SlotLogs::new(),
+    );
+    let console = crate::conport::tests::ring(64);
+    let conr = &con;
+    let mut cx = cx_for(&queue, &svc, 1, &reply, &timer, &conr);
+    cx.news = [Some(console.news()), Some(logs.news())];
+    let mut out = [0u8; 2048];
+    let mut wait = |flags: u64| {
+        let h = Head::new(PrivOp::NextStore.op(), 1, flags, 3, 0, HDR_LEN);
+        crate::testutil::block_on(super::next(&cx, &h, &mut out))
+            .ok()
+            .unwrap()
+    };
+    assert_eq!(
+        wait(NEXT_STORE_LOGS),
+        (0, 0),
+        "nothing new: the wait runs out"
+    );
+    console.append(b"net: up\n");
+    assert_eq!(wait(0), (0, 0), "without the flag only store calls count");
+    assert_eq!(wait(NEXT_STORE_LOGS), (LOG_NEWS, 0));
+    assert_eq!(wait(NEXT_STORE_LOGS), (0, 0), "one bell, one answer");
+    logs.push(s(2), b"an app line");
+    assert_eq!(wait(NEXT_STORE_LOGS), (LOG_NEWS, 0));
+    // Een opdracht gaat voor de bel.
+    let c2 = cx_for(&queue, &svc, 2, &reply, &timer, &conr);
+    let v = valid(&c2, OP_STORE_LIST, b"p", b"").ok().unwrap();
+    queue
+        .submit(0, (s(2), svc.current(s(2)).unwrap()), OP_STORE_LIST, &v)
+        .unwrap();
+    console.append(b"x\n");
+    assert_eq!(wait(NEXT_STORE_LOGS).0, 1);
+    assert_eq!(wait(NEXT_STORE_LOGS), (LOG_NEWS, 0));
 }
 
 /// De toetsen van de kern (Go: `storeGate`): `..` en een lege naam zijn een

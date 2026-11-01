@@ -209,11 +209,14 @@ open(out, "wb").write(b)
 open(out + ".park", "wb").write(struct.pack("<II", 0xd503205f, 0x17ffffff))
 STUB
 	}
+	# hopos.wd=off zoals tools/qemu-rpi4-test.sh: QEMU raspi4b modelleert het
+	# PM-blok alleen als reset-knop (een FULL_RESET reset meteen), en de
+	# watchdog wapent sinds 01-11 als eerste in setup, vóór HOPOS_BOOT.
 	boot() { # $1 = de console, daarna extra QEMU-argumenten
 		con="$1"
 		shift
 		qemu-system-aarch64 -M raspi4b -display none -monitor none -serial "file:$con" \
-			-kernel "$W/kernel8.img" -append "hopos.stage=none" "$@" 2>"$W/qemu.err" &
+			-kernel "$W/kernel8.img" -append "hopos.stage=none hopos.wd=off" "$@" 2>"$W/qemu.err" &
 		qp=$!
 		sleep "${SECS:-7}"
 		kill "$qp" 2>/dev/null || true

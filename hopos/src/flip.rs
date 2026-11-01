@@ -764,12 +764,19 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
         bundle.link_load,
         if cold { ", cold" } else { "" }
     );
-    FLIP.set(Phase::Pending(Prepared {
+    let prepared = Prepared {
         len: flat,
         entry,
         src,
         cold,
-    }));
+    };
+    // De indeling van de sprong nu, vóór de 202: daarna is "nee" geen
+    // antwoord meer maar `HOPOS_FATAL` (§13.7).
+    jump_of(&prepared).check().map_err(|e| {
+        println!("flip: {e} HOPOS_FLIP_LAYOUT");
+        refuse("jump layout", kern::Error::Corrupt { at: 0 })
+    })?;
+    FLIP.set(Phase::Pending(prepared));
     BELL.set();
     Ok(())
 }
@@ -1185,6 +1192,22 @@ async fn cores_off(exec: &'static Executor) -> Result<usize, JumpError> {
     Ok(n)
 }
 
+/// De sprong van een klaargelegde flip: het beeld uit de staging naar het
+/// koude adres, met de kern-RAM en (UEFI) het beeld als veegvensters.
+fn jump_of(p: &Prepared) -> Jump {
+    let ram = BOARD.plan().kern_ram;
+    let (a, b) = image::sweep();
+    Jump {
+        dst: Pa(image::base()),
+        src: Pa(p.src),
+        len: p.len,
+        entry: p.entry,
+        x0: FIRMWARE_X0.load(Relaxed),
+        sweep: [(ram.base, ram.end()), (Pa(a), Pa(b))],
+        tramp: Pa(FLIP_TRAMP_PA),
+    }
+}
+
 /// Het blob, het paar en de sprong. Synchroon: vanaf hier verandert er
 /// niets meer aan de staat die overgaat.
 fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
@@ -1206,7 +1229,6 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     let generation = h.generation;
     let (mut mem, fp) = (DevMem, plan());
     kernflip::stage(&mut mem, &fp, Stage::Captured, generation);
-    let ram = BOARD.plan().kern_ram;
     let base = image::base();
     let blob = match kernflip::encode(h, HANDOFF_TAIL) {
         Ok(b) => b,
@@ -1233,16 +1255,7 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     // Wat de pomp van de UART nog had, gaat er nu wachtend uit: na de
     // sprong is die pomp weg (de zwarte doos houdt het toch).
     crate::conport::flush();
-    let (a, b) = image::sweep();
-    let j = Jump {
-        dst: Pa(base),
-        src: Pa(p.src),
-        len: p.len,
-        entry: p.entry,
-        x0: FIRMWARE_X0.load(Relaxed),
-        sweep: [(ram.base, ram.end()), (Pa(a), Pa(b))],
-        tramp: Pa(FLIP_TRAMP_PA),
-    };
+    let j = jump_of(&p);
     // SAFETY: dit is de flip-taak op de OS-core, en na de sprong hoeft hier
     // niets meer te gebeuren. De staging draagt op `p.src` het complete
     // beeld van een bundel waarvan de som getoetst is (`prepare`),

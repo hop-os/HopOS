@@ -2,9 +2,9 @@
 //! SMpro. Het board-contract zelf, en alles wat niet anders is dan op elke
 //! UEFI-machine, is van [`On`].
 
-use crate::{LINK_TIMEOUT_NS, is_nic, nic_irq_mode};
+use crate::{LINK_TIMEOUT_NS, is_nic};
 use board::{ClockKnob, CoreClass, Error, Thermal};
-use board_uefi::irq::{At, Mode, Wired, bell_within};
+use board_uefi::irq::{At, Wired, bell_within};
 use board_uefi::{NET_BUF, NET_DMA, On, Platform, Uefi, pcie};
 use core::cell::RefCell;
 use dev::Pa;
@@ -143,7 +143,7 @@ fn open_hwmon(pcct: &[u8]) {
 /// de dispatch moet hem binnen [`NIC_TEST_NS`] zien. Een route die niet
 /// klopt (de tabel, de DeviceID uit de IORT, de ITS) is stil; zonder
 /// zelftest hoorde de pomp nooit iets. Nooit INTx: dat doodt deze SoC
-/// ([`nic_irq_mode`]). Geeft de lijn en de microseconden tot de eerste
+/// (L83, 19-09). Geeft de lijn en de microseconden tot de eerste
 /// aflevering, of de reden: een NIC zonder lijn is een fout
 /// (docs/sequence-hopos.md §14.1 O3).
 fn wire_nic(
@@ -151,7 +151,6 @@ fn wire_nic(
     hit: &pcie::Found,
     nic: &mut Igb,
 ) -> Result<(Wired, u64), &'static str> {
-    let mode = nic_irq_mode(board_uefi::irq::nic_mode(Mode::Msix))?;
     let (e, _) = segs.get(hit.win).ok_or("no config window for the NIC")?;
     // Het segment van het venster: `segments` en `pcie_segments` lopen
     // allebei de MCFG in volgorde af (op de Altra beginnen ze allemaal
@@ -166,7 +165,7 @@ fn wire_nic(
         root_bus: hit.root_bus,
         f: &hit.f,
     };
-    let wired = board_uefi::irq::wire(&at, mode, &NIC_BELL, igb_ack, igb_ack)?;
+    let wired = board_uefi::irq::wire_msix(&at, &NIC_BELL, igb_ack)?;
     let _ = NIC_BELL.take();
     nic.set_irq(&NIC_BELL);
     nic.fire_irq();

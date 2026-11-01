@@ -86,27 +86,6 @@ fn find_target() -> Option<u32> {
     hit
 }
 
-/// Hoe de tg3 zijn interrupt krijgt (`hopos.nicirq`). Er is geen "pollen":
-/// elke NIC heeft een lijn (docs/sequence-hopos.md §14.1 O3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NicIrq {
-    /// Leeg of `auto`: INTA van de ethernet-poort, uit de ADT
-    /// (`pcie::port_irq_base` + `pcie::INTA`).
-    Auto,
-    /// Een getal: die AIC-lijn.
-    Line(u32),
-}
-
-impl NicIrq {
-    /// `None` = geen van de twee.
-    pub(crate) fn parse(v: &str) -> Option<Self> {
-        match v {
-            "" | "auto" => Some(Self::Auto),
-            n => n.parse().ok().filter(|&n| n > 0).map(Self::Line),
-        }
-    }
-}
-
 /// De ack van de tg3, gezet vóór de lijn scherp gaat; de dispatch roept
 /// hem op HOP's core, waar ook de probe draait.
 static NIC_ACK: AckSlot<IrqAck> = AckSlot::new();
@@ -323,17 +302,6 @@ mod arch {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn nicirq_reads_auto_or_a_line() {
-        assert_eq!(NicIrq::parse(""), Some(NicIrq::Auto));
-        assert_eq!(NicIrq::parse("auto"), Some(NicIrq::Auto));
-        assert_eq!(NicIrq::parse("0"), None);
-        assert_eq!(NicIrq::parse("off"), None);
-        assert_eq!(NicIrq::parse("1253"), Some(NicIrq::Line(1253)));
-        assert_eq!(NicIrq::parse("intx"), None);
-        assert_eq!(NicIrq::parse("-1"), None);
-    }
 
     #[test]
     fn without_a_tree_there_is_no_aic() {

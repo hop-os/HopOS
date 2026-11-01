@@ -83,8 +83,11 @@ interrupts over PCI. Toets vóór je naar het board loopt: die test groen, en
 
 ## Interrupts over PCI, watchdog, klok en thermiek (alle UEFI-boards)
 
-MSI-X. Een PCIe-device krijgt, in deze
-volgorde (`board_uefi::irq`, `hopos.nicirq=auto`):
+Een PCIe-device krijgt één weg naar zijn lijn, en het board kiest hem
+(`board_uefi::irq`; geen knop, `hopos.nicirq` is weg sinds 01-11): MSI-X
+voor de virtio-functies van QEMU, de NVMe overal en de igb van de Altra,
+INTx voor de Realtek van de O6N. Een weg die niet opkomt, is geen terugval
+op de andere maar een device zonder lijn.
 
 1. **MSI-X via de GICv3-ITS** (`driver_gicv3::its`): de ITS uit de MADT, zijn
    tabellen en de LPI-tabellen in de laatste MB van de NIC-DMA-helft
@@ -96,20 +99,18 @@ volgorde (`board_uefi::irq`, `hopos.nicirq=auto`):
    (`HOPOS_ITS_MORE`; eigen tabellen in `ITS_MORE_DMA`, de LPI-configuratie
    en de redistributor gedeeld, een eigen stuk LPI-nummers) en krijgt het
    device zijn doorbell: een MSI naar de doorbell van een andere ITS komt
-   nooit aan (A7g, 03-10). Zonder IORT-weg geen MSI-X (een verkeerde
-   DeviceID is stil: de ITS gooit de schrijf weg), tenzij
-   `hopos.nicirq=msix` de gok DeviceID = requester-id afdwingt.
+   nooit aan (A7g, 03-10). Zonder IORT-weg is de DeviceID de
+   requester-id (QEMU's afbeelding): een gok, en dat zegt de console; een
+   verkeerde DeviceID is stil (de ITS gooit de schrijf weg), dus de NVMe en
+   de igb hebben een zelftest.
 2. **INTx uit de `_PRT`** van de host-bridge (`fw::aml`: een minimale lezer
    die alleen statische `_PRT`-pakketten leest en een methode of een
    link-device luid weigert), na de swizzle door de bridges. Op de O6N zegt
    de DSDT precies wat de device tree zegt (host-test tegen
    de echte DSDT: 477 voor bus 0x30, en de vier andere root-poorten).
-3. **Geen lijn** is een fout, met de reden op de regel: het device start
-   niet (01-11, O3). Pollen bestaat niet meer.
 
-`hopos.nicirq=` in `hopos.cfg`: `auto` (standaard), `msix`, `intx`, of een
-INTID (bordkennis die de DSDT niet heeft). De virtio-net en de virtio-blk
-van QEMU gaan altijd op MSI-X.
+**Geen lijn** is een fout, met de reden op de regel: het device start niet
+(01-11, O3). Pollen bestaat niet meer.
 
 De verwachte regels (QEMU/EDK2, 29-09):
 
@@ -212,7 +213,7 @@ klok van de firmware.
 | Klok: `_CPC`-scanner (AML zonder interpreter), domeinen, `CpcKnob` | `board-o6n::{cpc, clock}`, `driver-dvfs` | 3 + 3 host-tests; het beleid 8 host-tests |
 | Core-klassen: MADT, anders `_CPC` (25%-clustering), anders vast per MPIDR (aff1 0-3 small) | `board-o6n::class` | 4 host-tests, waaronder de meting van 17-09 (2232 ×4, 8192/7876/7246/6931 ×2 = small ×4, big ×8) |
 | PCIe-zoektocht: eerste Realtek, eerste NVMe, INTx per root-poort | `board-o6n::probe` | 3 host-tests op een nep-config-space, en de INTx-tabel tegen de `_PRT` van de echte DSDT |
-| NIC-lijn: MSI-X via de ITS als de IORT de DeviceID kent, anders INTx 477 uit de `_PRT` | `board-uefi::irq`, `driver-gicv3::its` | ITS: 5 host-tests (commando's, plat en twee niveaus, een route); `_PRT`: 5 host-tests; op QEMU/EDK2 bewezen met virtio-net |
+| NIC-lijn: INTx 477 uit de `_PRT` (de MSI-X-weg via de ITS is die van de NVMe en van QEMU) | `board-uefi::irq`, `driver-gicv3::its` | ITS: 5 host-tests (commando's, plat en twee niveaus, een route); `_PRT`: 5 host-tests; MSI-X op QEMU/EDK2 bewezen met virtio-net |
 | Klok: `CpcKnob` uit DSDT en SSDT's, na de OEM-toets `CIXTEK` | `board-o6n::machine`, `driver-dvfs::run` | de taak op de host: zakken na 30 s, opklokken op last, de meetregel |
 
 ### EL2: de hele kern onder VHE (E2H = 1)
@@ -260,8 +261,7 @@ door niemand aangezet.
 - `boot: HopOS v3.0.0 on o6n, EL2, 12 cores (...) HOPOS_BOOT`.
 - `irq: ITS IIDR 0x... ... HOPOS_ITS_UP` (de GIC-700 heeft een ITS; de regel
   zegt DeviceID-bits en plat of twee niveaus).
-- `net: RTL8125? 10ec:8125 at 31:00.0 xid 0x... link 2500 Mbps full duplex, MSI-X via the ITS, LPI 8192 (DeviceID 0x...) (the DT table said INTID 477) HOPOS_NIC_IRQ`,
-  of zonder IORT-weg `..., INTx on INTID 477 (SPI 445) ...`, en dan
+- `net: RTL8125? 10ec:8125 at 31:00.0 xid 0x... link pending (autoneg), INTx on INTID 477 (SPI 445) (the DT table said INTID 477) HOPOS_NIC_IRQ`, en dan
   `HOPOS_NIC_UP mac=...` en na DHCP `HOPOS_NET_UP`. In de tik moet `nic=`
   oplopen met het verkeer.
 - `dvfs: 5 _CPC domains, policy Auto, ... HOPOS_CLOCK_UP` en `dvfs: -> 2600
@@ -305,11 +305,11 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   eigenaardigheden van de A720; wat de O6N van E2H = 1 vindt, zegt de
   eerste boot (`HOPOS_UEFI_VHE`, de zelftest van de OS-core, en of een
   bewoner langer dan een halve seconde leeft: Hop's `HOP_UP` en de tik).
-- **MSI-X op ijzer is onbewezen.** Of de Cix-IORT de root-complexen naar
-  de ITS afbeeldt, en of de RTL8125 op MSI-X zijn IntrStatus-flank zo geeft
-  als op INTx, zegt de eerste boot. Zonder IORT-weg valt hij terug op INTx
-  477 (L80: één interrupt per frame, rtt p50 156-201 µs). Met
-  `hopos.nicirq=intx` meet je de terugval los.
+- **De Realtek op INTx, niet op MSI-X** (01-11, één weg per board): INTx
+  477 is de weg die op dit ijzer bewezen is (L80: één interrupt per frame,
+  rtt p50 156-201 µs). Of de Cix-IORT de root-complexen naar de ITS
+  afbeeldt, zegt de NVMe (MSI-X); werkt dat, dan kan de Realtek erheen, als
+  besluit en niet als knop.
 - **De NVMe-lijn op ijzer is onbewezen.** Vector 0 (de admin-CQ en de
   I/O-CQ, IEN) via de ITS van zijn root-complex, in `probe_nvme` (de
   interrupts staan sinds 01-11 vóór de opslag), met een zelftest (een Get
@@ -335,8 +335,8 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
    core 0 een A520 of een A720?
 5. Temperatuur: `temp=` op de tik en `HOPOS_CLOCK`, en of die bij
    belasting stijgt.
-6. Interrupts: `nic=` in de tik tegen de pakketten; rtt p50 met MSI-X tegen
-   INTx (`hopos.nicirq=intx`); geen `stray`-regel.
+6. Interrupts: `nic=` in de tik tegen de pakketten; rtt p50 op INTx 477;
+   geen `stray`-regel.
 7. Klok: `HOPOS_CLOCK_EDGE` naar quiet na 30 s idle, en binnen ~20 ms terug
    naar vol onder last (v2 L83: 867 tegen 267 Msteps/s).
 8. Watchdog: armed-regel (de echte timeout), `HOPOS_CANARY_LIVE`; dan de
@@ -399,14 +399,13 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
 
 ### Wat er nog niet is
 
-- **De igb op MSI-X is op ijzer nog niet gezien.** Standaard
-  `hopos.nicirq=msix`: vector 0 via de ITS, de driver in de MSI-X-modus van
-  Linux `igb_configure_msix` met één vector (GPIE, IVAR0 voor RX-queue 0,
+- **De igb op MSI-X is op ijzer nog niet gezien.** Alleen MSI-X, geen
+  knop: vector 0 via de ITS, de driver in de MSI-X-modus van Linux
+  `igb_configure_msix` met één vector (GPIE, IVAR0 voor RX- en TX-queue 0,
   EIAC/EIAM/EIMS; ack EIMC, de pomp heropent bij een lege ring), en een
   zelftest met EICS: wat niet aankomt, is een NIC zonder lijn en die start
-  niet (01-11, O3). Nooit
-  INTx: de `_PRT`-INTx doodt de SoC (L83, 19-09, UART-bewijs); `intx` en
-  een INTID weigert het board (`board_altra::nic_irq_mode`).
+  niet (01-11, O3). Nooit INTx: de `_PRT`-INTx doodt de SoC (L83, 19-09,
+  UART-bewijs).
 - **De NVMe-lijn**: zoals op de O6N, nooit INTx (de functie staat vanaf de
   probe met INTx uit).
 - Het geheugenplan is dat van `board-uefi`: of de pool de ~300 GB boven de

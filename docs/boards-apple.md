@@ -20,7 +20,7 @@ niets ervan heeft in v3 op ijzer gedraaid. De gedateerde lessen (28-08 tot
 | RTKit-mailbox (ASC) en de SART v3 | `driver/rtkit` | 16 host-tests tegen een nep-coprocessor |
 | SMC: sleutels, floats, sensoren, de warmste | `driver/smc` | 7 host-tests |
 | ANS-NVMe: het ANS-transport onder de NVMe-core (lineaire SQ, TCB's, NVMMU, coprocessor), de GPT als capaciteit, het schrijfvenster, nette shutdown | `driver/nvme/src/apple.rs` | 7 host-tests op de nep-controller van de core: de vier ANS-lessen, secure-bar, CID en TCB per slot met de invalidatie, weigering buiten of zonder venster, 512-naar-4K, een omgevallen coprocessor; tickets en read-ahead in de core-toetsen |
-| Board: bootstub, VHE-ingang, 48-bit-map met PXN, console, boot_args en ADT, cores met klasse, de CPU_ON-haak, AIC, timer-FIQ, fast IPI, PCIe-bring-up, tg3 met zijn INTx-lijn, ANS, SMC, watchdogs, p-states en hun wachter, het config-venster, slot-plan met voorproef | `board/apple` | 23 host-tests (map en PXN, plan, pool uit het contract, tunables, os-core-keuze, config-venster, watchdog-alarm, p-state-plafond, `hopos.cages`, `hopos.nicirq`) |
+| Board: bootstub, VHE-ingang, 48-bit-map met PXN, console, boot_args en ADT, cores met klasse, de CPU_ON-haak, AIC, timer-FIQ, fast IPI, PCIe-bring-up, tg3 met zijn INTx-lijn, ANS, SMC, watchdogs, p-states en hun wachter, het config-venster, slot-plan met voorproef | `board/apple` | 22 host-tests (map en PXN, plan, pool uit het contract, tunables, os-core-keuze, config-venster, watchdog-alarm, p-state-plafond, `hopos.cages`) |
 | OS-core-rotatie voor `AppleVhe`: de fast IPI als bel, de ack op EL2, de FIQ als `Back::Timer`/`Back::Ipi`; de Apple-kick in de switcher; de CPU_ON-haak en de SCTLR-wis in `cpu::smp`; de VHE-bewuste event-stream | `cpu/src/el2`, `cpu/src/smp.rs`, `cpu/src/idle.rs` | host-tests (het kick-woord, de vectorindex, de haak, de stream-bits); de gedeelde paden op QEMU (virt, UEFI, UEFI+VHE) |
 | Linkscript: raw image op 0x101_0000_0000, stub op 0, kern op 0x10000 | `hopos/link-apple.ld` | link-asserties; `image/apple-m4.sh` toetst het parameterblok |
 | Loader (m1n1-proxy), meetcyclus, console, installer | `image/apple/` | de meetbank |
@@ -229,11 +229,11 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
     interrupt did not arrive within 50 ms, port INTSTAT ...`: de lijn kwam
     niet aan (bits 3:0 van INTSTAT zijn INTA tot INTD, Linux
     `PORT_INT_INTx`, gelezen vóór de NIC weer dichtgaat; staat bit 0, dan
-    zag de poort INTA en klopt het AIC-nummer niet, en `hopos.nicirq=<n>`
-    probeert een ander). De zelftest is Go's
+    zag de poort INTA en klopt het AIC-nummer uit de ADT niet; een knop om
+    een ander te proberen is er niet meer, `hopos.nicirq` is weg sinds
+    01-11). De zelftest is Go's
     "gevonden door aflevering" (19-09). Komt de lijn niet, dan start de NIC
-    niet: er is geen gepolde terugval meer (01-11, O3), en `hopos.nicirq=off`
-    bestaat niet meer. Daarna: `HOPOS_NET_PUMP` zegt `the nic's irq line`.
+    niet: er is geen gepolde terugval meer (01-11, O3). Daarna: `HOPOS_NET_PUMP` zegt `the nic's irq line`.
     De schijf (ANS) hangt sinds 01-11 ook aan de AIC: `HOPOS_ANS_IRQ` noemt
     de lijn van de mailbox en die van de NVMe (woord 3 en het laatste van
     `/arm-io/ans` "interrupts", de volgorde van de M1). NOG NIET OP IJZER.

@@ -172,7 +172,7 @@ fn wire_line(hit: &Found, disk: &mut Nvme<Pci>) -> Result<(Wired, u64, u16), &'s
         f: &hit.f,
     };
     let m = hit.f.msix(e).ok_or("no MSI-X capability")?;
-    let wired = irq::wire_msix(&at, &NVME_BELL, irq::no_ack, true)?;
+    let wired = irq::wire_msix(&at, &NVME_BELL, irq::no_ack)?;
     let Wired::Msix { lpi, dev_id } = wired else {
         return Err("not MSI-X");
     };

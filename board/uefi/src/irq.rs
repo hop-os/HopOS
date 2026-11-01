@@ -1,25 +1,28 @@
-//! Interrupts over PCI op een UEFI-machine: MSI-X via de GICv3-ITS, en
-//! INTx via de `_PRT` als terugval.
+//! Interrupts over PCI op een UEFI-machine: MSI-X via de GICv3-ITS
+//! ([`wire_msix`]), of INTx uit de `_PRT` ([`wire_intx`]).
 //!
 //! Dit bezit de ITS'en (de eerste uit de MADT met zijn tabellen in
 //! [`crate::ITS_DMA`], en zo nodig de ITS die de IORT voor het root-complex
-//! van een device noemt, in [`crate::ITS_MORE_DMA`]) en de keuze per
-//! device: `hopos.nicirq` (`auto`, `msix`, `intx`, `off` of een INTID) en
-//! de volgorde MSI-X, dan INTx, dan pollen. Het resultaat is altijd een
-//! lijn in [`crate::Uefi::enable_line`] (een LPI of een SPI) plus een bel;
-//! de dispatch ziet het verschil niet.
+//! van een device noemt, in [`crate::ITS_MORE_DMA`]). Het resultaat is
+//! altijd een lijn in [`crate::Uefi::enable_line`] (een LPI of een SPI) plus
+//! een bel; de dispatch ziet het verschil niet.
 //!
-//! Waarom MSI-X eerst: een LPI is een flank die de ITS naar precies één
-//! redistributor stuurt, zonder level-lijn die blijft hangen als een ack
-//! mist. De O6N-freeze van 17/18-09 was een INTx die bleef staan (INTID 477
-//! "keeps asserting after 256 acks in one pass"); met MSI-X kan dat niet.
-//! Waarom INTx dan toch: een ITS die er niet is of die een DeviceID niet
-//! kent (de IORT zegt niets), en dan is een level-lijn met de ack van de
-//! driver en de STRAY-grens van de dispatch beter dan 300 µs pollen.
+//! Welke van de twee, kiest het board, één weg per device en geen knop
+//! (Derek, 01-11; `hopos.nicirq` is weg). Een weg die niet opkomt, is een
+//! device zonder lijn, en dat is een fout (docs/sequence-hopos.md §14.1
+//! O3), geen terugval op de andere:
 //!
-//! De Altra neemt alleen MSI-X (of `off`), met een zelftest erachter: de
-//! `_PRT`-INTx aanzetten doodde daar de SoC (L83, 19-09, UART-bewijs), zie
-//! `board_altra::nic_irq_mode`.
+//! - MSI-X: de virtio-functies van QEMU, de NVMe overal, en de igb van de
+//!   Altra. Een LPI is een flank die de ITS naar precies één redistributor
+//!   stuurt, zonder level-lijn die blijft hangen als een ack mist. Op de
+//!   Altra is het de enige weg: de `_PRT`-INTx aanzetten doodde daar de SoC
+//!   (L83, 19-09, UART-bewijs).
+//! - INTx: de Realtek van de O6N, de weg die daar op ijzer bewezen is (L80,
+//!   INTID 477 uit de `_PRT`, host-getoetst tegen de echte DSDT). Een
+//!   level-lijn met de ack van de driver (masker dicht, status schoon) en de
+//!   STRAY-grens van de dispatch; de freeze van 17/18-09 ("INTID 477 keeps
+//!   asserting after 256 acks in one pass") was een ack die het masker
+//!   openliet.
 
 use crate::facts;
 use board::Error;
@@ -209,7 +212,7 @@ pub enum Wired {
         /// De DeviceID die de ITS ziet.
         dev_id: u32,
     },
-    /// INTx op deze SPI (uit de `_PRT`, of opgegeven met `hopos.nicirq`).
+    /// INTx op deze SPI (uit de `_PRT`).
     Intx {
         /// De INTID.
         intid: u32,
@@ -223,38 +226,6 @@ impl core::fmt::Display for Wired {
                 write!(f, "MSI-X via the ITS, LPI {lpi} (DeviceID {dev_id:#x})")
             }
             Self::Intx { intid } => write!(f, "INTx on INTID {intid} (SPI {})", intid - 32),
-        }
-    }
-}
-
-/// Wat `hopos.nicirq` vraagt. Er is geen "pollen": elke NIC heeft een lijn
-/// (docs/sequence-hopos.md §14.1 O3).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Mode {
-    /// MSI-X, anders INTx.
-    Auto,
-    /// Alleen MSI-X.
-    Msix,
-    /// Alleen INTx uit de `_PRT`.
-    Intx,
-    /// Deze INTID als INTx (bordkennis die de DSDT niet heeft).
-    Line(u32),
-}
-
-impl Mode {
-    /// De modus uit de configwaarde; leeg = `dflt`. Een onzinwaarde is
-    /// `dflt`, luid (de aanroeper meldt hem).
-    #[must_use]
-    pub fn parse(v: &str, dflt: Mode) -> (Mode, bool) {
-        match v {
-            "" => (dflt, true),
-            "auto" => (Mode::Auto, true),
-            "msix" | "msi" => (Mode::Msix, true),
-            "intx" => (Mode::Intx, true),
-            n => match n.parse::<u32>() {
-                Ok(id) if (32..1020).contains(&id) => (Mode::Line(id), true),
-                _ => (dflt, false),
-            },
         }
     }
 }
@@ -296,22 +267,14 @@ fn device_id(at: &At<'_>) -> (u32, bool) {
 /// MSI-X-tabel krijgt de doorbell en de EventID, MSI-X gaat aan (en INTx
 /// uit), en de LPI wordt een lijn met `bell` en `ack`.
 ///
-/// Zonder IORT-weg is de DeviceID een gok (de requester-id), en een gok die
-/// mis is, is stil: de ITS gooit de schrijf weg en de pomp hoort niets.
-/// Daarom alleen met `guess` (de operator vroeg `hopos.nicirq=msix`);
-/// anders is het INTx.
-pub fn wire_msix(
-    at: &At<'_>,
-    bell: &'static Signal,
-    ack: fn(),
-    guess: bool,
-) -> Result<Wired, &'static str> {
+/// Zonder IORT-weg is de DeviceID een gok (de requester-id, QEMU's
+/// afbeelding), en een gok die mis is, is stil: de ITS gooit de schrijf weg.
+/// Daarom staat de gok op de console, en de NVMe en de igb hebben een
+/// zelftest die hem vangt.
+pub fn wire_msix(at: &At<'_>, bell: &'static Signal, ack: fn()) -> Result<Wired, &'static str> {
     let e = at.ecam;
     let m = at.f.msix(e).ok_or("no MSI-X capability")?;
     let (dev_id, from_iort) = device_id(at);
-    if !from_iort && !guess {
-        return Err("no IORT mapping for the device (hopos.nicirq=msix guesses DeviceID = rid)");
-    }
     let table = at.f.msix_table_addr(e, &m).ok_or("MSI-X BAR unassigned")?;
     if !crate::map_device(table, 16 * u64::from(m.size)) {
         return Err("MSI-X table unreachable");
@@ -363,45 +326,14 @@ pub fn intx_line(at: &At<'_>) -> Result<u32, &'static str> {
     Err(last)
 }
 
-/// Bedraadt `at` volgens `mode`: MSI-X of INTx. `msix_ack` en `intx_ack`
-/// draaien in de dispatch vóór de EOI (bij INTx de ack die de level-lijn
-/// laat vallen). Faalt alles, dan de reden: een device zonder lijn is een
-/// fout, geen poll (docs/sequence-hopos.md §14.1 O3).
-pub fn wire(
-    at: &At<'_>,
-    mode: Mode,
-    bell: &'static Signal,
-    msix_ack: fn(),
-    intx_ack: fn(),
-) -> Result<Wired, &'static str> {
-    let mut why = "MSI-X not tried";
-    if matches!(mode, Mode::Auto | Mode::Msix) {
-        match wire_msix(at, bell, msix_ack, mode == Mode::Msix) {
-            Ok(w) => return Ok(w),
-            Err(e) => why = e,
-        }
-    }
-    let id = match mode {
-        Mode::Line(id) => id,
-        Mode::Auto => intx_line(at).map_err(|_| why)?,
-        Mode::Intx => intx_line(at)?,
-        Mode::Msix => return Err(why),
-    };
+/// De INTx-lijn van `at` uit de `_PRT`, aan met `bell` en `ack`; `ack`
+/// draait in de dispatch vóór de EOI en laat de level-lijn vallen.
+pub fn wire_intx(at: &At<'_>, bell: &'static Signal, ack: fn()) -> Result<Wired, &'static str> {
+    let id = intx_line(at)?;
     crate::Uefi::new()
-        .enable_line(id, bell, intx_ack)
+        .enable_line(id, bell, ack)
         .map_err(|_| "INTx line refused")?;
     Ok(Wired::Intx { intid: id })
-}
-
-/// `hopos.nicirq` uit `hopos.cfg`, met `dflt` als hij er niet staat.
-#[must_use]
-pub fn nic_mode(dflt: Mode) -> Mode {
-    let v = board::Board::boot_param(&crate::Uefi::new(), "hopos.nicirq");
-    let (m, ok) = Mode::parse(v, dflt);
-    if !ok {
-        cpu::println!("irq: hopos.nicirq={v:?} is not auto, msix, intx or an INTID; {m:?}");
-    }
-    m
 }
 
 /// Vuurt event 0 van `dev_id` vanuit de ITS zelf (`INT`): de LPI zonder
@@ -652,15 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn the_config_picks_the_mode() {
-        assert_eq!(Mode::parse("", Mode::Msix), (Mode::Msix, true));
-        assert_eq!(Mode::parse("", Mode::Auto), (Mode::Auto, true));
-        assert_eq!(Mode::parse("msix", Mode::Auto), (Mode::Msix, true));
-        assert_eq!(Mode::parse("intx", Mode::Auto), (Mode::Intx, true));
-        assert_eq!(Mode::parse("477", Mode::Auto), (Mode::Line(477), true));
-        assert_eq!(Mode::parse("off", Mode::Auto), (Mode::Auto, false));
-        assert_eq!(Mode::parse("20", Mode::Auto), (Mode::Auto, false));
-        assert_eq!(Mode::parse("fast", Mode::Msix), (Mode::Msix, false));
+    fn lpis_start_at_8192() {
         assert!(is_lpi(8192) && !is_lpi(477));
     }
 }

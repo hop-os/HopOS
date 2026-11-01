@@ -219,15 +219,14 @@ impl Platform for Cix {
 
     /// De eerste Realtek-poort (geen twee-poorts-aggregatie): BAR2 (het
     /// MMIO-blok; BAR0 is de I/O-alias), reset en MAC, ringen en MAC aan,
-    /// dan PHY en autoneg, en dan de lijn (`board_uefi::irq`): MSI-X via de
-    /// ITS als de IORT de DeviceID kent, anders INTx uit de `_PRT` van de
-    /// root-poort (bus 0x30: GSI 0x1dd, INTID 477); geen lijn is een fout.
-    /// `hopos.nicirq` kiest anders (`msix`, `intx`, een INTID).
+    /// dan PHY en autoneg, en dan de lijn: INTx uit de `_PRT` van de
+    /// root-poort (bus 0x30: GSI 0x1dd, INTID 477), de weg die op dit ijzer
+    /// bewezen is (L80). Eén weg, geen keuze en geen terugval
+    /// (`board_uefi::irq`); geen lijn is een fout.
     ///
-    /// De ack is voor beide dezelfde (`IrqAck::ack`: masker dicht, status
-    /// schoon); de driver heropent het masker in `receive` als de ring leeg
-    /// is. Bij INTx is dat de level-lijn laten vallen (de freeze van
-    /// 17/18-09), bij MSI-X de voorwaarde voor een volgende flank.
+    /// De ack (`IrqAck::ack`: masker dicht, status schoon) laat de
+    /// level-lijn vallen (de freeze van 17/18-09); de driver heropent het
+    /// masker in `receive` als de ring leeg is.
     fn probe_nic(&self, _uefi: &Uefi) -> Result<Option<Rtl8126>, Error> {
         let segs = pcie::segments();
         let Some(hit) = pcie::first_in(&segs, 2, |f| driver_rtl8126::supported(f.vendor, f.device))
@@ -268,8 +267,7 @@ impl Platform for Cix {
                     root_bus: hit.root_bus,
                     f: &hit.f,
                 };
-                let mode = board_uefi::irq::nic_mode(board_uefi::irq::Mode::Auto);
-                board_uefi::irq::wire(&at, mode, &NIC_BELL, rtl_ack, rtl_ack)
+                board_uefi::irq::wire_intx(&at, &NIC_BELL, rtl_ack)
             }
             None => Err("no config window for the root bus"),
         }

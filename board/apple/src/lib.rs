@@ -520,7 +520,7 @@ impl Board for Apple {
                 return Err(Error::Nic("no link"));
             }
         }
-        wire_nic(self.boot_param("hopos.nicirq"), &mut nic)?;
+        wire_nic(&mut nic)?;
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
@@ -586,27 +586,24 @@ impl Board for Apple {
     }
 }
 
-/// De interrupt van de tg3 (`hopos.nicirq`: leeg of `auto`, of een
-/// AIC-nummer), en één bootregel over de keuze (`HOPOS_NIC_IRQ`). INTx, geen
+/// De interrupt van de tg3, en één bootregel (`HOPOS_NIC_IRQ`). INTx, geen
 /// MSI: de doorbell van de Apple-poort is onbekend, en MSI aanzetten zonder
-/// haar nam op 18-09 de node mee (Go bundel 18). Auto is het blok van de
+/// haar nam op 18-09 de node mee (Go bundel 18). De lijn is het blok van de
 /// poort uit de ADT plus INTA (`pcie::INTA`, gemeten 19-09: 1249 + 4 =
-/// 1253). Komt de lijn niet aan, dan is dat een fout: de pomp pollt niet
-/// (docs/sequence-hopos.md §14.1 O3).
-fn wire_nic(v: &str, nic: &mut Tg3) -> Result<(), Error> {
+/// 1253); één weg, geen knop (`hopos.nicirq` is weg, 01-11). Komt de lijn
+/// niet aan, dan is dat een fout: de pomp pollt niet (docs/sequence-hopos.md
+/// §14.1 O3).
+fn wire_nic(nic: &mut Tg3) -> Result<(), Error> {
     let base = pcie::port_irq_base();
-    let line = match irq::NicIrq::parse(v) {
-        Some(irq::NicIrq::Line(l)) => Ok(l),
-        Some(irq::NicIrq::Auto) => base
-            .and_then(|b| b.checked_add(pcie::INTA))
-            .ok_or("no interrupts word for the port on /arm-io/apcie"),
-        None => Err("hopos.nicirq is not auto or an AIC number"),
-    };
+    let l = base
+        .and_then(|b| b.checked_add(pcie::INTA))
+        .ok_or_else(|| {
+            println!(
+                "net: tg3 has no line: no interrupts word for the port on /arm-io/apcie HOPOS_NIC_IRQ"
+            );
+            Error::Irq("the tg3 line")
+        })?;
     let base = base.unwrap_or(0);
-    let l = line.map_err(|why| {
-        println!("net: tg3 has no line: {why} (hopos.nicirq={v:?}) HOPOS_NIC_IRQ");
-        Error::Irq("the tg3 line")
-    })?;
     match irq::wire_nic(nic, l) {
         Ok(us) => {
             println!(

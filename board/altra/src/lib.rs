@@ -9,8 +9,8 @@
 //!
 //! - de NIC: de Intel igb (I210) op deze machines, en QEMU's 82576 waarmee
 //!   het pad getest wordt. Op MSI-X via de ITS, de route die Linux neemt,
-//!   met een zelftest, en zonder lijn een fout ([`nic_irq_mode`]). Nooit INTx: de
-//!   `_PRT`-INTx komt aan, maar hem aanzetten doodt de SoC (L83, 19-09,
+//!   met een zelftest, en zonder lijn een fout. Alleen MSI-X, geen knop:
+//!   de `_PRT`-INTx komt aan, maar hem aanzetten doodt de SoC (L83, 19-09,
 //!   UART-bewijs);
 //! - de schijf: de eerste NVMe, het hele device voor HopOS;
 //! - de thermometer: de SMpro via PCC-kanaal 14;
@@ -41,7 +41,6 @@ pub type Machine = Altra;
 pub use board_uefi::{facts, slots};
 
 use board::CoreClass;
-use board_uefi::irq::Mode;
 use driver_pcie::Function;
 
 /// De naam, voor de bootlog.
@@ -55,17 +54,6 @@ pub const LINK_TIMEOUT_NS: u64 = 8_000_000_000;
 #[must_use]
 pub const fn core_class(_core: usize) -> CoreClass {
     CoreClass::Big
-}
-
-/// Wat `hopos.nicirq` op dit board mag: `msix` (de standaard, en ook wat
-/// `auto` hier betekent). INTx, ook een opgegeven INTID, weigert
-/// het board: de `_PRT`-INTx aanzetten doodde deze SoC (L83, 19-09), en
-/// `auto` zou er na een mislukte MSI-X op terugvallen.
-pub fn nic_irq_mode(m: Mode) -> Result<Mode, &'static str> {
-    match m {
-        Mode::Auto | Mode::Msix => Ok(Mode::Msix),
-        Mode::Intx | Mode::Line(_) => Err("INTx kills this SoC (L83), hopos.nicirq is msix here"),
-    }
 }
 
 /// Is `f` een NIC van dit board?
@@ -109,16 +97,6 @@ mod tests {
             }
         }
         fn write16(&self, _: Bdf, _: u16, _: u16) {}
-    }
-
-    #[test]
-    fn the_nic_is_msix_never_intx() {
-        assert_eq!(nic_irq_mode(Mode::Msix), Ok(Mode::Msix));
-        assert_eq!(nic_irq_mode(Mode::Auto), Ok(Mode::Msix));
-        assert!(nic_irq_mode(Mode::Intx).is_err());
-        assert!(nic_irq_mode(Mode::Line(166)).is_err());
-        // Zonder regel in hopos.cfg is het msix.
-        assert_eq!(Mode::parse("", Mode::Msix), (Mode::Msix, true));
     }
 
     #[test]

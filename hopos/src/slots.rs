@@ -1365,7 +1365,7 @@ async fn place(
 
 /// Eén meetregel: app-status, ctx-staat, mailbox en heartbeat.
 fn probe(plan: &abi::layout::Plan, slot: Slot, core: usize, st: &SlotStatus, dt: u64) {
-    let ctx = crate::glue::ctx_of(slot).and_then(el2::ctx_state);
+    let ctx = crate::kooi::ctx_of(slot).and_then(el2::ctx_state);
     let mbox = abi::layout::Core::new(core).and_then(|c| arch::core_state(plan, c).ok());
     println!(
         "slot {slot}: +{} ms app={} ctx={:?} mbox={:?} beat={} core_on={}",

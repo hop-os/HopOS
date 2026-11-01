@@ -184,7 +184,7 @@ mod counters {
         /// hem midden in zijn rekenwerk onderbrak.
         fn running(&self, i: kern::Slot) -> bool {
             use abi::layout::CtxState;
-            let Some(ctx) = crate::glue::ctx_of(i) else {
+            let Some(ctx) = crate::kooi::ctx_of(i) else {
                 return true;
             };
             match cpu::el2::ctx_state(ctx) {

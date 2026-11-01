@@ -74,20 +74,31 @@ er nog, zonder gebruiker.
 
 ## Het blob
 
-`kern::kernflip::Handoff`, versie 7 (`FLIP_ABI` 4), op `FLIP_HANDOFF_PA`
+`kern::kernflip::Handoff`, versie 8 (`FLIP_ABI` 5), op `FLIP_HANDOFF_PA`
 (direct onder het staging-maatwoord), met het pointer/magic-paar als
 laatste op de boot-scratch. De kop is 80 bytes:
 
 | Woord | Wat |
 | --- | --- |
-| 0, 1 | magic `HOPHAND1`, versie 7 |
+| 0, 1 | magic `HOPHAND1`, versie 8 |
 | 2 | het aantal bewoners |
 | 3 | de generatie van kern B |
 | 4 | de wandklok (`wall_off`) |
 | 5 tot 9 | de lease: ip en masker, gateway en dns, server en looptijd, T1 en T2, de tellerstand van de ACK; ip 0 = geen lease |
 
 Daarachter de bewoners (`SlotState`: partitie, core, SMP-breedte, groep,
-poorten, job, volumes). Versie 7 kwam op 01-11: de conntrack, de koude
+poorten, job, volumes, en sinds versie 8 zijn kooi-blok en zijn VMID), en
+als laatste het kooi-geheugen (`kern::cageheap`): het aantal chunks, dan
+per chunk zijn basis en zijn bezetting. Er is geen maximum aantal slots
+(v3.2.0): het kooi-blok van een slot en zijn VMID liggen niet meer vast in
+het plan maar komen bij de plaatsing uit de pool, dus kern B adopteert ze
+zoals kern A ze uitdeelde (`Kooi::adopt_slot`); hij haalt de chunks uit
+zijn pool (`PartitionPool::adopt_device`), zet ze op Device in zijn map en
+neemt hun bezetting over (`Lifecycle::adopt`). De bewonerslijsten van de
+cores (arrays van ctx-PA's) liggen in die chunks en blijven waar ze waren,
+in de sched-blokken van het plan. `FLIP_ABI` 5 kwam met versie 8: de
+switch-code van een kern van ABI 4 leest de lijsten en de VMID in het
+ctx-blok niet. Versie 7 kwam op 01-11: de conntrack, de koude
 vlag en de nulwoorden van oudere vormen gingen eruit, net als de vier
 recorder-stappen zonder schrijver. `FLIP_ABI` 4 laat een kern van 3.0.20
 (ABI 3) zo'n bundel weigeren vóór de 202; zo'n node komt naar deze vorm

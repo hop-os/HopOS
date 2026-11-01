@@ -52,6 +52,7 @@ use kern::slots::ServicerCtl;
 use kern::{Core, Region, Slot, SlotVec};
 use net::ring::AbiTx;
 use net::switch::{Ack, Command};
+use sync::LocalCell;
 
 /// Wat een architectuur aan de kooi bijdraagt: de vertaling en de
 /// bescherming (stage-2, of Sv39 plus PMP), de woorden die haar switcher
@@ -170,11 +171,28 @@ pub(crate) struct Built {
     pub(crate) cores: usize,
 }
 
+/// De gebouwde kooien, op slotnummer: van de bouw (of de adoptie) tot de
+/// release. Eén tabel voor de kooi en voor wie buiten de lifecycle het
+/// kooi-blok of het ctx-blok van een slot zoekt ([`ctx_of`], [`block_of`]:
+/// de RX-kick van Apple, de telemetrie, het venster van het glas). Alleen de
+/// executor van de OS-core raakt hem.
+static BUILT: LocalCell<SlotVec<Built>> = LocalCell::cell(SlotVec::new());
+
+/// Het ctx-blok van de gebouwde kooi van `slot` (de primaire context).
+pub(crate) fn ctx_of(slot: Slot) -> Option<Pa> {
+    BUILT.borrow().get(slot).map(|b| b.ctx)
+}
+
+/// Het kooi-blok van de gebouwde kooi van `slot` (het venster van het glas).
+#[cfg(feature = "gui")]
+pub(crate) fn block_of(slot: Slot) -> Option<Pa> {
+    BUILT.borrow().get(slot).map(|b| b.block)
+}
+
 /// De kooi van deze node over architectuur `I`.
 pub(crate) struct Kooi<I: Isa> {
     plan: Plan,
     isa: I,
-    built: SlotVec<Built>,
     /// De uitgedeelde id's (VMID of ASID), bit `i` voor id `i`. Zoveel als
     /// het ijzer heeft (`Isa::id_bits`), één per kooi zolang hij leeft, en
     /// geen rollover zoals Linux (`arch/arm64/kvm/vmid.c`): is er geen vrij,
@@ -189,7 +207,6 @@ impl<I: Isa> Kooi<I> {
         Kooi {
             plan,
             isa,
-            built: SlotVec::new(),
             ids: Vec::new(),
         }
     }
@@ -234,7 +251,8 @@ impl<I: Isa> Kooi<I> {
     /// Het slot van de kooi met ctx-blok `ctx` (een secundaire is geen
     /// kooi).
     fn slot_of(&self, ctx: Pa) -> Option<Slot> {
-        self.built
+        BUILT
+            .borrow()
             .iter()
             .find(|(_, b)| b.ctx == ctx)
             .map(|(s, _)| s)
@@ -279,7 +297,7 @@ impl<I: Isa> Kooi<I> {
     }
 
     fn built(&self, slot: Slot) -> Option<Built> {
-        self.built.get(slot).copied()
+        BUILT.borrow().get(slot).copied()
     }
 
     /// De ctx-staat van `slot`, vers uit het geheugen.
@@ -427,7 +445,10 @@ impl<I: Isa> Kooi<I> {
             part,
             cores: cores.max(1),
         };
-        self.built.insert(slot, b).map_err(|_| err(code::FULL))?;
+        BUILT
+            .borrow_mut()
+            .insert(slot, b)
+            .map_err(|_| err(code::FULL))?;
         // De OS-core: de nieuwe kern geeft Hop de core weer in zijn idle.
         // Het plan (en dus de bewonerslijst van sched-blok 0) overleefde de
         // flip ongeschreven; staat hij er toch niet meer in, dan terug, met
@@ -564,7 +585,7 @@ impl<I: Isa> Cage for Kooi<I> {
         };
         // De tabellen van het slot eerst: wat daar niet past, weigert vóór
         // er iets gebouwd is. Vanaf de tabel geeft `release` alles terug.
-        if self.built.insert(slot, b).is_err() {
+        if BUILT.borrow_mut().insert(slot, b).is_err() {
             mem.free(block.0, 1);
             self.mark_id(vmid, false);
             return Err(err(code::FULL));
@@ -797,7 +818,7 @@ impl<I: Isa> Cage for Kooi<I> {
     }
 
     fn release(&mut self, slot: Slot, mem: &mut dyn CageMem) {
-        let Some(b) = self.built.remove(slot) else {
+        let Some(b) = BUILT.borrow_mut().remove(slot) else {
             return;
         };
         // Uit elke bewonerslijst: het blok gaat terug, en een rotatie die het

@@ -3161,6 +3161,48 @@ mod tests {
         assert_eq!(info.slot_state(), Some(SlotState::Empty));
     }
 
+    /// SLOTS: de bezette slots in stukken, zoals `getdents`, van Hop; een
+    /// ander slot krijgt "denied".
+    #[test]
+    fn slots_lists_the_occupied_slots_in_pieces() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let tee = &con;
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
+        let mut p = Pipe::new(
+            port_ip4(1),
+            &[
+                op(PrivOp::Slots, 1, 0, 64),
+                op(PrivOp::Slots, 2, 0, 2),
+                op(PrivOp::Slots, 3, 1, 64),
+                op(PrivOp::Slots, 4, 2, 64),
+            ],
+        );
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        let res = results(&p.tx);
+        assert_eq!(
+            (res[0].1, res[0].3, &res[0].4[..]),
+            (STATUS_OK, 2, &[1, 0, 2, 0][..])
+        );
+        assert_eq!(
+            (res[1].3, &res[1].4[..]),
+            (1, &[1, 0][..]),
+            "as many as fit in n"
+        );
+        assert_eq!((res[2].3, &res[2].4[..]), (1, &[2, 0][..]), "after slot 1");
+        assert_eq!(res[3].3, 0, "none after the last");
+        let mut other = Pipe::new(port_ip4(2), &[op(PrivOp::Slots, 5, 0, 64)]);
+        drive(
+            &sys, &mut a, &inbox, &reply, &mut other, &mut mem, &hooks, &tee, None,
+        );
+        assert_eq!(results(&other.tx)[0].1, STATUS_DENIED);
+    }
+
     /// Een start met volumes: van de draad tot in de mount-tabel van de
     /// hopfs-actor, met één regel. Een volume op `/`, onder `/.tasks` of met
     /// `..` wordt geweigerd vóór de claim: het slot blijft leeg.

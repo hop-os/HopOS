@@ -514,7 +514,7 @@ pub(crate) fn wake_rx(slot: usize) {
     if WAKE_PLAN.get().get().is_none() {
         return;
     }
-    let Some(prim) = layout::Slot::new(slot).and_then(crate::glue::ctx_of) else {
+    let Some(prim) = layout::Slot::new(slot).and_then(crate::kooi::ctx_of) else {
         return;
     };
     if !el2::rx_due(prim) {

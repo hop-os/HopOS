@@ -141,13 +141,6 @@ struct Door {
 /// raakt ze (de servicers, de deur van de executor).
 static DOORS: LocalCell<SlotVec<Door>> = LocalCell::cell(SlotVec::new());
 
-/// Het ctx-blok van de levende bewoner van `slot` (de primaire context),
-/// zolang zijn servicer zijn outbox open heeft: de RX-kick van de switch
-/// (Apple, `cage::wake_rx`) en de telemetrie vinden hem hier.
-pub(crate) fn ctx_of(slot: Slot) -> Option<Pa> {
-    DOORS.borrow().get(slot).map(|d| d.ctx)
-}
-
 /// De deur van de outboxen (O10, docs/sequence-hopos.md §13.3): luidt de
 /// servicer van elk slot met werk in zijn outbox, een SMP-verzoek of een
 /// gevallen context. Alleen kale loads plus de `pull` van de kop, zoals de

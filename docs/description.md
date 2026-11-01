@@ -137,9 +137,9 @@ Wie wat bezit:
 
 | Eigenaar | Staat | Waar |
 | --- | --- | --- |
-| `Lifecycle` (actor) | partities, cores, bewoners, kooi, grants | `kern/src/slots.rs` |
-| `Servicers` (leesbare tabel) | per slot generatie, mounts, job, partitie | `kern/src/slots.rs` |
-| servicer-taak per slot | de outbox-lezer van één levensduur | `kern/src/slots.rs` |
+| `Lifecycle` (actor) | partities, het kooi-geheugen, cores, bewoners, kooi, grants | `kern/src/slots.rs`, `kern/src/cageheap.rs` |
+| `Servicers` (leesbare tabel) | per levend slot generatie, mounts, job, partitie | `kern/src/slots.rs` |
+| servicer-taak per levensduur | de outbox-lezer van één levensduur | `kern/src/slots.rs` |
 | `System` | lopende image-stromen, het Privilege-token, de staat van Hop | `kern/src/system.rs` |
 | supervisor van Hop (taak) | Hop's spec, zijn image en het vorige | `hopos/src/slots.rs` |
 | `FsActor` | de hopfs-boom | `kern/src/rpc.rs` |
@@ -147,10 +147,22 @@ Wie wat bezit:
 | `Switch` (actor) | poorten, ringhelften, NAT | `net/src/switch.rs` |
 | `Pump` | de NIC | `net/src/pump.rs` |
 
+Er is geen maximum aantal slots (01-11). Een slot bestaat van de plaatsing
+tot de stop: de kern geeft het laagste vrije nummer (zoals een fd) en kent
+alleen "past het". Zijn tabellen groeien met het hoogste nummer dat er ooit
+tegelijk was (`kern::SlotVec`, zoals de fd-tabel van Linux); zijn kooi-blok,
+zijn VMID en de groei van een bewonerslijst komen bij de bouw uit het
+kooi-geheugen (chunks van 2 MiB uit de pool, `kern/src/cageheap.rs`) en gaan
+bij de stop terug. Het plan is per core: cores zijn vast. Het slot-LAN is
+10.100.0.0/16, het slot zestien bits (`abi::layout::SLOT_MAX`, een grens van
+het adres). `PrivOp::Slots` geeft de bezette slots in stukken, zoals
+`getdents`.
+
 1. **Start.** Hop stuurt `START_SLOT` over de system-API. `System::start`
    toetst env, poorten en mounts en vraagt de lifecycle om een claim.
-   `Lifecycle::claim` kiest cores (`kern/src/pool.rs`: dedicated, een
-   sharegroep, of de OS-core als groep `system`), alloceert een partitie
+   `Lifecycle::claim` kiest het slot (het laagste vrije, behalve dat van
+   Hop), cores (`kern/src/pool.rs`: dedicated, een sharegroep, of de
+   OS-core als groep `system`), alloceert een partitie
    (`kern/src/partmem.rs`, best-fit op 2 MiB, levensloop als type
    `Partition<Free|Owned>`) en scrubt die in brokken.
 2. **Stromen.** Hop stroomt de ELF met `STREAM_IMAGE`. `Placer`
@@ -159,8 +171,10 @@ Wie wat bezit:
    de kern patcht (RamStart, RamSize, slotHint, ABI-stempel). Een Go-image
    (stempel 10) gaat door dezelfde weg.
 3. **Wapenen.** `Lifecycle::arm`: poorten publiceren bij de switch, de kooi
-   bouwen (en de ringen aan de switch hangen), grants, de servicer
-   registreren, dispatch, en wachten tot de boot niet meer pending is. Een
+   bouwen (het kooi-blok, de VMID en plaats in de bewonerslijsten uit het
+   kooi-geheugen; de ringen aan de switch), grants, de servicer registreren
+   (de kooi spawnt er één voor deze levensduur, `Cage::serve`), dispatch, en
+   wachten tot de boot niet meer pending is. Een
    fout vóór de dispatch is een rollback; een onzekere dispatch is
    `HOPOS_FATAL` (de watchdog reset, docs/sequence-hopos.md §13.5).
 4. **Draaien.** De servicer leest de outbox (logregels naar de console en
@@ -170,9 +184,9 @@ Wie wat bezit:
    poorten weg, wachten op stil, anders revoke met 1 s gratie. Tijdens het
    wachten houdt de app zijn net, zijn generatie (dus de system-API) en zijn
    outbox-lezer: dat is zijn gratie, SIGTERM vóór SIGKILL. Dan pas evict
-   uit de tabel en de ringen van de switch. Stil: partitie en cores vrij.
-   Niet stil: `HOPOS_FATAL`. De committer ziet de generatie verdwijnen en
-   legt hopfs vast.
+   uit de tabel en de ringen van de switch. Stil: partitie, kooi-blok, VMID
+   en cores vrij. Niet stil: `HOPOS_FATAL`. De servicer-tabel meldt de stop
+   (`Servicers::take_stopped`) en de committer legt hopfs vast.
 
 **Hop zelf.** Hop is de bewoner van slot 1, en de kern is zijn supervisor
 (`Supervisor`, `hopos/src/slots.rs`). Eén taak plaatst hem, bewaakt hem
@@ -632,7 +646,7 @@ als open of bewust staat na.
 
 - `Region`: `abi::Region` in kern en `fw::fdt`; `board::Region` blijft
   (bewust: zijn basis is een getypte `Pa`). `Slot` één keer
-  (`abi::layout::Slot`, met `SLOT_CAP`, ook in de kern). `Core` nog twee
+  (`abi::layout::Slot`, zestien bits, ook in de kern). `Core` nog twee
   keer met twee betekenissen (fysiek in abi, logisch in kern); de trait in
   heap heet `CoreId`. H.
 - `Full<T>` één keer: `bounded::Full`. H.
@@ -851,8 +865,8 @@ Nagelopen op 04-10; wat hieronder als gedaan staat, wacht nu op een bel.
   O6N) als bel in plaats van die pomp, en dat vraagt ijzer. V.
 - De committer wacht op de bel van de servicer-tabel
   (`Servicers::changed`) en op `COMMIT_EVERY`; `flip::restore_nat` wacht
-  op de adoptie (`ADOPTED` is een `Stop`); `free_slot` is één vraag
-  (`Request::FirstEmpty`).
+  op de adoptie (`ADOPTED` is een `Stop`); het slot van een start kiest de
+  lifecycle in de claim zelf.
 - **Een stille secundaire core** slaapt in WFE tot zijn eigen deadline: de
   vlaggen (stop, delen, yield) ziet hij na elke WFE. In de yield (QEMU,
   Apple, een gedeelde core) blijft de vangrail van 10 ms, want daar maakt

@@ -222,6 +222,10 @@ impl<P: Platform> Board for On<P> {
         self.uefi.kick_self();
     }
 
+    fn map_cage(&self, pa: u64, size: u64, device: bool) -> Result<(), board::TailError> {
+        self.uefi.map_cage(pa, size, device)
+    }
+
     fn config(&self) -> &'static str {
         self.uefi.config()
     }

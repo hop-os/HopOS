@@ -93,7 +93,7 @@ s3all() {
 BOOT_MARKS="HOPOS_BOOT|HOPOS_FS_UP fresh=1|HOPOS_SYSTEM_UP|slot 1: .*HOP_CLOCK_SYNCED|slot 1: .*HOP_STORE_PLAIN_HTTP|slot 1: .*HOP_STORE_UP|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 RUN_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|store: slot 2 pull: no such object HOPOS_STORE_MISS|store: slot 2 push done \\(size 30\\) HOPOS_STORE_DONE|store: slot 2 list done \\(size 1\\) HOPOS_STORE_DONE|store: slot 2 pull done \\(size 30\\) HOPOS_STORE_DONE|store: slot 2 drop done|store: slot 2 list done \\(size 0\\) HOPOS_STORE_DONE|slot 2: HOPOS_APPSPIKE_STORE ok|slot 2: HOPOS_APPSPIKE_DONE pass=10 fail=0"
 S3_MARKS="S3 GET apps/hopos/spike/never-pushed.json 404|S3 PUT apps/hopos/spike/state.json 200|S3 GET \\?list prefix=apps/hopos/spike/ 200|S3 GET apps/hopos/spike/state.json 200|S3 DELETE apps/hopos/spike/state.json 204"
-RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_CAGE_FAIL|HOPOS_APPSPIKE_STORE FAIL|HOP_STORE_FAIL|HOP_STORE_KERNEL|HOPOS_STORE_NO_SERVICE|HOPOS_STORE_FULL"
+RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_CAGE_FAIL|HOPOS_APPSPIKE_STORE FAIL|HOP_STORE_FAIL|HOP_STORE_KERNEL|HOPOS_STORE_NO_SERVICE|HOPOS_STORE_FULL"
 S3RED="S3 [A-Z]+ .* (403|400)$"
 
 JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"env":{"ROLE":"STORE"}}'

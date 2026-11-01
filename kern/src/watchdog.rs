@@ -10,14 +10,15 @@
 //!
 //! Het ene beleid, in twee fasen:
 //!
-//! 1. **Boot-guard.** Wapenen zo vroeg als de hardware het toelaat, en
-//!    blind aaien tot het eerste levensteken. Een node die tijdens de boot
-//!    helemaal bevriest (ook de aai-taak), reset zichzelf. Een bring-up die
-//!    leeft maar geen netwerk krijgt, blijft staan: het blinde aaien gaat
-//!    door, en de wachtregel zegt periodiek waarom er nog geen echt vangnet
-//!    is. Een flip-boot krijgt hoogstens twee minuten blind aaien, gemeten
-//!    op de rauwe teller (een klokzet van Hop mag die grens niet
-//!    verschuiven).
+//! 1. **De guard.** Wapenen als eerste stap van de boot, en blind aaien tot
+//!    het eerste levensteken, hoogstens [`GUARD_SECS`] lang, gemeten op de
+//!    rauwe teller (een klokzet van Hop mag die grens niet verschuiven).
+//!    Elke boot krijgt dezelfde termijn: koud, na een flip, na een reset
+//!    (O1 van 01-11, docs/sequence-hopos.md §13.2). Komt het levensteken
+//!    niet, dan geen pets meer en reset de hardware: een Hop die al bij
+//!    zijn eerste start valt, of een node die geen net krijgt, is een
+//!    falende node (F5). Tot 01-11 aaide een koude boot hier onbegrensd
+//!    blind, en had de flip een eigen tweede guard met een eigen klok.
 //! 2. **Levensteken.** Vanaf het eerste bewijs dat de node leeft (de
 //!    binary bepaalt wat dat is: het net op en de heartbeat van Hop die
 //!    loopt) aait het beleid alleen nog op bewijs. Stopt het bewijs, dan
@@ -29,11 +30,11 @@
 //! Dit is rekenwerk zonder klok en zonder ijzer: de binary geeft de
 //! tellerstand en de gezondheid, en logt de [`Event`]s die terugkomen.
 
-/// De gratie van een flip-boot in seconden: twee minuten blind aaien, dan
-/// moet de nieuwe kern aantoonbaar leven. GEMETEN 06-09 op de M4: een
-/// mislukte flip zonder deze grens liet de node zeven minuten donker in
-/// plaats van binnen 30 s te resetten.
-pub const FLIP_GRACE_SECS: u64 = 120;
+/// De termijn van het eerste levensteken in seconden, voor elke boot.
+/// GEMETEN 06-09 op de M4: een mislukte flip zonder grens liet de node
+/// zeven minuten donker in plaats van binnen 30 s te resetten. Twee
+/// minuten dekt een DHCP-sessie en de start van Hop ruim (§13.9 vraag 1).
+pub const GUARD_SECS: u64 = 120;
 
 /// De hardware-helft die een board levert. Het beleid roept `arm` één keer
 /// en `pet` elke aai-ronde.
@@ -60,17 +61,13 @@ pub enum Phase {
 /// Wat het beleid meldt; de binary maakt er één consoleregel met marker van.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// De boot-guard van een flip-boot is gewapend.
-    BootGuardArmed,
     /// De hardware liet zich niet wapenen: deze boot is onbewaakt.
     Unguarded,
-    /// De gratie van de flip-boot liep af vóór het levensteken: geen pets
-    /// meer (`HOPOS_BOOT_GUARD_EXPIRED`).
-    GraceExpired,
-    /// Gewapend; blind aaien tot het levensteken.
+    /// Gewapend; blind aaien tot het levensteken, hoogstens [`GUARD_SECS`].
     Armed,
-    /// Nog geen levensteken na zoveel rondes.
-    Waiting(u64),
+    /// De guard liep af vóór het levensteken: geen pets meer
+    /// (`HOPOS_BOOT_GUARD_EXPIRED`).
+    GuardExpired,
     /// Het levensteken kwam: vanaf nu aaien op bewijs
     /// (`HOPOS_CANARY_LIVE`).
     Live,
@@ -84,89 +81,34 @@ pub enum Event {
 /// Het beleid. Eén eigenaar: de watchdog-taak van de binary.
 #[derive(Debug)]
 pub struct Policy {
-    /// De rauwe tellerstand waarop de gratie van een flip-boot afloopt;
-    /// 0 = koude boot, onbegrensd blind.
+    /// De rauwe tellerstand waarop de guard afloopt.
     deadline: u64,
     phase: Phase,
-    attempts: u64,
     misses: u64,
     reset: Option<&'static str>,
-    /// Om de hoeveel rondes de wachtregel komt (~5 minuten).
-    loud_every: u64,
 }
 
 impl Policy {
-    /// Een beleid dat nog niets deed. `loud_every`: om de hoeveel
-    /// aai-rondes de wachtregel van fase 1 komt.
-    #[must_use]
-    pub const fn new(loud_every: u64) -> Self {
-        Self {
-            deadline: 0,
+    /// Wapent de watchdog en zet de guard: [`GUARD_SECS`] vanaf `counter`
+    /// op de rauwe teller (`hz` tikken per seconde).
+    pub fn start(hw: &mut impl Hardware, counter: u64, hz: u64) -> (Policy, Event) {
+        let mut p = Policy {
+            deadline: counter.saturating_add(GUARD_SECS.saturating_mul(hz)),
             phase: Phase::Idle,
-            attempts: 0,
             misses: 0,
             reset: None,
-            loud_every: if loud_every == 0 { 1 } else { loud_every },
+        };
+        if !hw.arm() {
+            return (p, Event::Unguarded);
         }
+        p.phase = Phase::Guard;
+        (p, Event::Armed)
     }
 
     /// De fase.
     #[must_use]
     pub const fn phase(&self) -> Phase {
         self.phase
-    }
-
-    /// De deadline van de flip-gratie op de rauwe teller (0 = geen).
-    #[must_use]
-    pub const fn deadline(&self) -> u64 {
-        self.deadline
-    }
-
-    /// Is de gratie van de flip-boot op tellerstand `counter` op?
-    fn expired(&self, counter: u64) -> bool {
-        self.deadline != 0 && counter >= self.deadline
-    }
-
-    /// Eén blinde pet, binnen de gratie van een flip-boot. `false` = de
-    /// gratie is op, er is niet geaaid. Een bewezen levensteken heeft geen
-    /// gratie nodig.
-    fn pet_boot_guard(&self, hw: &mut impl Hardware, counter: u64) -> bool {
-        if self.expired(counter) {
-            return false;
-        }
-        hw.pet();
-        true
-    }
-
-    /// Start het beleid op een flip-boot: als [`Policy::start`], met een
-    /// gratie van [`FLIP_GRACE_SECS`] op de rauwe teller (`hz` tikken per
-    /// seconde). De vorige kern had een gewapende watchdog die bij de
-    /// landing stil werd gezet; sterft deze kern in zijn bring-up, dan waakt
-    /// er anders niemand.
-    pub fn arm_boot_guard(&mut self, hw: &mut impl Hardware, counter: u64, hz: u64) -> Event {
-        self.deadline = counter
-            .saturating_add(FLIP_GRACE_SECS.saturating_mul(hz))
-            .max(1);
-        match self.start(hw, counter) {
-            Event::Armed => Event::BootGuardArmed,
-            e => e,
-        }
-    }
-
-    /// Start het beleid (de canary): wapent één keer. Is de gratie van een
-    /// flip-boot al op, dan wapent hij níét (dat zou stil een tweede gratie
-    /// geven) en aait hij nooit meer.
-    pub fn start(&mut self, hw: &mut impl Hardware, counter: u64) -> Event {
-        if self.expired(counter) {
-            self.phase = Phase::Withheld;
-            return Event::GraceExpired;
-        }
-        if !hw.arm() {
-            self.phase = Phase::Idle;
-            return Event::Unguarded;
-        }
-        self.phase = Phase::Guard;
-        Event::Armed
     }
 
     /// Een reset gevraagd (een verloren adres): de volgende ronde houdt de
@@ -191,14 +133,12 @@ impl Policy {
                 hw.pet();
                 return Some(Event::Live);
             }
-            self.attempts += 1;
-            if !self.pet_boot_guard(hw, counter) {
+            if counter >= self.deadline {
                 self.phase = Phase::Withheld;
-                return Some(Event::GraceExpired);
+                return Some(Event::GuardExpired);
             }
-            let n = self.attempts;
-            let loud = n == 3 || n.is_multiple_of(self.loud_every);
-            return loud.then_some(Event::Waiting(n));
+            hw.pet();
+            return None;
         }
         if alive {
             hw.pet();
@@ -212,7 +152,8 @@ impl Policy {
 
 #[cfg(test)]
 mod tests {
-    //! De policy-tests uit `watchdog_policy_test.go`, naam voor naam.
+    //! De policy-tests uit `watchdog_policy_test.go`, naar het ene beleid
+    //! van 01-11.
     use super::*;
 
     #[derive(Default)]
@@ -232,125 +173,59 @@ mod tests {
         }
     }
 
-    /// `TestBlindPetsShareOneFlipDeadline`.
+    /// Elke boot, ook een koude, krijgt de termijn: blind tot de deadline,
+    /// daarna geen pet meer, ook niet als het bewijs later toch komt (F5).
     #[test]
-    fn blind_pets_share_one_flip_deadline() {
+    fn every_boot_has_one_guard() {
         let mut hw = Fake::default();
-        let mut p = Policy::new(1);
-        p.deadline = 120_000;
-        assert!(p.pet_boot_guard(&mut hw, 60_000), "early pet refused");
-        assert_eq!(p.start(&mut hw, 60_000), Event::Armed);
-        assert_eq!(p.deadline, 120_000, "handover renewed grace");
-        assert!(p.pet_boot_guard(&mut hw, 119_999), "phase1 pet refused");
-        assert!(!p.pet_boot_guard(&mut hw, 120_000), "pet at deadline");
-        assert!(!p.pet_boot_guard(&mut hw, 999_999));
-        assert_eq!(hw.pets, 2, "pet after deadline");
+        let (mut p, e) = Policy::start(&mut hw, 1_000, 10);
+        assert_eq!(e, Event::Armed);
+        let deadline = 1_000 + GUARD_SECS * 10;
+        assert_eq!(p.tick(&mut hw, deadline - 1, false), None);
+        assert_eq!(hw.pets, 1, "blind pet inside the guard");
+        assert_eq!(p.tick(&mut hw, deadline, false), Some(Event::GuardExpired));
+        assert_eq!(p.phase(), Phase::Withheld);
+        assert_eq!(p.tick(&mut hw, deadline + 1, true), None);
+        assert_eq!((hw.arms, hw.pets), (1, 1), "pets after the guard expired");
     }
 
-    /// `TestBootGuardUsesRawCounterDespiteClockEpochChange`.
+    /// `TestBootGuardUsesRawCounterDespiteClockEpochChange`: de deadline
+    /// staat op de rauwe teller, een klokzet van Hop raakt hem niet.
     #[test]
-    fn boot_guard_uses_raw_counter_despite_clock_epoch_change() {
+    fn guard_uses_the_raw_counter() {
         let mut hw = Fake::default();
-        let mut p = Policy::new(1);
         let hz = 24_000_000;
-        let ticks = 24_000_000;
-        assert_eq!(p.arm_boot_guard(&mut hw, ticks, hz), Event::BootGuardArmed);
-        assert_eq!(hw.arms, 1, "a flip boot armed twice");
-        let want = 24_000_000 + 120 * 24_000_000;
-        assert_eq!(p.deadline(), want, "deadline in raw ticks");
-        // Een klokverschuiving ter grootte van een datum zou een deadline op
-        // de wandklok meteen laten aflopen; de rauwe teller kent hem niet.
+        let (mut p, _) = Policy::start(&mut hw, hz, hz);
+        let want = hz + GUARD_SECS * hz;
         let epoch_offset: u64 = 1_788_652_800_000_000_000; // 2026-09-06 in ns
         assert!(epoch_offset > want, "invalid clock-shift fixture");
-        assert!(p.pet_boot_guard(&mut hw, ticks) && p.deadline() == want);
-        assert!(p.pet_boot_guard(&mut hw, want - 1), "raw grace shortened");
-        assert!(
-            !p.pet_boot_guard(&mut hw, want),
-            "raw deadline not enforced"
-        );
-        assert_eq!(hw.pets, 2);
-    }
-
-    /// `TestColdBootBlindPetRemainsUnlimited`.
-    #[test]
-    fn cold_boot_blind_pet_remains_unlimited() {
-        let mut hw = Fake::default();
-        let p = Policy::new(1);
-        assert!(p.pet_boot_guard(&mut hw, 1), "cold pet refused");
-        assert!(p.pet_boot_guard(&mut hw, 1 << 63));
-        assert_eq!(hw.pets, 2, "cold bring-up lost unlimited grace");
-    }
-
-    /// `TestExpiredFlipCanaryDoesNotRearm`.
-    #[test]
-    fn expired_flip_canary_does_not_rearm() {
-        let mut hw = Fake::default();
-        let mut p = Policy::new(1);
-        p.deadline = 100;
-        assert_eq!(p.start(&mut hw, 100), Event::GraceExpired);
-        assert_eq!(
-            (hw.arms, hw.pets),
-            (0, 0),
-            "expired handover rearmed/petted"
-        );
-        assert_eq!(p.tick(&mut hw, 101, true), None);
-        assert_eq!(hw.pets, 0);
-    }
-
-    /// `TestFlipCanaryWithoutAgentStopsBlindPets`.
-    #[test]
-    fn flip_canary_without_agent_stops_blind_pets() {
-        let mut hw = Fake::default();
-        let mut p = Policy::new(1);
-        let mut raw = 0u64;
-        let mut counter = || {
-            raw += 1;
-            raw
-        };
-        p.deadline = 4;
-        assert_eq!(p.start(&mut hw, counter()), Event::Armed);
-        // Geen agent (geen adres, geen heartbeat): nooit levend.
-        let mut last = None;
-        for _ in 0..10 {
-            let e = p.tick(&mut hw, counter(), false);
-            if e.is_some() {
-                last = e;
-            }
-            if p.phase() == Phase::Withheld {
-                break;
-            }
-        }
-        assert_eq!(last, Some(Event::GraceExpired));
-        let before = hw.pets;
-        let now = counter();
-        assert!(now >= 4);
-        assert!(!p.pet_boot_guard(&mut hw, now));
-        assert_eq!(p.tick(&mut hw, counter(), true), None);
-        assert_eq!(hw.pets, before, "failed canary kept petting");
+        assert_eq!(p.tick(&mut hw, want - 1, false), None);
+        assert_eq!(p.tick(&mut hw, want, false), Some(Event::GuardExpired));
+        assert_eq!(hw.pets, 1);
     }
 
     #[test]
     fn liveness_then_misses_then_a_requested_reset() {
         let mut hw = Fake::default();
-        let mut p = Policy::new(100);
-        assert_eq!(p.start(&mut hw, 1), Event::Armed);
+        let (mut p, e) = Policy::start(&mut hw, 1, 1);
+        assert_eq!(e, Event::Armed);
         assert_eq!(p.tick(&mut hw, 2, false), None);
         assert_eq!(p.tick(&mut hw, 3, false), None);
-        assert_eq!(p.tick(&mut hw, 4, false), Some(Event::Waiting(3)));
-        assert_eq!(hw.pets, 3, "blind pets in phase 1");
+        assert_eq!(hw.pets, 2, "blind pets in the guard");
         assert_eq!(p.tick(&mut hw, 5, true), Some(Event::Live));
-        assert_eq!(p.tick(&mut hw, 6, false), Some(Event::Miss(1)));
-        assert_eq!(p.tick(&mut hw, 7, false), Some(Event::Miss(2)));
-        assert_eq!(hw.pets, 4, "a miss withholds the pet");
-        assert_eq!(p.tick(&mut hw, 8, true), None);
-        assert_eq!(hw.pets, 5);
+        // Na het levensteken telt de deadline van de guard niet meer.
+        assert_eq!(p.tick(&mut hw, 1 << 40, false), Some(Event::Miss(1)));
+        assert_eq!(p.tick(&mut hw, 1 << 40, false), Some(Event::Miss(2)));
+        assert_eq!(hw.pets, 3, "a miss withholds the pet");
+        assert_eq!(p.tick(&mut hw, 1 << 40, true), None);
+        assert_eq!(hw.pets, 4);
         p.request_reset("address lost");
         assert_eq!(
-            p.tick(&mut hw, 9, true),
+            p.tick(&mut hw, 1 << 40, true),
             Some(Event::ResetRequested("address lost"))
         );
-        assert_eq!(p.tick(&mut hw, 10, true), None);
-        assert_eq!(hw.pets, 5, "pets after a reset request");
+        assert_eq!(p.tick(&mut hw, 1 << 40, true), None);
+        assert_eq!(hw.pets, 4, "pets after a reset request");
     }
 
     #[test]
@@ -359,8 +234,8 @@ mod tests {
             refuse: true,
             ..Fake::default()
         };
-        let mut p = Policy::new(1);
-        assert_eq!(p.arm_boot_guard(&mut hw, 1, 10), Event::Unguarded);
+        let (mut p, e) = Policy::start(&mut hw, 1, 10);
+        assert_eq!(e, Event::Unguarded);
         assert_eq!(p.tick(&mut hw, 3, true), None);
         assert_eq!((hw.arms, hw.pets), (1, 0));
     }

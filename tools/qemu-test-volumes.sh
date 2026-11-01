@@ -58,7 +58,7 @@ hop_virt
 BOOT_MARKS="HOPOS_BOOT|HOPOS_FS_UP fresh=1|HOPOS_SYSTEM_UP|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 LIFE1_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: 1 volume\\(s\\) mounted: /data -> /volumes/demo HOPOS_SLOT_MOUNTS|slot 2: HOPOS_APPSPIKE_VOLUME ok wrote path=/data/spike.txt|hopfs: slot 2 saved /data/spike.txt as /volumes/demo/spike.txt .*HOPOS_FS_SAVED|slot 2: HOPOS_APPSPIKE_DONE pass=10 fail=0"
 LIFE2_MARKS="slot [0-9]+: HOPOS_APPSPIKE_VOLUME ok found path=/data/spike.txt bytes=[0-9]+ root=fresh"
-RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOP_STATE_SKIPPED|HOPOS_CAGE_FAIL|HOPOS_APPSPIKE_VOLUME FAIL|HOPOS_FS_MOUNTS|persistent volumes require"
+RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOP_STATE_SKIPPED|HOPOS_CAGE_FAIL|HOPOS_APPSPIKE_VOLUME FAIL|HOPOS_FS_MOUNTS|persistent volumes require"
 
 lives() { all "$LIFE1_MARKS" && all "$LIFE2_MARKS"; }
 job_loop '{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"env":{"VOLUME":"/data/spike.txt"},"volumes":{"/volumes/demo":"/data"}}' lives

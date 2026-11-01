@@ -67,7 +67,7 @@ def probe(binary=None, markers=('HOPOS_SYNC_WRITE','HOPOS_SYNC_READ'), output=OU
                             data = log.read_text(errors='replace')
                             if boot == 1 and markers[0] in data:
                                 raise RuntimeError('koud hersteld volume mist de database')
-                            if any(x in data for x in ('HOPOS_SYNC_FAIL','REPLICA_SQLITE_PERSIST_FAIL','HOPOS_PANIC','HOPOS_EXCEPTION','HOPOS_APP_PANIC')):
+                            if any(x in data for x in ('HOPOS_SYNC_FAIL','REPLICA_SQLITE_PERSIST_FAIL','HOPOS_PANIC','HOPOS_FATAL','HOPOS_EXCEPTION','HOPOS_APP_PANIC')):
                                 raise RuntimeError(f'foutmarker: {log}')
                             if not posted and 'HOP_LEADER' in data and 'HOP_UP' in data:
                                 req = urllib.request.Request(f"http://127.0.0.1:{env['LEADERPORT']}/v1/jobs",

@@ -550,6 +550,9 @@ impl<C: Console> Console for LogTee<'_, C> {
         self.logs.push(slot, line);
         self.inner.app_line(slot, line);
     }
+    fn fatal(&self, args: fmt::Arguments<'_>) -> ! {
+        self.inner.fatal(args)
+    }
 }
 
 /// De console van de kern zelf, regel voor regel, voor `NEXT_LOG` 0: Hop

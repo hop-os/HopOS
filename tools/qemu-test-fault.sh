@@ -38,7 +38,7 @@ echo "== booten op QEMU virt met appspike FAULT=1 (tot ${TIMEOUT}s)"
 hop_virt APP=appspike ROLE=0 APPENV=FAULT=1
 
 MARKS="slot 1: applib: stage-1 on.*HOPOS_APP_MMU|slot 1: HOPOS_APPSPIKE_FAULT reading 0x4ffff000|slot 1: fault at EL1 vec=4 esr=0x96[0-9a-f]{6} \(data abort, translation fault\) elr=0x5[0-9a-f]+ far=0x4ffff000 HOPOS_SLOT_FAULT"
-RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APPSPIKE_FAULT FAIL|HOPOS_APP_NO_MMU"
+RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_APPSPIKE_FAULT FAIL|HOPOS_APP_NO_MMU"
 t=0
 while [ "$t" -lt "$TIMEOUT" ]; do
 	if has "$RED"; then

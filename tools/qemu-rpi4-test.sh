@@ -95,7 +95,7 @@ kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 
 fail=0
-if grep -q "HOPOS_PANIC\|HOPOS_EXCEPTION" "$TMP/console.log"; then
+if grep -q "HOPOS_PANIC\|HOPOS_FATAL\|HOPOS_EXCEPTION" "$TMP/console.log"; then
 	echo "qemu-rpi4-test: panic or exception" >&2
 	fail=1
 fi

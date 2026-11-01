@@ -76,6 +76,10 @@ impl Console for KernConsole {
         }
         crate::conport::KERN_LOG.app(false);
     }
+
+    fn fatal(&self, args: core::fmt::Arguments<'_>) -> ! {
+        cpu::boot::fatal(args)
+    }
 }
 
 /// De outbox van één levensduur: de lezer op de ring in de staart, en het

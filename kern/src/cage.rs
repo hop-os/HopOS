@@ -294,6 +294,17 @@ pub trait Console {
     fn app_line(&self, slot: Slot, line: &[u8]) {
         let _ = (slot, line);
     }
+    /// Hard falen (docs/sequence-hopos.md §13.2): de kern kan een invariant
+    /// niet meer bevestigen (een slot dat niet stil wordt, een schijf die
+    /// faalt). De binary geeft `HOPOS_FATAL` en parkeert, de watchdog
+    /// reset; op de host is het een panic, zodat een toets hem ziet.
+    #[expect(
+        clippy::panic,
+        reason = "de host-vorm van fatal: een toets vangt hem met should_panic"
+    )]
+    fn fatal(&self, args: core::fmt::Arguments<'_>) -> ! {
+        panic!("HOPOS_FATAL {args}")
+    }
 }
 
 /// Fysiek geheugen buiten de eigen heap, woordgewijs: de boot-scratch, de

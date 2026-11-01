@@ -100,6 +100,15 @@ pub fn write_bytes(b: &[u8]) {
     unlock(held);
 }
 
+/// Draait `f` onder het console-slot: de pomp van de UART (hopos
+/// conport.rs) verzet zo dezelfde positie als een schrijver.
+pub fn locked<R>(f: impl FnOnce() -> R) -> R {
+    let held = lock();
+    let r = f();
+    unlock(held);
+    r
+}
+
 /// De uitvoering van [`print!`](crate::print): één opgemaakte regel onder
 /// het slot.
 #[doc(hidden)]

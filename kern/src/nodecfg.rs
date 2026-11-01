@@ -366,8 +366,8 @@ pub fn insecure(cfg: &NodeCfg<'_>) -> bool {
     }
 }
 
-/// `hopos.replay=N`: na N seconden herhaalt de kern het begin van zijn
-/// eigen console op de UART (hopos `conport::replay`), voor een board
+/// `hopos.replay=N`: elke N seconden zet de kern zijn console-ring opnieuw
+/// op de UART (hopos `conport::rewind`), voor een board
 /// waarvan de lezer pas na de boot aanhaakt (de M4 over de dockchannel,
 /// 30-09). 0 of niets = uit.
 #[must_use]

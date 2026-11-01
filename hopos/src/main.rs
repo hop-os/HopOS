@@ -152,9 +152,10 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     let board: &'static Machine = &BOARD;
     let uart = board.console();
     cpu::console::set_sink(uart);
-    // De ring van de TCP-console achter de UART (conport.rs); het glas komt
-    // er in `setup` achter, in dezelfde tee.
-    conport::install(uart);
+    // De console-ring op de plek van de zwarte doos (conport.rs): wat een
+    // vorige kern erin liet blijft staan, de UART is zijn eerste lezer; het
+    // glas komt er in `setup` achter, in dezelfde tee.
+    conport::install();
 
     println!();
     for line in BUNNY {
@@ -180,11 +181,6 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
 
     board.init_heap(&HEAP);
     board.discover(dtb);
-    // De ring van 5555 opnieuw aan deze core: op de M4 kent `this_core`
-    // de cores pas na de ADT (in `discover`), en daarvóór was dit core 0.
-    // Zonder deze regel viel alles tot `conport::here` weg, de landing van
-    // een flip en de zwarte doos incluis (01-10).
-    conport::here();
     // De OS-core (PORT.md beslissing 2): de kern woont op de core die de
     // bootparameter kiest. Staat hij daar nog niet, dan verhuist hij nu,
     // vóór er één lijn, timer of bewoner aan deze core hangt; deze core
@@ -288,9 +284,8 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         env!("HOPOS_STAMP"),
     );
 
-    // De ring van de TCP-console is vanaf hier van de OS-core (na een
-    // verhuizing schreef de boot-core hem tot nu), dan de console op het
-    // glas, op dezelfde core (gui.rs): de bunny als kop, de log eronder.
+    // Het glas is van de OS-core (gui.rs; na een verhuizing is dat een
+    // andere dan de boot-core): de bunny als kop, de log eronder.
     // Zonder framebuffer of kaal gebouwd: één regel of niets.
     conport::here();
     gui::init_framebuffer_console(board);
@@ -591,7 +586,7 @@ static STORE: kern::store::StoreQueue = kern::store::StoreQueue::new();
 fn system(privilege: Option<Privilege>, fs: bool, max_slots: usize) -> &'static KernSystem {
     let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, max_slots)
         .with_logs(&slots::LOGS)
-        .with_kern_log(&conport::KERN_LOG)
+        .with_console(&conport::RING)
         .with_store(&STORE);
     if fs {
         s = s.with_fs(&storage::FS_INBOX);
@@ -773,16 +768,15 @@ async fn tick(exec: &'static Executor) {
     let (mut refused, mut dropped) = (0u64, 0u64);
     loop {
         n += 1;
-        // Een late lezer (de M4 over de dockchannel) krijgt de boot alsnog:
-        // elke N tikken de kop, de oudste 16 KiB van de ring en de staart,
-        // zodat een lezer die pas na een kabel-herplug aanhaakt er een vangt.
+        // Een late lezer (de M4 over de dockchannel) krijgt de ring alsnog:
+        // elke N tikken zet de UART hem opnieuw, zodat een lezer die pas na
+        // een kabel-herplug aanhaakt er een vangt.
         let replay_at = REPLAY_AT.load(Relaxed);
         if replay_at != 0 && n.is_multiple_of(replay_at) {
             println!(
-                "console: replaying the first 16 KiB of this boot for a late reader (hopos.replay={replay_at}) HOPOS_CONSOLE_REPLAY"
+                "console: replaying the ring for a late reader (hopos.replay={replay_at}) HOPOS_CONSOLE_REPLAY"
             );
-            let bytes = conport::replay(16 * 1024);
-            println!("console: end of the replay ({bytes} bytes) HOPOS_CONSOLE_REPLAY_END");
+            conport::rewind();
         }
         // De diagnose van de NIC op 5 en 30 s (de RP1-keten van de Pi 5, de
         // flip-jacht van 30-09): een koude boot geeft de referentie, een

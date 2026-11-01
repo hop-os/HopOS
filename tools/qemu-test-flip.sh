@@ -60,12 +60,12 @@
 #               luisterende Hop overleven de flip met de verbinding erop.
 #   de zwarte doos  (virt, warm) daarna een system_reset over QMP, zoals een
 #               watchdog-reset: het RAM blijft, de ROM's (kern A, de staging)
-#               komen terug. Kern A boot koud (HOPOS_BOOT gen=1 stamp=A) en
-#               drukt de console van kern B af: "the console of the dead
-#               kernel (generation 2)" HOPOS_FLIP_BLACKBOX, met de laatste
-#               HOPOS_APPSPIKE_DONE van kern B erin, en HOPOS_FLIP_BLACKBOX_END.
-#               De rest van de toets kijkt alleen naar de console van vóór
-#               de reset.
+#               komen terug. Kern A boot koud (HOPOS_BOOT gen=1 stamp=A) op
+#               dezelfde console-ring (kern/src/conport.rs): "N bytes from
+#               before this boot" HOPOS_CONSOLE_CARRIED met N > 0, en
+#               tcp/5555 speelt de laatste HOPOS_APPSPIKE_DONE van kern B af
+#               vóór de bootregel van kern A. De rest van de toets kijkt
+#               alleen naar de console van vóór de reset.
 #   eenmalig    (virt, warm) de reset van de O6N (04-10): daar bleef het
 #               pointer/magic-paar van de overdracht na de landing in DRAM
 #               staan (het wissen zat in de cache), en de stickkern
@@ -278,7 +278,7 @@ MODE=warm
 [ -n "$COLD" ] && MODE=cold
 TARGET=aarch64-unknown-none-softfloat
 scratch qemu-flip
-ports SYS AGENT LEADER ART ECHO
+ports SYS AGENT LEADER ART ECHO CON
 
 cd "$DIR"
 echo "== bouwen ($BOARD, $MODE): kern A (stempel A), bundel B (stempel B), appspike, agentd-hopos"
@@ -429,7 +429,7 @@ else
 	[ "$MODE" = warm ] && set -- "$@" \
 		-device loader,addr=0xb0000080,data=0xb00c0000,data-len=8 \
 		-device loader,addr=0xb0000088,data=0x31444e4148504f48,data-len=8
-	hop_virt HOPOS_STAMP=A CFG="$ART/kern-a.cfg" -- "$@"
+	hop_virt HOPOS_STAMP=A CFG="$ART/kern-a.cfg" CONPORT="$CONPORT" -- "$@"
 fi
 
 # Alleen wat ná de landing van kern B op de console kwam.
@@ -591,8 +591,9 @@ while alive; do
 	step
 done
 # De zwarte doos: na een groene warme flip op virt een system_reset (het RAM
-# blijft, zoals na een watchdog-reset), en de koude kern A moet de console
-# van kern B afdrukken. Alles vanaf de reset gaat naar een eigen log.
+# blijft, zoals na een watchdog-reset), en de console-ring van de koude kern
+# A moet de console van kern B nog dragen. Alles vanaf de reset gaat naar een
+# eigen log, en wat tcp/5555 dan afspeelt naar con.log.
 RESET=""
 CUT=""
 if [ "$BOARD" = virt ] && [ "$MODE" = warm ] && [ -n "$POSTED" ] && all_after "$WORK_MARKS" && ! has "$RED"; then
@@ -616,10 +617,25 @@ QMP
 	# Tot Hop weer op is (of iets roods), hoogstens een minuut.
 	n=0
 	while [ "$n" -lt 300 ] && kill -0 "$QPID" 2>/dev/null; do
-		tail -c +"$((CUT + 1))" "$LOG" | tr -d '\r' | grep -v '^  | ' | grep -q -E "slot 1: .*HOP_UP|$RED" && break
+		tail -c +"$((CUT + 1))" "$LOG" | tr -d '\r' | grep -q -E "slot 1: .*HOP_UP|$RED" && break
 		sleep 0.2
 		n=$((n + 1))
 	done
+	python3 - "$CONPORT" >"$ART/con.log" 2>&1 <<'CON'
+import socket, sys, time
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
+s.settimeout(1)
+end, out = time.time() + 3, b""
+while time.time() < end:
+    try:
+        b = s.recv(65536)
+    except socket.timeout:
+        continue
+    if not b:
+        break
+    out += b
+sys.stdout.write(out.decode("utf-8", "replace"))
+CON
 fi
 qemu_stop
 if [ -n "$CUT" ]; then
@@ -753,15 +769,13 @@ else
 fi
 reds
 if [ "$BOARD" = virt ] && [ "$MODE" = warm ]; then
-	# De zwarte doos, uit de console van na de reset. Een regel van de doos
-	# zelf begint met "  | "; alleen de regels van kern A tellen als rood.
+	# De zwarte doos: de console van na de reset, en de ring op 5555.
 	R="$ART/reset.log"
-	box() { awk '/HOPOS_FLIP_BLACKBOX$/ { f = 1; next } /HOPOS_FLIP_BLACKBOX_END/ { f = 0 } f' "$R" 2>/dev/null | grep -q -E "$1"; }
 	case "$RESET" in
 	*'"return"'*) echo "   ok  system_reset over QMP na de flip" ;;
 	*) echo "   ROOD system_reset over QMP: ${RESET:-niet gedaan (de flip was niet groen)}"; fail=1 ;;
 	esac
-	for m in "HOPOS_BOOT gen=1 stamp=A" "HOPOS_FLIP_STALE" "the console of the dead kernel \(generation 2\), last [0-9]+ bytes HOPOS_FLIP_BLACKBOX$" "HOPOS_FLIP_BLACKBOX_END" "slot 1: .*HOP_UP"; do
+	for m in "HOPOS_BOOT gen=1 stamp=A" "HOPOS_FLIP_STALE" "console: [1-9][0-9]* bytes from before this boot .*HOPOS_CONSOLE_CARRIED" "slot 1: .*HOP_UP"; do
 		if grep -q -E "$m" "$R" 2>/dev/null; then
 			echo "   ok  na de reset: $(grep -m1 -E "$m" "$R")"
 		else
@@ -770,20 +784,22 @@ if [ "$BOARD" = virt ] && [ "$MODE" = warm ]; then
 		fi
 	done
 	# Eenmalig: de overdracht van de sprong is na de reset van niemand.
-	if grep -v '^  | ' "$R" 2>/dev/null | grep -q -E 'HOPOS_FLIP_BOOT|HOPOS_FLIP_ADOPT|HOPOS_HOP_RESUMED'; then
-		echo "   ROOD na de reset een landing: $(grep -v '^  | ' "$R" | grep -m1 -E 'HOPOS_FLIP_BOOT|HOPOS_FLIP_ADOPT|HOPOS_HOP_RESUMED')"
+	if grep -q -E 'HOPOS_FLIP_BOOT|HOPOS_FLIP_ADOPT|HOPOS_HOP_RESUMED' "$R" 2>/dev/null; then
+		echo "   ROOD na de reset een landing: $(grep -m1 -E 'HOPOS_FLIP_BOOT|HOPOS_FLIP_ADOPT|HOPOS_HOP_RESUMED' "$R")"
 		fail=1
 	else
 		echo "   ok  na de reset koud: geen HOPOS_FLIP_BOOT, HOPOS_FLIP_ADOPT of HOPOS_HOP_RESUMED"
 	fi
-	if box '^  \| .*HOPOS_APPSPIKE_DONE pass=9'; then
-		echo "   ok  in de doos: $(awk '/HOPOS_FLIP_BLACKBOX$/ { f = 1; next } /HOPOS_FLIP_BLACKBOX_END/ { f = 0 } f' "$R" | grep -m1 -E 'HOPOS_APPSPIKE_DONE')"
+	# Kern B zei HOPOS_APPSPIKE_DONE vóór de reset; op 5555 staat het vóór
+	# de laatste bootregel van kern A.
+	if tr -d '\r' <"$ART/con.log" 2>/dev/null | awk '/HOPOS_APPSPIKE_DONE pass=9/ { d = 1 } /HOPOS_BOOT gen=1 stamp=A/ && d { ok = 1 } END { exit !ok }'; then
+		echo "   ok  op 5555 na de reset: $(tr -d '\r' <"$ART/con.log" | grep -m1 -E 'HOPOS_APPSPIKE_DONE')"
 	else
-		echo "   ROOD de doos draagt de laatste regels van kern B niet (HOPOS_APPSPIKE_DONE)"
+		echo "   ROOD de ring op 5555 draagt de laatste regels van kern B niet (HOPOS_APPSPIKE_DONE vóór HOPOS_BOOT stamp=A): $(wc -c <"$ART/con.log" 2>/dev/null) bytes"
 		fail=1
 	fi
-	if grep -v '^  | ' "$R" 2>/dev/null | grep -q -E "$RED"; then
-		echo "   ROOD na de reset: $(grep -v '^  | ' "$R" | grep -m1 -E "$RED")"
+	if grep -q -E "$RED" "$R" 2>/dev/null; then
+		echo "   ROOD na de reset: $(grep -m1 -E "$RED" "$R")"
 		fail=1
 	fi
 	if [ "$fail" != 0 ] && [ -s "$R" ]; then

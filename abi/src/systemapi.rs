@@ -264,11 +264,12 @@ pub enum PrivOp {
     /// een korte ring.
     ///
     /// Slot 0 is de kern zelf, zoals bij [`PrivOp::SlotStatus`]: de
-    /// volgende regel die de kern op zijn console zette, zonder de regels
-    /// van de apps (die staan in de ring van hun slot, nooit dubbel), in
-    /// een ruimere ring (64 KiB, `kern::system::KERN_LOG_BYTES`) zodat de
-    /// boot er nog in staat als Hop opkomt. Vol is ook daar de oudste regel
-    /// eruit. Een kern van 3.0.16 of ouder weigert `off` 0 (een fout-status).
+    /// volgende regel van zijn console, dezelfde bytes als de UART en
+    /// tcp/5555, dus ook de regels van de apps (`slot N: ...`); een regel
+    /// langer dan `n` komt in stukken. Eén ring van 32 KiB
+    /// (`kern::conport`) die een flip en een reset overleeft, met de
+    /// positie van Hop erin: na een flip leest Hop verder, na een reset
+    /// krijgt de nieuwe Hop eerst wat de vorige nog niet las.
     NextLog = 0x44,
     /// Zet de klok: `n` de Unix-tijd in nanoseconden.
     SetClock = 0x45,

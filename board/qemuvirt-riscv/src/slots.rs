@@ -13,7 +13,7 @@
 
 use abi::Region;
 use abi::layout::{Plan, PlanSpec, pool_of};
-use board::stage::{self, StagedRole};
+use board::stage;
 
 /// De control-pages van de eigen harts van de kern.
 pub const NODE_CTRL_PA: u64 = 0xB000_0000;
@@ -28,14 +28,12 @@ pub const BOOT_SCRATCH_PA: u64 = 0xA800_0000;
 pub const POOL: [Region; 1] = [Region::new(0x9000_0000, 0x1800_0000)];
 /// Het maatwoord van de staging (`image/qemu-riscv-run.sh`).
 pub const STAGE_HDR_PA: u64 = 0xA810_0000;
-/// Het rolwoord van de staging (0 = app, 1 = Hop).
-pub const STAGE_ROLE_PA: u64 = STAGE_HDR_PA + 8;
 /// Waar QEMU het image rauw neerlegt.
 pub const STAGE_PA: u64 = 0xA820_0000;
 /// De grootste staging: 14 MB, zoals op arm64.
 pub const STAGE_MAX: u64 = 0xA900_0000 - STAGE_PA;
 
-const _: () = assert!(STAGE_ROLE_PA + 8 <= STAGE_PA);
+const _: () = assert!(STAGE_HDR_PA + 8 <= STAGE_PA);
 const _: () = assert!(BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN <= STAGE_HDR_PA);
 const _: () = assert!(POOL[0].base + POOL[0].size <= BOOT_SCRATCH_PA);
 const _: () = assert!(CAGE_PA > NODE_CTRL_PA);
@@ -74,11 +72,6 @@ pub const fn core_of(mpidr: u64) -> usize {
 #[must_use]
 pub fn staged_image() -> Option<&'static [u8]> {
     stage::staged_at(STAGE_HDR_PA, STAGE_PA, STAGE_MAX)
-}
-
-/// De rol uit [`STAGE_ROLE_PA`]; een onbekend woord komt rauw terug.
-pub fn staged_role() -> Result<StagedRole, u64> {
-    stage::role_at(STAGE_ROLE_PA)
 }
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------

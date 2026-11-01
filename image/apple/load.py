@@ -5,7 +5,7 @@
 # param-blok (board_apple::fwinfo) met wat alleen de loader weet: m1n1's
 # spin-table en de config-tekst. Overgenomen van de Go-meetbank
 # (image/apple/load-probe.py op tag v2.2.8, bewezen 28-08 t/m 04-09); nieuw in v3: de
-# staging (STAGE=pad, ROLE=app|hop) in de loader-regio, met een magic.
+# staging (STAGE=pad, het image van Hop) in de loader-regio, met een magic.
 #
 #   M1N1DEVICE=/dev/cu.usbmodem<serienr>1 python3 image/apple/load.py target/apple-m4/hopos-apple.img
 #
@@ -272,16 +272,16 @@ elif os.environ.get("CFG"):
         " (over the baked window)" if baked else ""))
 else:
     print("config: %s" % ("the window baked into the image" if baked else "none"))
-# De staging: image, maat, rol, en het magic als laatste (zonder magic
-# leest de kern de loader-regio niet als image).
+# De staging: image, maat, een leeg woord (waar tot 01-11 de rol stond), en
+# het magic als laatste (zonder magic leest de kern de loader-regio niet als
+# image).
 if os.environ.get("STAGE"):
     stage = pathlib.Path(os.environ["STAGE"]).read_bytes()
     if len(stage) > STAGE_MAX:
         raise SystemExit("stage too large: %d > %d" % (len(stage), STAGE_MAX))
-    role = {"app": 0, "hop": 1}[os.environ.get("ROLE", "app")]
     robust_writemem(STAGE_PA, stage)
-    robust_writemem(STAGE_HDR, struct.pack("<3Q", len(stage), role, STAGE_MAGIC))
-    print("stage: %d bytes at %#x, role %s" % (len(stage), STAGE_PA, os.environ.get("ROLE", "app")))
+    robust_writemem(STAGE_HDR, struct.pack("<3Q", len(stage), 0, STAGE_MAGIC))
+    print("stage: %d bytes at %#x" % (len(stage), STAGE_PA))
 else:
     robust_writemem(STAGE_HDR, struct.pack("<3Q", 0, 0, 0))
 p.dc_cvau(LOAD_AT, len(img) + 0x10000)

@@ -40,8 +40,7 @@
 # 09-07) en eist `os_check=0`; zonder passende DTB weigert hij te booten.
 # De armstub van de EEPROM (TF-A BL31) levert PSCI. Nieuw in v3: het image
 # van Hop gaat als `initramfs` op 0x0f200000 de kaart op
-# (board/raspi/src/map.rs: het laadvenster), en de rol staat in
-# cmdline.txt (`hopos.stage=hop|app`).
+# (board/raspi/src/map.rs: het laadvenster).
 #
 # Uitvoer: target/sd-<pi>/ (de losse bestanden, voor een bestaande
 # FAT-kaart) en target/hopos-<pi>.img (MBR + FAT16, dd-baar).
@@ -121,7 +120,7 @@ $INITRAMFS
 EOF
 # De config: in het venster van de kern (board/src/cfgwin.rs), zoals op
 # elk board; de kern leest eerst het venster en dan /chosen/bootargs
-# (cmdline.txt: alleen de rol en EXTRA).
+# (cmdline.txt: alleen EXTRA).
 CFG="${CFG:-$DIR/image/cfg/default.cfg $DIR/image/cfg/$B.cfg $DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg}"
 for f in $CFG; do
 	[ -f "$f" ] || {
@@ -131,9 +130,9 @@ for f in $CFG; do
 done
 # shellcheck disable=SC2086 # CFG is een lijst bestanden
 python3 "$DIR/image/hopcfg.py" set "$OUT/$KIMG" $CFG
-echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA}" >"$OUT/cmdline.txt"
+echo "${EXTRA:-}" >"$OUT/cmdline.txt"
 
-echo "$B: $OUT/$KIMG ($(wc -c <"$OUT/$KIMG" | tr -d ' ') bytes), config.txt, cmdline.txt${IMAGE:+, hop.elf ($SIZE bytes, role $ROLE)}" >&2
+echo "$B: $OUT/$KIMG ($(wc -c <"$OUT/$KIMG" | tr -d ' ') bytes), config.txt, cmdline.txt${IMAGE:+, hop.elf ($SIZE bytes)}" >&2
 
 # Het kaart-image: de firmware erbij, en een FAT die de Pi-firmware leest.
 # tools/mkcard is de port van het bewezen gereedschap van de Go-generatie

@@ -15,17 +15,13 @@
 //!
 //! De staging: U-Boot laadt de initrd (de container van [`crate::initrd`]:
 //! `hopos.cfg` plus het image van de bewoner), `discover` kopieert hem naar
-//! de heap en splitst hem, en [`staged_image`] geeft het image-deel. De rol
-//! komt uit `hopos.stage` in de config of de APPEND-regel, zoals op de Pi's:
-//! `hop` (de standaard: Hop, de bevoorrechte bewoner) of `app` (het
-//! ABI-bewijs van appspike). Een initrd zonder image (de oude kale
-//! `hopos.cfg`) laat de kern niets plaatsen, luid.
+//! de heap en splitst hem, en [`staged_image`] geeft het image-deel: Hop, de
+//! bevoorrechte bewoner (de kern plaatst alleen Hop, O7). Een initrd zonder
+//! image (de oude kale `hopos.cfg`) laat de kern niets plaatsen, luid.
 
 use crate::{POOL_BASE, RAM_MAPPED_END, STRUCT_WINDOW};
 use abi::Region;
 use abi::layout::{Plan, PlanSpec, Pool, carve_pool};
-use board::stage::{self, StagedRole};
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 /// De control-pages van de eigen cores van de kern (Go: `nodeCtrlPA`).
 pub const NODE_CTRL_PA: u64 = 0x0620_0000;
@@ -152,12 +148,6 @@ pub const fn core_of(mpidr: u64) -> usize {
     ((mpidr >> 8) & 0xff) as usize
 }
 
-/// De rol uit `hopos.stage`: 0 = app, 1 = Hop, anders onbekend. Zonder
-/// DTB (dus zonder initrd) blijft hij app: de kern zoekt dan het image,
-/// vindt het niet en zegt `HOPOS_SLOT_NONE`, zonder token voor een Hop die
-/// er niet is.
-pub(crate) static ROLE: AtomicU64 = AtomicU64::new(0);
-
 /// Het image uit de initrd, of `None`. Het staat in de heap (Normal,
 /// gecachet), niet in het DRAM waar U-Boot het liet: dat mapt de identity
 /// map als Device, en de ELF-lezer leest ongealigneerd. Alleen de maat is
@@ -166,12 +156,6 @@ pub(crate) static ROLE: AtomicU64 = AtomicU64::new(0);
 #[must_use]
 pub fn staged_image() -> Option<&'static [u8]> {
     crate::STAGE.get()
-}
-
-/// De rol van de staging; een onbekende `hopos.stage` komt als rauw woord
-/// terug (de kern plaatst dan niets en zegt dat luid).
-pub fn staged_role() -> Result<StagedRole, u64> {
-    stage::role(ROLE.load(Relaxed))
 }
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------

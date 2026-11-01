@@ -102,7 +102,7 @@
 #
 # Het image gaat rauw in RAM op de staging van het board
 # (board/qemuvirt/src/slots.rs: STAGE_PA), met zijn maat in het woord op
-# STAGE_HDR_PA en zijn rol op STAGE_ROLE_PA (0 = app, 1 = Hop). De staging
+# STAGE_HDR_PA: een gestaged image is Hop (de kern plaatst alleen Hop). De staging
 # is 14 MiB; de debug-info gaat eraf (rust-objcopy --strip-debug), de
 # symbolen blijven, want de plaatsing leest __hopos_* uit de symbooltabel.
 #
@@ -192,18 +192,12 @@ fi
 pick_app hop
 if [ -n "$IMAGE" ]; then
 	# Zonder debug-info: agentd-hopos is met debug-info 12 MB (gemeten
-	# 29-09) tegen 594 KiB laadbaar. De rol in het woord op STAGE_ROLE_PA:
-	# 1 = Hop, 0 = app.
+	# 29-09) tegen 594 KiB laadbaar.
 	STAGED="$DIR/target/$TARGET/release/staged-$(basename "$IMAGE").elf"
 	strip_elf "$IMAGE" "$STAGED"
 	fits "$STAGED" "$IMAGE"
-	case "$ROLE" in
-	hop) ROLE=1 ;;
-	app) ROLE=0 ;;
-	esac
 	set -- -device "loader,file=$STAGED,addr=0xb0200000,force-raw=on" \
-		-device "loader,addr=0xb0100000,data=$SIZE,data-len=8" \
-		-device "loader,addr=0xb0100008,data=$ROLE,data-len=8" "$@"
+		-device "loader,addr=0xb0100000,data=$SIZE,data-len=8" "$@"
 fi
 
 # De bootparameters: tools/lib.sh qemu_virt zet ze in één -append (QEMU

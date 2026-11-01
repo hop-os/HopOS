@@ -118,14 +118,13 @@ if [ -n "$CFG" ]; then
 fi
 
 # Het image voor de staging (optioneel): de loader legt het in de
-# loader-regio (board_apple::slots::STAGE_PA) met maat, rol en magic.
+# loader-regio (board_apple::slots::STAGE_PA) met maat en magic.
 pick_app ""
 if [ -n "$IMAGE" ]; then
 	strip_elf "$IMAGE" "$OUT/stage.elf"
-	echo "$ROLE" >"$OUT/stage.role"
 else
-	rm -f "$OUT/stage.elf" "$OUT/stage.role"
+	rm -f "$OUT/stage.elf"
 fi
 
-echo "apple-m4: $IMG ($(wc -c <"$IMG" | tr -d ' ') bytes)${CFG:+, config $CFG}${APP:+, stage.elf ($(cat "$OUT/stage.role"))}" >&2
+echo "apple-m4: $IMG ($(wc -c <"$IMG" | tr -d ' ') bytes)${CFG:+, config $CFG}${APP:+, stage.elf}" >&2
 echo "apple-m4: load with  STAGE=\${STAGE:-} image/apple/boot-cycle.sh $IMG 90" >&2

@@ -1,43 +1,7 @@
-//! De staging: het image dat een lader vóór de boot neerlegde (QEMU's
-//! `-device loader`, de UEFI-stub, m1n1), en de rol ervan. Waar het ligt en
-//! waar de rol vandaan komt (een woord, de cmdline, een gebakken image) is
-//! per board; de vorm is hier één keer.
-
-/// Wat het gestagede image is: welke weg de kern ermee gaat.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum StagedRole {
-    /// Een gewone app: de kern plaatst hem zelf, twee keer (het ABI-bewijs).
-    App,
-    /// Hop: de kern plaatst hem één keer, in slot 1, met de bevoegdheid.
-    Hop,
-}
-
-/// De rol bij een rolwoord: 0 = app, 1 = Hop. Een ander woord komt rauw
-/// terug, zodat de kern het luid kan noemen (en niets plaatst).
-pub const fn role(word: u64) -> Result<StagedRole, u64> {
-    match word {
-        0 => Ok(StagedRole::App),
-        1 => Ok(StagedRole::Hop),
-        w => Err(w),
-    }
-}
-
-/// Het rolwoord van een `hopos.stage`-waarde uit een config of cmdline:
-/// leeg of `hop` is Hop (de standaard), `app` het ABI-bewijs van appspike,
-/// de rest onbekend (2).
-#[must_use]
-pub fn role_code(v: &str) -> u64 {
-    match v {
-        "" | "hop" => 1,
-        "app" => 0,
-        _ => 2,
-    }
-}
-
-/// De rol uit het woord op `pa` (zie [`role`]). Op de host app.
-pub fn role_at(pa: u64) -> Result<StagedRole, u64> {
-    role(imp::word(pa))
-}
+//! De staging: het image van Hop dat een lader vóór de boot neerlegde
+//! (QEMU's `-device loader`, de UEFI-stub, m1n1). Waar het ligt is per
+//! board; de vorm is hier één keer. De kern plaatst alleen Hop (O7), dus
+//! een gestaged image is Hop: er is geen rol meer.
 
 /// Het image op `at` met zijn maat in het woord op `hdr`, of `None` als die
 /// maat nul is of boven `max` ligt. Alleen de maat wordt hier getoetst; de
@@ -79,21 +43,5 @@ mod imp {
 
     pub(super) fn slice(_at: u64, _len: usize) -> Option<&'static [u8]> {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_role_word() {
-        assert_eq!(role(0), Ok(StagedRole::App));
-        assert_eq!(role(1), Ok(StagedRole::Hop));
-        assert_eq!(role(7), Err(7));
-        assert_eq!(role_code(""), 1);
-        assert_eq!(role_code("hop"), 1);
-        assert_eq!(role_code("app"), 0);
-        assert_eq!(role(role_code("hopp")), Err(2));
     }
 }

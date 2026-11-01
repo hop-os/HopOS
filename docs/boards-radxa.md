@@ -15,7 +15,7 @@ wat de console moet tonen en wat een afwijking betekent.
 | Klok: de cores tussen 816 MHz (850 mV) en 1800 MHz (1150 mV) onder het klokbeleid van de kern. De klok is `SCMI_CLK_CPU` van de TF-A (SMC 0x82000010, shmem 0x0010_f000), zoals in mainline Linux; vdd_cpu is de rk860x op i2c0 0x40 (niet de RK817), via een gepolde rk3x-I2C. Omhoog eerst de spanning, omlaag eerst de klok, nooit een klok boven de teruggelezen spanning | `board/rk3566/src/clock.rs`, `i2c.rs`, `hopos/src/telemetry.rs` | host-tests: de werkpunten van rk3566.dtsi en hun VSEL-codes, welke klok een spanning draagt, het plafond, de ramp, de volgorde, een buck die stopt, een stand of klok zonder antwoord, de I2C-woorden |
 | TSADC: temperatuur (warmste van CPU en GPU) op de tik en de heartbeat | `board/rk3566/src/tsadc.rs`, `hopos/src/telemetry.rs` | host-tests: de rk3568-codetabel met interpolatie, nul is geen meting, het delerwoord is het teruggelezen `0x1715` |
 | usbdrd30: klokken (CLKGATE_CON(10) bit 8..10), reset (SRST_USB3OTG0) en de OTG-poort van usb2phy0 (`phy_sus`), met de gates van usbhost30 als vangrail | `board/rk3566/src/usb.rs` (alleen met `gui`) | host-tests: de gate- en resetwoorden uit clk-rk3568.c en rk3568-cru.h, de vangrail |
-| Hop als bewoner: de initrd draagt `hopos.cfg` én het image (de container), `discover` haalt hem naar de heap en splitst hem, de rol uit `hopos.stage` | `board/rk3566/src/initrd.rs`, `slots.rs`; `image/radxa-initrd.py` | host-tests: de container uit het script (`testdata/mini.ird`), de oude kale config, zonder image, elk fout getal, de rolcodes, de grens |
+| Hop als bewoner: de initrd draagt `hopos.cfg` én het image (de container), `discover` haalt hem naar de heap en splitst hem; het image is Hop (geen rol meer, 01-11) | `board/rk3566/src/initrd.rs`, `slots.rs`; `image/radxa-initrd.py` | host-tests: de container uit het script (`testdata/mini.ird`), de oude kale config, zonder image, elk fout getal, de grens |
 | SoC-glue: klokgates, bronkeuze en snelheidsdeler (CRU), AXI-reset, RGMII-modus (GRF), de gmac1m1-pinmux, de PHY-reset op GPIO3 PC0, de klokken en de reset van het TRNG | `board/rk3566/src/soc.rs` | idem |
 | Identity map: kern-RAM Normal, DMA Normal-NC, de rest Device | `board/rk3566/src/mmu.rs` | const-asserties tegen het plan |
 | DWMAC4: registerblok, descriptors, MTL, de ops-tabel op de gedeelde stmmac-kern (reset, MDIO-master, ringen, `netdev::Device`, IRQ-ack en rearm), de MMC-interrupts dicht (anders stormt de lijn na 2 GiB binnen, 03-10) | `driver/nic/stmmac` (feature `dwmac4`) | 12 host-tests voor de DWMAC4, 12 voor de kern op een nagebootste core, op een nep-registerblok en nep-DMA in RAM |
@@ -38,7 +38,7 @@ sudo dd if=target/radxa-zero3/hopos-radxa-zero3.img of=/dev/rdiskN bs=4m
 Op de FAT staan `hopos.img` (de kern, met de config in zijn venster),
 `hopos.ird` (de initrd: een lege `hopos.cfg` plus `hop.elf`) en
 `extlinux/extlinux.conf`, met in de APPEND-regel
-`hopos.node=radxa-1 hopos.stage=hop`. Het script bouwt `agentd-hopos` uit
+`hopos.node=radxa-1`. Het script bouwt `agentd-hopos` uit
 `HOP_DIR` met `tools/hop-build.sh`, stript hem (19 MB naar 1,5 MB,
 30-09) en weigert een initrd boven 16 MB (`board_rk3566::INITRD_MAX`). Aan het eind leest het de kaart
 terug en vergelijkt elk bestand met wat erin ging; `FOUT` daar is een kapot
@@ -112,8 +112,8 @@ b6-image) staat in `image/firmware/radxa/donor-boot.bin` (herkomst in de
    Device-gebied van de map; het image draait uit Normal op 0x0221_0000.
 4. **`boot: ... EL2`.** `booti` levert op EL2 af (gemeten). EL1 geeft
    `HOPOS_BOOT_EL` en parkeren.
-5. **`fdt: N bytes at 0x7c......, bootargs "hopos.node=radxa-1
-   hopos.stage=hop", hopos.cfg M bytes`.** Dit is de kopie van DTB en initrd
+5. **`fdt: N bytes at 0x7c......, bootargs "hopos.node=radxa-1",
+   hopos.cfg M bytes`.** Dit is de kopie van DTB en initrd
    naar de heap; M is de config ín de container (de standaard is ~170
    bytes), niet de hele initrd. Staat er `HOPOS_RAM_CHECK_SKIPPED`, dan lag
    x0 niet in het DRAM of was de header geen FDT; noteer x0. `GIC differs

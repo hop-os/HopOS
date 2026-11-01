@@ -7,13 +7,11 @@
 //!
 //! De staging: config.txt laadt het image als `initramfs` op
 //! [`STAGE_PA`](crate::map::STAGE_PA) en de firmware schrijft het bereik in
-//! `/chosen/linux,initrd-*`. De rol komt uit de cmdline:
-//! `hopos.stage=app` (het ABI-bewijs van appspike) of `hopos.stage=hop`
-//! (de standaard: Hop, de bevoorrechte bewoner).
+//! `/chosen/linux,initrd-*`. Een gestaged image is Hop, de bevoorrechte
+//! bewoner: de kern plaatst alleen Hop (O7).
 
 use crate::map;
 use abi::layout::{Plan, PlanSpec, Pool};
-use board::stage::{self, StagedRole};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use sync::LocalCell;
 
@@ -26,9 +24,6 @@ pub(crate) static POOL: LocalCell<Pool> = LocalCell::cell(Pool::new());
 
 /// Het gestagede image: begin en lengte (0 = geen), gezet door `discover`.
 pub(crate) static STAGE: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-
-/// De rol uit de cmdline: 0 = app, 1 = Hop, anders onbekend.
-pub(crate) static ROLE: AtomicU64 = AtomicU64::new(1);
 
 /// Het PA-plan voor een node met `cores` cores (de kern-core meegeteld):
 /// elke andere core is een app-core, en elke app-core krijgt één kooi; één
@@ -50,12 +45,6 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         os_core,
         ..PlanSpec::default()
     })
-}
-
-/// De rol van de staging; een onbekende `hopos.stage` komt als rauw woord
-/// terug (de kern plaatst dan niets en zegt dat luid).
-pub fn staged_role() -> Result<StagedRole, u64> {
-    stage::role(ROLE.load(Relaxed))
 }
 
 /// Het image dat de firmware vóór de boot neerlegde, of `None`. Alleen de

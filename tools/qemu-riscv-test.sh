@@ -82,7 +82,7 @@ if command -v riscv64-elf-objdump >/dev/null 2>&1; then
 fi
 
 # Geen staging: de boot-poort zonder bewoner.
-qemu_rv "" 0 </dev/null >"$LOG" 2>&1 &
+qemu_rv "" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 
 # De vaste markers (grep -E), en de schijf op zijn PLIC-bron (01-11, O3).

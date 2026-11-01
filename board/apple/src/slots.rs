@@ -13,14 +13,14 @@
 //! het lage stuk geplaatst, gestreamd en gestart).
 //!
 //! De staging: de m1n1-loader (`image/apple/load-probe.py`, `STAGE=`) legt
-//! een app-image op [`STAGE_PA`], de maat op [`STAGE_HDR_PA`], de rol
-//! erachter en [`STAGE_MAGIC`] als laatste woord: zonder magic is de
-//! loader-regio gewoon DRAM van een vorige boot, en dat is geen image.
+//! het image van Hop op [`STAGE_PA`], de maat op [`STAGE_HDR_PA`] en
+//! [`STAGE_MAGIC`] als laatste woord: zonder magic is de loader-regio gewoon
+//! DRAM van een vorige boot, en dat is geen image.
 
 use crate::{ADMIN, LOADER, RAM_BASE, WINDOW_END, fwinfo};
 use abi::Region;
 use abi::layout::{Plan, PlanSpec, Pool, carve_pool};
-use board::stage::{self, StagedRole};
+use board::stage;
 use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
 use cpu::el2::{Back, Bell, OsCore};
 use cpu::println;
@@ -45,8 +45,6 @@ pub const DEVICE_WINDOW: Region = Region::new(ADMIN.base.0, ADMIN.size);
 pub const BOOT_SCRATCH_PA: u64 = LOADER.base.0;
 /// Het woord met de maat van het gestagede image.
 pub const STAGE_HDR_PA: u64 = LOADER.base.0 + 0x10_0000;
-/// Het rolwoord: 0 = app, 1 = Hop.
-pub const STAGE_ROLE_PA: u64 = STAGE_HDR_PA + 8;
 /// Het magic-woord: alleen dan is er een staging.
 pub const STAGE_MAGIC_PA: u64 = STAGE_HDR_PA + 16;
 /// "HOPSTAGE", little-endian (pariteit met de loader).
@@ -282,22 +280,8 @@ fn embedded() -> Option<&'static [u8]> {
     if EMBED.is_empty() { None } else { Some(EMBED) }
 }
 
-/// De rol uit [`STAGE_ROLE_PA`]. Zonder staging "app": de kern zoekt dan het
-/// image, vindt het niet en zegt `HOPOS_SLOT_NONE`.
-pub fn staged_role() -> Result<StagedRole, u64> {
-    if !staged() {
-        // Zonder loader: de ingebakken stage is Hop (image/apple-m4.sh
-        // `EMBED=`), anders is er niets en zoekt de kern een app.
-        return Ok(if embedded().is_some() {
-            StagedRole::Hop
-        } else {
-            StagedRole::App
-        });
-    }
-    stage::role_at(STAGE_ROLE_PA)
-}
-
-/// Het image dat de loader neerlegde, of `None`. Alleen de maat wordt hier
+/// Het image dat de loader neerlegde, zonder loader de ingebakken stage
+/// (image/apple-m4.sh `EMBED=`), of `None`. Alleen de maat wordt hier
 /// getoetst; de inhoud is onvertrouwd en gaat door de ELF-lezer.
 #[must_use]
 pub fn staged_image() -> Option<&'static [u8]> {

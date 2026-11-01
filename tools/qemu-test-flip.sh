@@ -285,7 +285,7 @@ if [ "$BOARD" = uefi ]; then
 	# van EDK2 (de virtio-rng hieronder), kern B uit het zaad dat A meegaf.
 	printf 'hopos.insecure=1\n' >"$ART/hopos.cfg"
 	[ -n "${OSCORE:-}" ] && printf 'hopos.oscore=%s\n' "$OSCORE" >>"$ART/hopos.cfg"
-	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_ELF" ROLE=hop CFG="$ART/hopos.cfg" \
+	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_ELF" CFG="$ART/hopos.cfg" \
 		FEATURES="${FEATURES:+$FEATURES,}board-uefi/efi-rng" \
 		sh "$DIR/image/uefi-run.sh" 2>&1 | sed 's/^/   /'
 	[ -e "$ESP/EFI/BOOT/BOOTAA64.EFI" ] || {

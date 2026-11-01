@@ -6,7 +6,7 @@
 # de cores, de GIC en de console uit ACPI (MADT, SPCR), de PCIe uit de
 # MCFG, en de NIC en de schijf als virtio-net-pci en virtio-blk-pci, allebei
 # op MSI-X via de ITS (01-11, O3). Hop staat als hopos-stage.elf op de ESP,
-# met `hopos.stage=hop` en `hopos.insecure=1` in hopos.cfg, en plaatst
+# met `hopos.insecure=1` in hopos.cfg, en plaatst
 # appspike na een jobspec naar zijn leader (de echte weg, O7).
 #
 # De markers zijn die van tools/qemu-test.sh (HOPOS_BOOT, HOPOS_TICK 3,
@@ -39,7 +39,7 @@ echo "== bouwen: BOOTAA64.EFI (board-uefi) met Hop op de ESP, en appspike"
 apps appspike
 hop_elf
 serve
-BUILD_ONLY=1 APP="$HOP_ELF" ROLE=hop ESP="$ESP" sh image/uefi-run.sh 2>&1 | sed 's/^/   /'
+BUILD_ONLY=1 APP="$HOP_ELF" ESP="$ESP" sh image/uefi-run.sh 2>&1 | sed 's/^/   /'
 [ -e "$ESP/EFI/BOOT/BOOTAA64.EFI" ] || {
 	echo "ROOD: geen BOOTAA64.EFI"
 	exit 1

@@ -62,10 +62,10 @@ need_objcopy qemu-rpi4-test
 strip_elf "$DIR/target/$TARGET/release/appspike" "$TMP/app.elf"
 
 MARKERS="P2|HopOS"
-set -- -kernel "$TMP/kernel8.img" -append "hopos.stage=none" -no-reboot
+set -- -kernel "$TMP/kernel8.img" -no-reboot
 if [ -f "$DTB" ]; then
 	set -- "$@" -dtb "$DTB" -initrd "$TMP/app.elf"
-	MARKERS="$MARKERS|fdt: |mem: |vcmail: |KB at 0x8000000, role unknown|no such node in the DTB (QEMU models none), not touched|HOPOS_RNG_INSECURE"
+	MARKERS="$MARKERS|fdt: |mem: |vcmail: |stage: [0-9]* KB at 0x8000000|no such node in the DTB (QEMU models none), not touched|HOPOS_RNG_INSECURE"
 else
 	echo "qemu-rpi4-test: no DTB at $DTB, boot markers only" >&2
 fi

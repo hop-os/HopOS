@@ -16,7 +16,7 @@
 # de laptop na een reboot niet meer enumereert (gemeten 28-08: dan helpt
 # alleen een kabel-herplug).
 #
-# STAGE=pad [ROLE=app|hop]: een ELF in de staging (image/apple/load.py).
+# STAGE=pad: het image van Hop in de staging (image/apple/load.py).
 #
 # Omgeving: MACVDMTOOL (default ~/Git/macvdmtool/macvdmtool), PYTHON (de venv
 # met pyserial+construct), M1N1 (zie load.py).

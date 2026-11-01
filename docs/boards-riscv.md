@@ -412,8 +412,8 @@ watchdog of de stroom, en de kaart start de oude kern.
 
 - **Hop op de LicheeRV, op ijzer**: sinds 3.0.1 bakt de release Hop
   (riscv64, `tools/hop-build.sh`) in de kern als eerste bewoner
-  (`STAGE=... ROLE=hop` van het image-script, `HOPOS_EMBED_ROLE` in
-  build.rs, `staged_role` van het board). De kring op QEMU virt is groen, en
+  (`STAGE=...` van het image-script, `HOPOS_EMBED` in build.rs; sinds
+  01-11 is een gebakken image altijd Hop, zonder rol). De kring op QEMU virt is groen, en
   sinds 03-10 (R3) ook op het board: Hop in slot 1 met `HOPOS_PRIVILEGE` (op
   dit board in een partitie van 10 MiB, `HOP_MEM` in hopos/src/slots.rs;
   Hop meet er 0,5 MB), sinds R11 op de C906L voor zich (core 1),

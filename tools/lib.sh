@@ -149,9 +149,8 @@ hop_elf() {
 # Hop (hop_elf: tegen de applib van deze werkboom, want de stage-1 en de
 # vectortabel van applib moeten in Hop zitten, de eerste Pi 5-boot van
 # 30-09; HOP_PATCH=0 bouwt de tag van de hop-repo); een pad is die ELF;
-# anders een app uit deze werkruimte. Zet $IMAGE (leeg = geen) en $ROLE
-# (zonder ROLE: hop, behalve voor een app uit deze werkruimte). De kern
-# plaatst alleen Hop (01-11, O7): een image met de rol app blijft liggen.
+# anders een app uit deze werkruimte. Zet $IMAGE (leeg = geen). De kern
+# plaatst alleen Hop (01-11, O7): een gestaged image is Hop.
 pick_app() {
 	APP="${APP-$1}"
 	IMAGE=""
@@ -160,16 +159,13 @@ pick_app() {
 	hop)
 		hop_elf
 		IMAGE="$HOP_ELF"
-		ROLE="${ROLE:-hop}"
 		;;
 	*/*)
 		IMAGE="$APP"
-		ROLE="${ROLE:-hop}"
 		;;
 	*)
 		(cd "$DIR" && cargo build --quiet --release --target "$TARGET" -p "$APP")
 		IMAGE="$DIR/target/$TARGET/release/$APP"
-		ROLE="${ROLE:-app}"
 		;;
 	esac
 }
@@ -242,7 +238,7 @@ bootargs() {
 hop_virt() {
 	(
 		export SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" WEBPORT="${WEBPORT:-}" \
-			HOP_DIR="$HOP_DIR" APP="${HOP_ELF:-}" ROLE=1 DISK="$DISK"
+			HOP_DIR="$HOP_DIR" APP="${HOP_ELF:-}" DISK="$DISK"
 		while [ $# -gt 0 ] && [ "$1" != -- ]; do
 			export "$1"
 			shift
@@ -282,20 +278,17 @@ qemu_virt() {
 		"$@"
 }
 
-# qemu_rv IMAGE ROL [QEMU-argumenten]: QEMU virt riscv64 in machine mode
+# qemu_rv IMAGE [QEMU-argumenten]: QEMU virt riscv64 in machine mode
 # (twee harts, -bios none) met de kern $KERNEL, virtio-net met $QFWD en
-# virtio-blk op $DISK. IMAGE (leeg = geen) rauw op de staging
+# virtio-blk op $DISK. IMAGE (leeg = geen, anders Hop) rauw op de staging
 # (board/qemuvirt-riscv/src/slots.rs: het image op STAGE_PA, zijn maat op
-# STAGE_HDR_PA, de rol op STAGE_ROLE_PA: 0 = app, 1 = Hop). Doet exec: op
-# de achtergrond aanroepen.
+# STAGE_HDR_PA). Doet exec: op de achtergrond aanroepen.
 qemu_rv() {
 	img="$1"
-	role="$2"
-	shift 2
+	shift
 	if [ -n "$img" ]; then
 		set -- -device "loader,file=$img,addr=0xa8200000,force-raw=on" \
-			-device "loader,addr=0xa8100000,data=$(wc -c <"$img" | tr -d ' '),data-len=8" \
-			-device "loader,addr=0xa8100008,data=$role,data-len=8" "$@"
+			-device "loader,addr=0xa8100000,data=$(wc -c <"$img" | tr -d ' '),data-len=8" "$@"
 	fi
 	# De bootparameters (bootargs) in /chosen/bootargs van de DTB, zoals
 	# qemu_virt op arm64 (het board leest ze als config-laag).

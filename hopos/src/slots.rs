@@ -14,8 +14,8 @@
 //!
 //! # Hop
 //!
-//! Draagt de staging de rol Hop (`vboard::slots::staged_role`,
-//! image/qemu-run.sh), dan plaatst de kern het image één keer, in slot 1,
+//! Ligt er een image in de staging (`vboard::slots::staged_image`,
+//! image/qemu-run.sh), dan is dat Hop, en plaatst de kern het één keer, in slot 1,
 //! als de bevoorrechte bewoner (PORT.md beslissing 1 en 2): `Placement::hop`
 //! (sharegroup `hop`, die de OS-core met de kern deelt: Hop draait in de
 //! idle van de kern, `cpu::el2::OsCore`), 64 MiB, de env met de `HOPOS_*`-keuzes,
@@ -196,7 +196,6 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use board::Board;
-use board::stage::StagedRole;
 use cage::SlotCores;
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -291,7 +290,7 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(
     exec: &'static Executor,
-    role: Result<StagedRole, u64>,
+    staged: bool,
     adopt: Option<Vec<kern::slots::SlotState>>,
     cfg: NodeCfg<'static>,
     system: &'static crate::KernSystem,
@@ -465,23 +464,11 @@ pub(crate) fn start(
         }
         return;
     }
-    let spawned = match role {
-        Ok(StagedRole::Hop) => exec.spawn(hop.supervise(None)),
-        // O7: de kern plaatst alleen Hop.
-        Ok(StagedRole::App) => {
-            println!(
-                "slots: the staging is no Hop, nothing placed (the kern places only Hop) HOPOS_SLOT_NONE"
-            );
-            return;
-        }
-        Err(word) => {
-            println!(
-                "slots: staged role word {word:#x} is neither app (0) nor hop (1), nothing placed HOPOS_SLOT_NONE"
-            );
-            return;
-        }
-    };
-    if let Err(e) = spawned {
+    if !staged {
+        println!("slots: nothing staged, no Hop placed HOPOS_SLOT_NONE");
+        return;
+    }
+    if let Err(e) = exec.spawn(hop.supervise(None)) {
         println!("slots: first placement not spawned: {e:?} HOPOS_SLOT_SPAWN");
     }
 }
@@ -633,7 +620,7 @@ impl HopNode {
         if let Some(core) = resumed {
             set_resident(slot.get(), core == 0);
         } else if staged_hop().is_none() {
-            cpu::fatal!("slots: role hop but no staged image, Hop not started");
+            cpu::fatal!("slots: the staged image is no ELF, Hop not started");
         }
         let node_ip = wait_uplink().await;
         let spec = self.spec(node_ip, resumed.is_some());

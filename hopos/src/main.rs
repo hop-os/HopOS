@@ -57,7 +57,6 @@ extern crate alloc;
 use alloc::boxed::Box;
 use board::Board;
 use board::heap::Heap;
-use board::stage::StagedRole;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
 use cpu::println;
@@ -68,7 +67,6 @@ use kern::system::{Hooks, Privilege, System};
 use netdev::Device;
 use sync::mpsc::Mailbox;
 use sync::{Local, Signal};
-use vboard::slots::staged_role;
 
 // Precies één board. Twee geven al twee keer `vboard`, geen geeft geen
 // `Machine`; deze som zegt het in woorden.
@@ -346,20 +344,21 @@ fn setup(board: &'static Machine, el: u8, wd: watchdog::Armed) -> <Machine as Bo
     // op zijn control-page krijgt (seed.rs).
     seed::init();
 
-    // Wat QEMU stagede, en of er dus een Hop is: alleen dan bestaat het
-    // token, en het hoort bij het slot waar de kern Hop plaatst, vóór de
-    // system-listener de eerste verbinding ziet (PORT.md beslissing 1).
-    let role = staged_role();
+    // Wat de lader stagede, en of er dus een Hop is (de kern plaatst alleen
+    // Hop, O7): alleen dan bestaat het token, en het hoort bij het slot waar
+    // de kern Hop plaatst, vóór de system-listener de eerste verbinding ziet
+    // (PORT.md beslissing 1).
+    let staged = vboard::slots::staged_image().is_some();
     // FLIP: een geadopteerde Hop draagt zijn bevoegdheid mee, ook als deze
     // kern zelf geen staging ziet. De M4 van 03-10: Hop ingebakken in de
-    // kaart-kern (EMBED=), de bundel zonder, dus `staged_role` zei "app"
-    // en elke store-call van de meegenomen Hop was "without privilege".
+    // kaart-kern (EMBED=), de bundel zonder, dus de staging was leeg en elke
+    // store-call van de meegenomen Hop was "without privilege".
     let hop_adopted = landing
         .as_ref()
         .is_some_and(|l| l.slots.iter().any(|st| st.slot == slots::HOP_SLOT));
     // Of er een Hop is, één keer beslist: het token en de watchdog (die
     // bewaakt dan zijn hartslag) kijken naar hetzelfde (24-10, F6).
-    let hop_here = role == Ok(StagedRole::Hop) || hop_adopted;
+    let hop_here = staged || hop_adopted;
     let privilege = if hop_here {
         kern::Slot::new(slots::HOP_SLOT).and_then(Privilege::boot)
     } else {
@@ -369,7 +368,7 @@ fn setup(board: &'static Machine, el: u8, wd: watchdog::Armed) -> <Machine as Bo
         println!(
             "system: privilege minted for slot {} (Hop{}) HOPOS_PRIVILEGE",
             p.slot(),
-            if hop_adopted && role != Ok(StagedRole::Hop) {
+            if hop_adopted && !staged {
                 ", carried over the flip"
             } else {
                 ""
@@ -418,7 +417,7 @@ fn setup(board: &'static Machine, el: u8, wd: watchdog::Armed) -> <Machine as Bo
         board::cfgwin::State::Empty => {}
     }
     let mut node_cfg = kern::nodecfg::NodeCfg::new(board.config(), board.bootargs());
-    if Machine::NO_BOOT_MEDIUM && role == Ok(StagedRole::Hop) {
+    if Machine::NO_BOOT_MEDIUM && staged {
         node_cfg = node_cfg.on_bank(kern::nodecfg::QEMU_CFG);
     }
     conport::enable(kern::nodecfg::console_enabled(&node_cfg));
@@ -459,7 +458,7 @@ fn setup(board: &'static Machine, el: u8, wd: watchdog::Armed) -> <Machine as Bo
     // De slots: de kooi-lijm, de lifecycle-actor en de servicers (slots.rs).
     // Met een overdracht adopteren ze de bewoners, en Hop komt pas als het
     // net luistert.
-    slots::start(exec, role, hok, node_cfg, system);
+    slots::start(exec, staged, hok, node_cfg, system);
 
     // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
     // over zijn bewoners (Hop). Zonder rotatie draait Hop nooit (§13.3).

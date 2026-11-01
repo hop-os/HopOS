@@ -10,15 +10,14 @@
 //!
 //! De staging: de stub leest `hopos-stage.elf` van de ESP-root naar
 //! [`STAGE_PA`] en schrijft de maat in [`STAGE_HDR_PA`], zoals QEMU's
-//! `-device loader` het op virt doet. De rol komt uit `hopos.cfg`:
-//! `hopos.stage=app` (het ABI-bewijs van appspike) of `hopos.stage=hop`
-//! (de standaard: Hop, de bevoorrechte bewoner, zoals op de Pi's).
+//! `-device loader` het op virt doet. Een gestaged image is Hop, de
+//! bevoorrechte bewoner: de kern plaatst alleen Hop (O7).
 
 use crate::memmap::{self, Map};
 use crate::{ADMIN, LOADER, facts};
 use abi::Region;
 use abi::layout::{POOL_MAX, Plan, PlanSpec, Pool, pool_of};
-use board::stage::{self, StagedRole};
+use board::stage;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 /// De control-pages van de eigen cores van de kern: het begin van het
@@ -32,8 +31,6 @@ pub const DEVICE_WINDOW: Region = Region::new(ADMIN.base.0, ADMIN.size);
 pub const BOOT_SCRATCH_PA: u64 = LOADER.base.0;
 /// Het woord met de maat van het gestagede image (0 = niets).
 pub const STAGE_HDR_PA: u64 = LOADER.base.0 + 0x10_0000;
-/// Het woord met de rol: 0 = app, 1 = Hop.
-pub const STAGE_ROLE_PA: u64 = STAGE_HDR_PA + 8;
 /// Waar het image staat.
 pub const STAGE_PA: u64 = LOADER.base.0 + 0x20_0000;
 /// Het grootste gestagede image.
@@ -41,7 +38,7 @@ pub const STAGE_MAX: u64 = LOADER.base.0 + LOADER.size - STAGE_PA;
 
 const _: () = {
     assert!(BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN <= STAGE_HDR_PA);
-    assert!(STAGE_ROLE_PA + 8 <= STAGE_PA);
+    assert!(STAGE_HDR_PA + 8 <= STAGE_PA);
     // Node-control (SLOT_CAP + 1 pagina's) vóór de kooi, de kooi binnen het
     // venster, ook bij het volle plafond.
     let blocks = abi::layout::SLOT_CAP as u64 + 1;
@@ -122,11 +119,6 @@ pub fn core_of(mpidr: u64) -> usize {
     let aff = mpidr & 0xff_00ff_ffff;
     let n = facts::CORES.load(Relaxed).min(facts::MAX_CORES);
     (0..n).find(|&c| self::mpidr(c) == aff).unwrap_or(0)
-}
-
-/// De rol uit [`STAGE_ROLE_PA`]; een onbekend woord komt rauw terug.
-pub fn staged_role() -> Result<StagedRole, u64> {
-    stage::role_at(STAGE_ROLE_PA)
 }
 
 /// Het image dat de stub van de ESP las, of `None` (`board::stage`).

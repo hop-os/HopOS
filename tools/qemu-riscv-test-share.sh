@@ -44,7 +44,7 @@ serve
 truncate -s 64m "$DISK"
 
 echo "== booten op QEMU virt riscv64 met Hop op hart 0 (tot ${TIMEOUT}s; leader :$LEADERPORT, welcome :$WEBPORT)"
-qemu_rv "$ART/hop.elf" 1 </dev/null >"$LOG" 2>&1 &
+qemu_rv "$ART/hop.elf" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_CORE_UP|HOPOS_HOP_START slot=1 core=0 cpu=0 |slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"

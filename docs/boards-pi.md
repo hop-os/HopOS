@@ -58,8 +58,8 @@ van een bestaande Pi-kaart. De firmware staat in `image/firmware/rpi4` en
 in het venster van de kern ([boards.md](boards.md), "Het config-venster"):
 het script zet `CFG=` (standaard de lagen `image/cfg/default.cfg`,
 `rpi4.cfg` of `rpi5.cfg`, en `headless.cfg` of `headfull.cfg`) erin.
-`cmdline.txt` draagt `hopos.stage=hop|app` (standaard hop) en `EXTRA=`; daar
-mogen ook `hopos.cores=N` en `hopos.oscore=` (op de Pi altijd core 0), maar
+`cmdline.txt` draagt `EXTRA=` (een gestaged image is Hop, er is geen rol
+meer, 01-11); daar mogen ook `hopos.cores=N` en `hopos.oscore=` (op de Pi altijd core 0), maar
 een sleutel in het venster wint.
 
 UART: Pi 4 op de header (pin 8 TXD, 10 RXD, 6 GND, 3V3), `screen

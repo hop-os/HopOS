@@ -114,7 +114,7 @@ if [ "$TARGET" = riscv64gc-unknown-none-elf ]; then
 	truncate -s 64m "$DISK"
 	# Stateful, zoals de arm64-tak: de koude herstart moet de boom terugvinden.
 	boot() {
-		BOOTARGS=hopos.storage=stateful qemu_rv "$ART/hop.elf" 1 </dev/null >"$LOG" 2>&1 &
+		BOOTARGS=hopos.storage=stateful qemu_rv "$ART/hop.elf" </dev/null >"$LOG" 2>&1 &
 		QPID=$!
 	}
 	echo "== booten op QEMU virt riscv64 met Hop op hart 0 (tot ${TIMEOUT}s; system :$SYSPORT, agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"

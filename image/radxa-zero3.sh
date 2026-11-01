@@ -10,7 +10,6 @@
 #                                        plaatst alleen Hop, 01-11 O7)
 #   APP= image/...                       zonder image (HOPOS_SLOT_NONE)
 #   HOP_DIR=pad image/...                de hop-repo (standaard ../hop/hop)
-#   ROLE=hop|app image/...               de rol van het image (hopos.stage)
 #   CFG="a.cfg b.cfg" image/...          de config van de node in lagen
 #                                        (standaard image/cfg/default.cfg,
 #                                        radxa.cfg en headless.cfg, met
@@ -50,7 +49,7 @@
 # laadt per label precies één initrd, dus draagt die ene initrd hopos.cfg
 # én hop.elf (de container van image/radxa-initrd.py; de kern splitst hem in
 # board/rk3566/src/initrd.rs, waar ook staat waarom niet de komma-lijst of
-# een ingebakken Hop). De rol staat als hopos.stage in de APPEND.
+# een ingebakken Hop).
 set -e
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 . "$DIR/tools/lib.sh"
@@ -130,10 +129,6 @@ pick_app hop
 rm -f "$OUT/hop.elf"
 if [ -n "$IMAGE" ]; then
 	"$OBJCOPY" --strip-debug "$IMAGE" "$OUT/hop.elf"
-else
-	# Zonder image de rol app: de kern zoekt dan het image, vindt het niet
-	# en zegt HOPOS_SLOT_NONE, zonder token voor een Hop die er niet is.
-	ROLE=app
 fi
 
 # 4. De initrd en de extlinux-regel. De APPEND-regel is het bootargs-kanaal,
@@ -161,7 +156,7 @@ default hopos
 label hopos
     kernel /hopos.img
     initrd /hopos.ird
-    append hopos.node=${NODE:-radxa-1} hopos.stage=$ROLE
+    append hopos.node=${NODE:-radxa-1}
 EOF
 
 # 5. De donor: de bytes LBA 64..32767 van het officiële Radxa Zero 3-image,
@@ -217,8 +212,8 @@ elif [ -s "$RB/hop.elf" ]; then
 	echo "FOUT: er zit een image in hopos.ird terwijl APP leeg was" >&2
 	exit 1
 fi
-if ! grep -q "hopos.stage=$ROLE" "$OUT/extlinux.conf"; then
-	echo "FOUT: hopos.stage=$ROLE staat niet in de APPEND van de kaart" >&2
+if ! grep -q "hopos.node=${NODE:-radxa-1}" "$OUT/extlinux.conf"; then
+	echo "FOUT: hopos.node=${NODE:-radxa-1} staat niet in de APPEND van de kaart" >&2
 	exit 1
 fi
 # De config: precies één venster op de hele kaart, met wat erin ging.
@@ -227,6 +222,6 @@ python3 "$DIR/image/hopcfg.py" show "$CARD" >"$RB/window.cfg"
 same "$RB/want.cfg" "$RB/window.cfg"
 
 echo "" >&2
-echo "$CARD klaar (dd-baar): hopos.img (config $CFG in het venster) + hopos.ird${IMAGE:+ (hop.elf, rol $ROLE)} + extlinux/extlinux.conf" >&2
+echo "$CARD klaar (dd-baar): hopos.img (config $CFG in het venster) + hopos.ird${IMAGE:+ (hop.elf)} + extlinux/extlinux.conf" >&2
 echo "flash:   diskutil unmountDisk /dev/diskN && sudo dd if=$CARD of=/dev/rdiskN bs=4m" >&2
 echo "console: 1500000 8N1 op de 40-pins header (pin 8 TX, 10 RX, 6 GND)" >&2

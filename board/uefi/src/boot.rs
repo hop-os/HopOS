@@ -178,9 +178,8 @@ fn prepare(efi: &Efi, el: u8) -> Result<Enter, (&'static str, Status)> {
         }
         return Err(("kernel window busy HOPOS_UEFI_WINDOW", st));
     }
-    // De staging-woorden op nul: QEMU begon met nul-RAM, echt ijzer niet.
+    // Het staging-woord op nul: QEMU begon met nul-RAM, echt ijzer niet.
     dev::write64(Pa(slots::STAGE_HDR_PA), 0);
-    dev::write64(Pa(slots::STAGE_ROLE_PA), 0);
 
     if let Some(f) = efi.read_file(&CFG_NAME, CFG_MAX, None) {
         facts::CFG[0].store(f.pa, Relaxed);
@@ -210,19 +209,10 @@ fn prepare(efi: &Efi, el: u8) -> Result<Enter, (&'static str, Status)> {
         facts::STAGE[1].store(f.len, Relaxed);
         dev::write64(Pa(slots::STAGE_HDR_PA), f.len);
     }
-    // Zonder image geen Hop om te missen: dan de app-rol, en de kern zegt
-    // "nothing placed" in plaats van "Hop not started".
-    let role = if facts::STAGE[1].load(Relaxed) == 0 {
-        0
-    } else {
-        stage_role(board::Board::boot_param(&crate::Uefi::new(), "hopos.stage"))
-    };
-    dev::write64(Pa(slots::STAGE_ROLE_PA), role);
     println!(
-        "uefi: hopos.cfg {} bytes, hopos-stage.elf {} bytes (role {})",
+        "uefi: hopos.cfg {} bytes, hopos-stage.elf {} bytes",
         facts::CFG[1].load(Relaxed),
         facts::STAGE[1].load(Relaxed),
-        if role == 0 { "app" } else { "hop" }
     );
 
     let info = efi
@@ -427,15 +417,6 @@ fn build_map(map: &Map) -> Result<Mmu, mmu::Error> {
     )?;
     m.map(ADMIN.base.0, ADMIN.size, dev_bits)?;
     Ok(m)
-}
-
-/// De rol van de staging uit `hopos.stage` (0 = app, 1 = Hop; zonder
-/// sleutel Hop, zoals op de Pi's: op ijzer is wat er gestaged is Hop).
-fn stage_role(v: &str) -> u64 {
-    match v {
-        "app" => 0,
-        _ => 1,
-    }
 }
 
 /// TCR_EL2 voor 48 bits in de vorm van het regime van de kern

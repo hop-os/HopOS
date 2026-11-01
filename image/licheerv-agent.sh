@@ -22,10 +22,9 @@
 #                                            CFG= zonder pad: een leeg venster)
 #   STAGE=/pad/hop.elf image/licheerv-agent.sh
 #                                          → met die ELF in de kern gebakken
-#                                            als Hop (ROLE=hop, de standaard
-#                                            bij STAGE=): de eerste bewoner,
-#                                            in slot 1 met de bevoegdheid,
-#                                            zoals op elk board (de release)
+#                                            als Hop: de eerste bewoner, in
+#                                            slot 1 met de bevoegdheid, zoals
+#                                            op elk board (de release)
 #   FEATURES=gui image/licheerv-agent.sh
 #                                          → met die features van hopos
 #                                            achter board-licheerv (zoals
@@ -80,33 +79,22 @@ echo "donor: $DONOR sha256=$DONOR_SHA" >&2
 mkdir -p "$OUT"
 cd "$DIR"
 # De eerste bewoner: er is geen QEMU die hem in het RAM legt, dus gaat hij
-# in de kern (board/licheerv/build.rs, HOPOS_EMBED met zijn rol in
-# HOPOS_EMBED_ROLE). Zonder debug-info en zonder lokale symbolen (zoals
+# in de kern (board/licheerv/build.rs, HOPOS_EMBED). Zonder debug-info en zonder lokale symbolen (zoals
 # tools/release.sh), met de globale: de plaatsing leest RamStart en de rest
 # uit de symbooltabel, en die ligt tijdens de plaatsing in de schrapruimte
 # boven de segmenten (kern::system::place). Met de lokale labels van
 # riscv64 is die tabel bij Hop 6,6 MB (image 8,3 MB) en bleef er in zijn
 # 10 MiB 2 KB over; zonder is de staart 2 KB (image 1,7 MB, 03-10).
-APP="${APP:-}"
 STAGE="${STAGE:-}"
 if [ -n "$STAGE" ]; then
 	[ -f "$STAGE" ] || { echo "STAGE=$STAGE bestaat niet" >&2; exit 1; }
-	HOPOS_EMBED_ROLE="${ROLE:-hop}"
 	"$OBJCOPY" --strip-debug --discard-all "$STAGE" "$OUT/stage.elf"
 	HOPOS_EMBED="$OUT/stage.elf"
-	echo "stage: $STAGE als $HOPOS_EMBED_ROLE, $(wc -c <"$HOPOS_EMBED" | tr -d ' ') bytes sha256=$(sha "$HOPOS_EMBED")" >&2
-elif [ -n "$APP" ]; then
-	echo "== app bouwen ($APP, $TARGET) ==" >&2
-	cargo build --quiet --release --target "$TARGET" -p "$APP"
-	"$OBJCOPY" --strip-debug --discard-all "$DIR/target/$TARGET/release/$APP" "$OUT/$APP.stage"
-	HOPOS_EMBED="$OUT/$APP.stage"
-	HOPOS_EMBED_ROLE="${ROLE:-app}"
-	echo "app: $APP als $HOPOS_EMBED_ROLE, $(wc -c <"$HOPOS_EMBED" | tr -d ' ') bytes sha256=$(sha "$HOPOS_EMBED")" >&2
+	echo "stage: $STAGE als Hop, $(wc -c <"$HOPOS_EMBED" | tr -d ' ') bytes sha256=$(sha "$HOPOS_EMBED")" >&2
 else
 	HOPOS_EMBED=""
-	HOPOS_EMBED_ROLE=""
 fi
-export HOPOS_EMBED HOPOS_EMBED_ROLE
+export HOPOS_EMBED
 echo "== kern bouwen (hopos --features board-licheerv${FEATURES:+,$FEATURES}, $TARGET) ==" >&2
 cargo build --quiet --release --target "$TARGET" -p hopos --features "board-licheerv${FEATURES:+,$FEATURES}"
 ELF="$DIR/target/$TARGET/release/hopos"

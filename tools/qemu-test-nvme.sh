@@ -42,7 +42,7 @@ echo "== bouwen: BOOTAA64.EFI (board-altra) met Hop, en appspike"
 apps appspike
 hop_elf
 serve
-BUILD_ONLY=1 BOARD=altra APP="$HOP_ELF" ROLE=hop ESP="$ESP" CFG="$CFG" sh image/uefi-run.sh 2>&1 | sed 's/^/   /'
+BUILD_ONLY=1 BOARD=altra APP="$HOP_ELF" ESP="$ESP" CFG="$CFG" sh image/uefi-run.sh 2>&1 | sed 's/^/   /'
 [ -e "$ESP/EFI/BOOT/BOOTAA64.EFI" ] || {
 	echo "ROOD: geen BOOTAA64.EFI"
 	exit 1

@@ -39,7 +39,7 @@
 #                                  `sh /Volumes/HOPOS/install.sh go`
 #   hopos-licheerv-headless.img.gz image/licheerv-agent.sh, met de config
 #                                  in het venster en Hop (riscv64) in de
-#                                  kern gebakken (STAGE=, ROLE=hop); en de
+#                                  kern gebakken (STAGE=); en de
 #   hopos-licheerv-fip.bin         losse fip.bin voor een kaart die er al een
 #                                  heeft (alleen dat bestand vervangen)
 #   hopos-<board>-<smaak>.flip     image/flip-bundle.sh met HOPOS_STAMP=<versie>
@@ -158,12 +158,12 @@ batch() {
 }
 # De bouwstappen per board, in de kopie (cwd), met de uitkomst naar $OUT.
 pi() {
-	GUI=$2 CFG="$3" APP="$HOP_ELF" ROLE=hop sh "image/$1.sh"
+	GUI=$2 CFG="$3" APP="$HOP_ELF" sh "image/$1.sh"
 	card "target/hopos-$1.img" "hopos-$1-$4.img"
 	flip "$1" "$4" "$2" ""
 }
 radxa() {
-	GUI=$1 CFG="$2" APP="$HOP_ELF" ROLE=hop sh image/radxa-zero3.sh
+	GUI=$1 CFG="$2" APP="$HOP_ELF" sh image/radxa-zero3.sh
 	card target/radxa-zero3/hopos-radxa-zero3.img "hopos-radxa-$3.img"
 	flip radxa "$3" "$1" ""
 }
@@ -172,10 +172,10 @@ uefi() {
 	# De O6N heeft de VPU: headfull is daar de media-smaak (die zet gui
 	# zelf aan, hopos/Cargo.toml).
 	if [ "$1" = o6n ] && [ "$2" = 1 ]; then
-		MEDIA=1 BOARD=$1 CFG="$3" APP="$HOP_ELF" ROLE=hop ESP="$ESP" sh image/uefi-run.sh
+		MEDIA=1 BOARD=$1 CFG="$3" APP="$HOP_ELF" ESP="$ESP" sh image/uefi-run.sh
 		flip "$1" "$4" 0 media
 	else
-		GUI=$2 BOARD=$1 CFG="$3" APP="$HOP_ELF" ROLE=hop ESP="$ESP" sh image/uefi-run.sh
+		GUI=$2 BOARD=$1 CFG="$3" APP="$HOP_ELF" ESP="$ESP" sh image/uefi-run.sh
 		flip "$1" "$4" "$2" ""
 	fi
 	# De stick: dezelfde vorm als de Go-stick (tag v2.2.8, image/uefi-run.sh
@@ -199,7 +199,7 @@ apple() {
 	flip apple headless 0 ""
 }
 licheerv() {
-	STAGE="$HOP_RV" ROLE=hop CFG="$(layers licheerv headless)" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
+	STAGE="$HOP_RV" CFG="$(layers licheerv headless)" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
 	card target/licheerv/hopos-licheerv.img hopos-licheerv-headless.img
 	# Ook de losse fip.bin: een kaart die al een HopOS-kaart is, krijgt zo een
 	# nieuwe versie door alleen dat bestand te vervangen (ook vanaf een

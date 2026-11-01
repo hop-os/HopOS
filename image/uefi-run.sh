@@ -129,12 +129,11 @@ if [ -n "$IMAGE" ]; then
 fi
 
 # De config: CFG, op de fysieke borden standaard de gedeelde (image/cfg),
-# in het venster van BOOTAA64.EFI (board/src/cfgwin.rs, image/hopcfg.py),
-# met de rol van het gestagede image erachter (hopos.stage). Het venster
-# wint van een hopos.cfg op de ESP, dus die gaat weg. Zonder CFG (QEMU,
-# BOARD=uefi) blijft het venster leeg en staat op de ESP een hopos.cfg met
-# alleen de rol: de terugval van de stub (de QEMU-toetsen rekenen op een
-# dichte API, dus geen sleutels).
+# in het venster van BOOTAA64.EFI (board/src/cfgwin.rs, image/hopcfg.py).
+# Het venster wint van een hopos.cfg op de ESP, dus die gaat weg. Zonder CFG
+# (QEMU, BOARD=uefi) blijft het venster leeg en staat op de ESP een
+# hopos.cfg zonder sleutels: de terugval van de stub (de QEMU-toetsen rekenen
+# op een dichte API).
 #
 # Op QEMU staat er de SNTP-server van de host vóór (tools/lib.sh sntp,
 # hopos.ntp=10.0.2.2:$NTPPORT): die van de ring als hij $NTPPORT meegeeft
@@ -157,14 +156,12 @@ if [ -n "${CFG:-}" ]; then
 		[ -z "$NTPCFG" ] || echo "$NTPCFG"
 		# shellcheck disable=SC2086 # CFG is een lijst bestanden
 		cat $CFG
-	} | grep -v '^hopos.stage=' >"$TDIR/hopos.cfg" || true
-	if [ -n "$APP" ]; then echo "hopos.stage=$ROLE" >>"$TDIR/hopos.cfg"; fi
+	} >"$TDIR/hopos.cfg"
 	python3 "$DIR/image/hopcfg.py" set "$EFI" "$TDIR/hopos.cfg"
 	rm -f "$ESP/hopos.cfg"
 else
 	printf '# HopOS node config (hopos.cfg op de ESP-root)\n' >"$ESP/hopos.cfg"
 	[ -z "$NTPCFG" ] || echo "$NTPCFG" >>"$ESP/hopos.cfg"
-	if [ -n "$APP" ]; then echo "hopos.stage=$ROLE" >>"$ESP/hopos.cfg"; fi
 fi
 echo "uefi-run: ESP in $ESP" >&2
 [ -n "${BUILD_ONLY:-}" ] && exit 0

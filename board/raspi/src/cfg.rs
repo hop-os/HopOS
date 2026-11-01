@@ -10,7 +10,6 @@
 //!
 //! - `hopos.cores=N`: hoogstens N cores gebruiken (de kern-core
 //!   meegeteld); meer dan de firmware meldt kan niet.
-//! - `hopos.stage=hop|app`: wat het `initramfs`-image is (standaard Hop).
 
 /// Het aantal cores: wat de firmware meldt, begrensd door `hopos.cores`
 /// (0 = geen grens). Zonder firmware-getal telt de grens alleen.

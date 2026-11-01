@@ -129,7 +129,7 @@ pub(crate) fn arm() -> Armed {
 ///
 /// `hop`: woont Hop op deze node, gestaged of meegekomen over een flip.
 /// `setup` beslist dat één keer (main.rs, ook voor het token); tot 24-10
-/// keek dit zelf naar `staged_role`, en na een flip met Hop ingebakken in
+/// keek dit zelf naar de staging, en na een flip met Hop ingebakken in
 /// de kaart-kern (de M4 van 03-10) werd zijn hartslag dan niet bewaakt (F6).
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor, armed: Armed, hop: bool) {

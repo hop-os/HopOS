@@ -250,10 +250,8 @@ impl<S: Soc> Raspi<S> {
         }
     }
 
-    /// De staging uit /chosen/linux,initrd-* en de rol uit de cmdline.
+    /// De staging uit /chosen/linux,initrd-*.
     fn stage(&self, f: &Fdt<'static>) -> AbiRegion {
-        let role = board::stage::role_code(self.boot_param("hopos.stage"));
-        slots::ROLE.store(role, Relaxed);
         let Some((start, end)) = f.initrd() else {
             cpu::println!("stage: no initramfs in the DTB, nothing staged");
             return AbiRegion::default();
@@ -266,15 +264,7 @@ impl<S: Soc> Raspi<S> {
         };
         slots::STAGE[0].store(start, Relaxed);
         slots::STAGE[1].store(len, Relaxed);
-        cpu::println!(
-            "stage: {} KB at {start:#x}, role {}",
-            len >> 10,
-            match role {
-                0 => "app",
-                1 => "hop",
-                _ => "unknown (nothing will be placed)",
-            }
-        );
+        cpu::println!("stage: {} KB at {start:#x}", len >> 10);
         AbiRegion::new(start, len)
     }
 }

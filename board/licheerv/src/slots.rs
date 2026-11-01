@@ -21,7 +21,6 @@
 
 use abi::Region;
 use abi::layout::{Plan, PlanSpec, pool_of};
-use board::stage::StagedRole;
 
 /// De staart van het DRAM voor de structuren van de kern.
 pub const OS_BASE: u64 = 0x8FE0_0000;
@@ -107,18 +106,6 @@ static STAGE: &Aligned<[u8]> = &Aligned(*include_bytes!(concat!(env!("OUT_DIR"),
 #[must_use]
 pub fn staged_image() -> Option<&'static [u8]> {
     Some(&STAGE.0).filter(|b| !b.is_empty())
-}
-
-/// De rol van het gebakken image, uit build.rs (`HOPOS_EMBED_ROLE`): Hop in
-/// slot 1 met de bevoegdheid (de release, `ROLE=hop`), of een gewone app
-/// (het ABI-bewijs, twee keer door de kern geplaatst). Zonder image zegt de
-/// plaatsing dat er niets is (`HOPOS_SLOT_NONE`).
-pub fn staged_role() -> Result<StagedRole, u64> {
-    Ok(if cfg!(lrv_stage_hop) && staged_image().is_some() {
-        StagedRole::Hop
-    } else {
-        StagedRole::App
-    })
 }
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------

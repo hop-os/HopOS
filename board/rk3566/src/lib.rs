@@ -276,23 +276,15 @@ fn take_initrd(start: u64, len: u64) {
     }
 }
 
-/// De rol van de staging uit `hopos.stage` (config of APPEND), als woord
-/// zoals op de Pi's. Meldt wat er gestaged is.
-fn take_role() {
-    let role = board::stage::role_code(Rk3566.boot_param("hopos.stage"));
-    slots::ROLE.store(role, Relaxed);
-    let name = match role {
-        0 => "app",
-        1 => "hop",
-        _ => "unknown (nothing will be placed)",
-    };
+/// Meldt wat er gestaged is.
+fn report_stage() {
     match STAGE.get() {
         Some(img) => cpu::println!(
-            "stage: {} KB image from the initrd at {:#x}, role {name}",
+            "stage: {} KB image from the initrd at {:#x}",
             img.len() >> 10,
             img.as_ptr() as usize
         ),
-        None => cpu::println!("stage: no image in the initrd, role {name}"),
+        None => cpu::println!("stage: no image in the initrd"),
     }
 }
 
@@ -397,7 +389,7 @@ fn take_fdt(dtb: u64) {
         ),
         None => cpu::println!("fb: none from U-Boot (as measured 05-08), UART only"),
     }
-    take_role();
+    report_stage();
 }
 
 /// De Radxa Zero 3E als board.

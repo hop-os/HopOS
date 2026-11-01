@@ -14,7 +14,7 @@
 
 use abi::Region;
 use abi::layout::{Plan, PlanSpec, pool_of};
-use board::stage::{self, StagedRole};
+use board::stage;
 
 /// De control-pages van de eigen cores van de kern (node-SMP).
 pub const NODE_CTRL_PA: u64 = 0xC000_0000;
@@ -40,12 +40,6 @@ pub const POOL: [Region; 2] = [
 /// (`-device loader,addr=…,data=<maat>,data-len=8` in image/qemu-run.sh).
 /// Nul = er is niets gestaged.
 pub const STAGE_HDR_PA: u64 = 0xB010_0000;
-/// Het woord met de rol van het gestagede image, direct na de maat
-/// (`-device loader,addr=…+8,data=<rol>,data-len=8`): 0 = een gewone app
-/// voor het ABI-bewijs (tools/qemu-test.sh), 1 = Hop, de bevoorrechte
-/// bewoner (PORT.md beslissing 1, tools/qemu-test-hop.sh). QEMU begint met
-/// nul-RAM, dus een run zonder dit woord is een gewone app.
-pub const STAGE_ROLE_PA: u64 = STAGE_HDR_PA + 8;
 /// Waar QEMU het image rauw neerlegt (`-device loader,file=…,addr=…,
 /// force-raw=on`): tussen de boot-scratch en de tweede pool-regio, dus
 /// buiten alles wat de lifecycle uitdeelt of wist.
@@ -53,7 +47,7 @@ pub const STAGE_PA: u64 = 0xB020_0000;
 /// De grootste staging: tot aan de tweede pool-regio.
 pub const STAGE_MAX: u64 = 0xB100_0000 - STAGE_PA;
 
-const _: () = assert!(STAGE_ROLE_PA + 8 <= STAGE_PA);
+const _: () = assert!(STAGE_HDR_PA + 8 <= STAGE_PA);
 const _: () = assert!(BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN <= STAGE_HDR_PA);
 const _: () = assert!(NODE_CTRL_PA >= DEVICE_WINDOW.base && CAGE_PA > NODE_CTRL_PA);
 
@@ -90,17 +84,12 @@ pub const fn core_of(mpidr: u64) -> usize {
     (mpidr & 0xf) as usize + ((mpidr >> 8) & 0xff) as usize * 16
 }
 
-/// Het image dat QEMU vóór de boot neerlegde, of `None` als het maatwoord
+/// Het image dat QEMU vóór de boot neerlegde (Hop, de bevoorrechte
+/// bewoner: de kern plaatst alleen Hop, O7), of `None` als het maatwoord
 /// nul of onzin is (`board::stage::staged_at`).
 #[must_use]
 pub fn staged_image() -> Option<&'static [u8]> {
     stage::staged_at(STAGE_HDR_PA, STAGE_PA, STAGE_MAX)
-}
-
-/// De rol uit [`STAGE_ROLE_PA`]; een onbekend woord komt rauw terug (de
-/// kern plaatst dan niets en zegt dat luid).
-pub fn staged_role() -> Result<StagedRole, u64> {
-    stage::role_at(STAGE_ROLE_PA)
 }
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------

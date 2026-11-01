@@ -32,11 +32,14 @@
 //!    zijn FLIP, en deze kern draait gewoon door.
 //! 3. De flip-taak ([`start`]) wacht even, zodat het antwoord op de FLIP
 //!    Hop nog bereikt, en vangt dan, in deze volgorde: hopfs vastleggen en
-//!    dicht, de USB stil, de bewoners en de lease. Dan het handoff-blob, het pointer/magic-paar, de recorder op
-//!    "springen", en de sprong (`cpu::el2::chain::chain`). Na de 202 is er
+//!    dicht, de USB stil, de bewoners en de lease. Dan het handoff-blob, de
+//!    handoff in de feitenpagina, de recorder op "springen", en de sprong
+//!    (`cpu::el2::chain::chain`) met x0 = de feitenpagina. Na de 202 is er
 //!    geen weg terug (§13.7): wat hier misgaat, is `HOPOS_FATAL` en de
 //!    koude boot.
-//! 4. De nieuwe kern: [`land`] als eerste in `setup`. Een overdracht is
+//! 4. De nieuwe kern komt door dezelfde ingang als bij stroom aan, en
+//!    [`facts`] leest in `kmain` de feitenpagina (O6). Dan [`land`] als
+//!    eerste in `setup`. Een overdracht is
 //!    `HOPOS_FLIP_BOOT gen=N` en een [`Landing`]; `setup` geeft elk stuk
 //!    aan zijn onderdeel. Een stuk dat niet terugkomt, is `HOPOS_FATAL`.
 //!    Een kern die niet tot een luisterend net komt, vangt de ene guard van
@@ -69,7 +72,7 @@
 //! (`HOPOS_FLIP_CFG_OWN`).
 
 use crate::{BOARD, DevMem};
-use abi::layout::{FLIP_HANDOFF_LEN, HANDOFF_MAGIC_OFF, HANDOFF_PTR_OFF};
+use abi::layout::FLIP_HANDOFF_LEN;
 use alloc::vec::Vec;
 use board::Board;
 use board::cfgwin::Carry;
@@ -81,9 +84,7 @@ use cpu::println;
 use dev::Pa;
 use executor::Executor;
 use kern::cage::PhysMem;
-use kern::kernflip::{
-    self, Boot, Bundle, FLIP_ABI, FlipPlan, HAND_MAGIC, HANDOFF_TAIL, Handoff, Stage,
-};
+use kern::kernflip::{self, Bundle, FLIP_ABI, FlipPlan, HANDOFF_TAIL, Handoff, Stage};
 use kern::slots::{Reply, Request, Response, SlotState};
 use kern::system::FlipBundle;
 use sync::{Local, Signal};
@@ -93,6 +94,19 @@ use vboard::slots::{
 
 /// Het handoff-blob: direct onder het staging-maatwoord, op elk board.
 const FLIP_HANDOFF_PA: u64 = abi::layout::flip_handoff_pa(STAGE_HDR_PA);
+
+/// De feitenpagina (O6): op de boot-scratch van elk board, en x0 van elke
+/// sprong.
+const FACTS_PA: u64 = abi::layout::facts_pa(BOOT_SCRATCH_PA);
+
+// De poort van `cpu::boot::_start` (het linkcontract): een core met dit
+// adres in x0 komt uit een sprong en mag door.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+core::arch::global_asm!(
+    ".globl __hopos_facts",
+    ".set __hopos_facts, {facts}",
+    facts = const FACTS_PA,
+);
 
 // Het blob van de kern en de plek van het board zijn even groot: een
 // nieuwe kern leest precies [`HANDOFF_TAIL`] bytes op [`FLIP_HANDOFF_PA`].
@@ -115,8 +129,10 @@ const ACTOR_WAIT: Duration = Duration::from_secs(2);
 /// een `adopt` in `cage_riscv`.
 const FLIPS: bool = !cfg!(target_arch = "riscv64");
 
-/// Wat de firmware deze kern in x0 gaf: de nieuwe krijgt hetzelfde.
+/// Wat de firmware bij stroom aan in x0 gaf ([`facts`]).
 static FIRMWARE_X0: AtomicU64 = AtomicU64::new(0);
+/// Waar de vorige kern de handoff legde, 0 = een koude boot ([`facts`]).
+static HANDOFF: AtomicU64 = AtomicU64::new(0);
 /// De generatie van deze kern: 1 na een koude boot, N+1 na een flip vanaf
 /// generatie N (het blob draagt de generatie van de kern die landt).
 static GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -155,9 +171,9 @@ static REPLY: Reply = Reply::new();
 /// Waar de flip zijn woorden houdt.
 fn plan() -> FlipPlan {
     FlipPlan {
-        handoff_ptr_pa: BOOT_SCRATCH_PA + HANDOFF_PTR_OFF,
+        facts_pa: FACTS_PA,
         stage_pa: FLIP_RECORDER_PA,
-        own_ram_end: FLIP_HANDOFF_PA,
+        handoff_pa: FLIP_HANDOFF_PA,
     }
 }
 
@@ -232,18 +248,17 @@ mod image {
     }
 }
 
-/// De feiten van de firmware die een geflipte kern terug moet vinden.
+/// De DTB van de firmware, die een geflipte kern terug moet vinden.
 ///
-/// Op een DTB-board (virt, de Pi's, de Radxa) zijn dat er geen andere dan
-/// de DTB zelf: de firmware legde hem buiten de kern-RAM en de pool (de Pi:
+/// Op een DTB-board (virt, de Pi's, de Radxa) draagt de feitenpagina alleen
+/// het adres: de firmware legde de DTB buiten de kern-RAM en de pool (de Pi:
 /// het laadvenster, `device_tree_address`; de Radxa: een gat in de pool;
-/// virt: de eerste 2 MB van het RAM, onder het beeld), en de flip geeft
-/// dezelfde x0 door. Dus toetst de oude kern vóór de sprong dat daar nog
-/// een DTB staat: een nieuwe kern zonder DTB heeft geen geheugenkaart, en
-/// dat is liever een weigering dan een kern die na de sprong zonder pool
-/// verder moet. UEFI heeft een eigen feitenpagina (`board/uefi/src/flip.rs`);
-/// daar en op Apple toetst de ingang zelf.
-mod facts {
+/// virt: de eerste 2 MB van het RAM, onder het beeld). Dus toetst de oude
+/// kern vóór de sprong dat daar nog een DTB staat: een nieuwe kern zonder
+/// DTB heeft geen geheugenkaart, en dat is liever een weigering dan een kern
+/// die na de sprong zonder pool verder moet. UEFI zet zijn feiten zelf in
+/// een pagina (`board/uefi/src/flip.rs`).
+mod dtb {
     /// De magic van een FDT-kop, big-endian in het geheugen.
     const FDT_MAGIC: u32 = 0xd00d_feed;
 
@@ -259,14 +274,20 @@ mod facts {
     }
 }
 
-/// Kwam deze kern uit een sprong? Op arm64 zegt de ingang het
-/// (`cpu::boot::FLIP_ENTERED`: x3 van de trampoline, op UEFI de
-/// flip-ingang). Op riscv64 is er geen merkteken (de trampoline geeft a0 = 0,
-/// en de firmware a0 = het hart, op hart 0 ook 0): daar blijft het paar het
-/// bewijs, en het wissen ervan. Daar bestaat ook alleen de koude flip, en een
-/// oud koud blob boot hoe dan ook koud.
-pub(crate) fn jumped() -> bool {
-    cfg!(target_arch = "riscv64") || cpu::boot::FLIP_ENTERED.load(Relaxed)
+/// De feitenpagina, in `kmain` vóór `discover`: elke ingang geeft x0 door,
+/// en dat is de pagina (een sprong, met de handoff van de vorige kern) of
+/// wat de firmware gaf (stroom aan: de pagina komt er opnieuw, zonder
+/// handoff; `kernflip::facts`). Geeft wat de firmware bij stroom aan gaf:
+/// de DTB, de boot_args van Apple, op UEFI 0. riscv64 flipt niet en heeft
+/// geen pagina ([`FLIPS`]).
+pub(crate) fn facts(x0: u64) -> u64 {
+    if !FLIPS {
+        return x0;
+    }
+    let (fw, handoff) = kernflip::facts(&mut DevMem, &plan(), x0);
+    FIRMWARE_X0.store(fw, Relaxed);
+    HANDOFF.store(handoff, Relaxed);
+    fw
 }
 
 /// Wat een landing aan `setup` geeft: per onderdeel zijn stuk.
@@ -282,20 +303,15 @@ pub(crate) struct Landing {
 /// er, of niet. De klok neemt zijn stuk hier al over; de rest gaat in
 /// [`Landing`] naar `setup`.
 ///
-/// Alleen na een sprong ([`jumped`]): een firmware-boot die nog een paar
-/// vindt, wist het en boot koud (`HOPOS_FLIP_STALE`). Na een harde reset
-/// draaien de bewoners niet meer, en het blob is van een kern die al landde
-/// of al dood is.
-///
-/// Een onbruikbaar blob met een geldig paar ná een sprong is GEEN koude
-/// boot: er leven misschien bewoners, en een koude boot zou hun regio's vrij
-/// noemen. Dan `HOPOS_FATAL`: de machine komt koud terug.
+/// Een koude boot is een boot zonder handoff ([`facts`]). Een onbruikbare
+/// handoff ná een sprong is GEEN koude boot: er leven misschien bewoners,
+/// en een koude boot zou hun regio's vrij noemen. Dan `HOPOS_FATAL`: de
+/// machine komt koud terug.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
-pub(crate) fn land(x0: u64) -> Option<Landing> {
-    FIRMWARE_X0.store(x0, Relaxed);
+pub(crate) fn land() -> Option<Landing> {
     let (mut mem, p) = (DevMem, plan());
-    let jumped = jumped();
-    if jumped {
+    let handoff = HANDOFF.load(Relaxed);
+    if handoff != 0 {
         kernflip::mark_early_boot(&mut mem, &p);
     }
     // De kale vector van de trampoline: een fault tijdens de kopie of in de
@@ -307,14 +323,9 @@ pub(crate) fn land(x0: u64) -> Option<Landing> {
             "flip: the jump faulted before the new kernel had vectors: ESR {esr:#x} ELR {elr:#x} FAR {far:#x} HOPOS_FLIP_TRAP"
         );
     }
-    match kernflip::adopted(&mut mem, &p, jumped) {
-        Ok(Boot::Adopted(h)) => Some(landed(h)),
-        Ok(b @ (Boot::Cold | Boot::Stale)) => {
-            if b == Boot::Stale {
-                println!(
-                    "flip: a handoff lay in memory, but this kernel came from the firmware, not from a jump: wiped, not adopted, cold boot HOPOS_FLIP_STALE"
-                );
-            }
+    match kernflip::adopted(&mut mem, &p, handoff) {
+        Ok(Some(h)) => Some(landed(h)),
+        Ok(None) => {
             report_cold(&mut mem, &p);
             None
         }
@@ -449,7 +460,7 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
     }
     check_switch_code(&bundle)?;
     let x0 = FIRMWARE_X0.load(Relaxed);
-    if !facts::intact(x0) {
+    if !dtb::intact(x0) {
         return Err(refuse(
             "firmware DTB gone",
             kern::Error::Corrupt {
@@ -677,13 +688,13 @@ fn jump_of(p: &Prepared) -> Jump {
         src: Pa(p.src),
         len: p.len,
         entry: p.entry,
-        x0: FIRMWARE_X0.load(Relaxed),
+        x0: FACTS_PA,
         sweep: [(ram.base, ram.end()), (Pa(a), Pa(b))],
         tramp: Pa(FLIP_TRAMP_PA),
     }
 }
 
-/// Het blob, het paar en de sprong. Synchroon: vanaf hier verandert er
+/// Het blob, de handoff en de sprong. Synchroon: vanaf hier verandert er
 /// niets meer aan de staat die overgaat.
 fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     // De klok vol: de nieuwe kern landt niet op een stille klok (30-09, de
@@ -711,12 +722,7 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     };
     mem.clear(FLIP_HANDOFF_PA, FLIP_HANDOFF_LEN);
     mem.copy_in(FLIP_HANDOFF_PA, &blob);
-    // Het paar als laatste, en de regel zelf naar DRAM: hij deelt de
-    // boot-scratch met woorden die straks met de MMU uit geschreven worden.
-    let pair = BOOT_SCRATCH_PA + HANDOFF_PTR_OFF;
-    mem.write64(pair, FLIP_HANDOFF_PA);
-    mem.write64(BOOT_SCRATCH_PA + HANDOFF_MAGIC_OFF, HAND_MAGIC);
-    dev::push(Pa(pair), 16);
+    kernflip::hand_over(&mut mem, &fp, FLIP_HANDOFF_PA);
     kernflip::stage(&mut mem, &fp, Stage::Handoff, generation);
     println!(
         "flip: {} KiB to {base:#x}, {} resident(s) and a {} B handoff, jumping to {:#x} HOPOS_FLIP_JUMP gen={generation}",
@@ -732,13 +738,10 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     // beeld van een bundel waarvan de som getoetst is (`prepare`),
     // gerelokeerd naar het koude adres; niemand schrijft er nog in (de
     // firmware of QEMU legde er alleen bij de boot iets neer, en dat ligt
-    // ernaast, `kernflip::stage_slot`). Het blob, het paar en de recorder
-    // zijn net naar DRAM geveegd; hopfs is vastgelegd en dicht. De app-cores draaien in hun partities en in de
-    // switch-code in de plan-regio, nooit in het kern-RAM of het kern-beeld
-    // dat de trampoline veegt en overschrijft.
-    let e = unsafe { chain::chain(&j) };
-    mem.write64(pair, 0);
-    mem.write64(BOOT_SCRATCH_PA + HANDOFF_MAGIC_OFF, 0);
-    dev::push(Pa(pair), 16);
-    JumpError::Chain(e)
+    // ernaast, `kernflip::stage_slot`). Het blob, de feitenpagina en de
+    // recorder zijn net naar DRAM geveegd; hopfs is vastgelegd en dicht. De
+    // app-cores draaien in hun partities en in de switch-code in de
+    // plan-regio, nooit in het kern-RAM of het kern-beeld dat de trampoline
+    // veegt en overschrijft.
+    JumpError::Chain(unsafe { chain::chain(&j) })
 }

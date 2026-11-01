@@ -107,22 +107,17 @@ mod imp {
 ///    plaats van onze data (de fase-P-les die QEMU verhulde). Onder 0x80000
 ///    NIET: daar woont TF-A, mét vuile regels.
 ///
-/// 4. x3 gaat ongeschonden door naar `_start`: een geflipte kern draagt
-///    daar het merkteken `cpu::boot::FLIP_ENTRY` (de trampoline van
-///    `cpu::el2::chain` zet het), en alleen dan mag een andere core dan
-///    core 0 door de poort van `_start`. De stappen hierboven gebruiken x1
-///    tot en met x3 als kladregister, dus x22 bewaart het (29-09). Verder
-///    is deze ingang al core-neutraal: geen MPIDR-toets, geen stack, en
-///    wat hij aan EL2-registers zet, is per core. Een tweede keer dezelfde
-///    DTB is geen probleem: de firmware legde hem in het laadvenster
-///    (`map::DTB_PA`), buiten de kern-RAM en de pool, waar niemand schrijft,
-///    en de flip geeft dezelfde x0 door. De DTB ís dus de feitenpagina van
-///    de Pi (UEFI heeft er een eigen nodig, `board/uefi/src/flip.rs`, omdat
-///    zijn feiten uit ACPI en de boot services komen die na de koude boot
-///    weg zijn); `hopos/src/flip.rs` toetst vóór de sprong dat hij er nog
-///    staat. De `dc ivac` van stap 3 raakt op een flip alleen schone regels:
-///    de trampoline veegde de kern-RAM, en het blob, de staging en de
-///    recorder zijn vóór de sprong naar DRAM geduwd.
+/// 4. x0 gaat ongeschonden door naar `_start` (x20): na een sprong is dat
+///    de feitenpagina (O6, `docs/flip.md`), en alleen dan mag een andere
+///    core dan core 0 door de poort van `_start` (`cpu::boot::admits`).
+///    Verder is deze ingang al core-neutraal: geen MPIDR-toets, geen stack,
+///    en wat hij aan EL2-registers zet, is per core. De pagina draagt het
+///    adres van de DTB: de firmware legde hem in het laadvenster
+///    (`map::DTB_PA`), buiten de kern-RAM en de pool, waar niemand schrijft;
+///    `hopos/src/flip.rs` toetst vóór de sprong dat hij er nog staat. De
+///    `dc ivac` van stap 3 raakt op een flip alleen schone regels: de
+///    trampoline veegde de kern-RAM, en de pagina, het blob, de staging en
+///    de recorder zijn vóór de sprong naar DRAM geduwd.
 ///
 /// CPUECTLR_EL1 (SMPEN) wordt NIET aangeraakt: de EEPROM-bootloader van
 /// 2026-05 brengt een BL31 (v2.6-240) mee die EL2 er geen toegang meer toe
@@ -138,7 +133,6 @@ macro_rules! pi_entry {
     .global _pi_start
 _pi_start:
     mov x20, x0
-    mov x22, x3
 
     ldr x1, ={uart}
     ldr x3, =100000
@@ -191,7 +185,6 @@ _pi_start:
     dsb sy
     isb
     mov x0, x20
-    mov x3, x22
     b _start
     .ltorg
 "#,

@@ -102,8 +102,10 @@ pub const CTRL_STRIDE: u64 = 0x1000;
 /// gealigneerde 64-bit toegang. `cpuinit` schrijft er vóór de EL-drop het
 /// boot-EL op +0. Fysiek: [`PlanSpec::boot_scratch_pa`].
 pub const BOOT_SCRATCH: u64 = CTRL_BASE;
-/// De offset van de handoff-pointer van de kern-flip op de boot-scratch;
-/// het woord erna ([`HANDOFF_MAGIC_OFF`]) draagt de magic.
+/// De offset van de feitenpagina van de kern-flip op de boot-scratch (O6,
+/// `docs/flip.md`): twee woorden, [`FACTS_HANDOFF`] en [`FACTS_FIRMWARE`].
+/// Elke ingang krijgt bij een sprong precies dit adres in x0; bij stroom aan
+/// geeft de firmware er iets anders, en bouwt de kern de pagina opnieuw.
 ///
 /// Waarom 0x80 en niet laag: hier stond 0x10, en Apple's `cpuinit` legt
 /// daar HCR_EL2 en CNTHCTL_EL2 neer. Gemeten 01-09 op de M4 bij de eerste
@@ -113,12 +115,22 @@ pub const BOOT_SCRATCH: u64 = CTRL_BASE;
 /// gebruikt (Apple komt tot +0x50), onder het parameterblok (+0x100), en in
 /// een eigen cacheline: 0x40..0x7F dragen de woorden die de stubs met de MMU
 /// uit schrijven.
-pub const HANDOFF_PTR_OFF: u64 = 0x80;
-/// De offset van de magic naast de handoff-pointer (allebei 0 = geen flip).
-pub const HANDOFF_MAGIC_OFF: u64 = HANDOFF_PTR_OFF + 8;
-/// Hoeveel van de boot-scratch het plan reserveert: tot en met het
-/// handoff-paar.
-pub const BOOT_SCRATCH_LEN: u64 = HANDOFF_MAGIC_OFF + 8;
+pub const FACTS_OFF: u64 = 0x80;
+/// Het woord van de feitenpagina met het adres van de handoff, of 0: een
+/// boot zonder handoff is een koude boot.
+pub const FACTS_HANDOFF: u64 = 0;
+/// Het woord van de feitenpagina met wat de firmware bij stroom aan in x0
+/// gaf (de DTB, de boot_args van Apple; op UEFI 0).
+pub const FACTS_FIRMWARE: u64 = 8;
+/// Hoeveel van de boot-scratch het plan reserveert: tot en met de
+/// feitenpagina.
+pub const BOOT_SCRATCH_LEN: u64 = FACTS_OFF + 16;
+
+/// De feitenpagina van een board met de boot-scratch op `boot_scratch`.
+#[must_use]
+pub const fn facts_pa(boot_scratch: u64) -> u64 {
+    boot_scratch + FACTS_OFF
+}
 
 /// De maat van het handoff-blob van de kern-flip
 /// (`kern::kernflip::HANDOFF_TAIL`, de binary toetst het).
@@ -131,8 +143,8 @@ pub const fn flip_handoff_pa(stage_hdr: u64) -> u64 {
     stage_hdr - FLIP_HANDOFF_LEN
 }
 
-const _: () = assert!(HANDOFF_PTR_OFF / dev::LINE != 0x40 / dev::LINE);
-const _: () = assert!(HANDOFF_PTR_OFF / dev::LINE == HANDOFF_MAGIC_OFF / dev::LINE);
+const _: () = assert!(FACTS_OFF / dev::LINE != 0x40 / dev::LINE);
+const _: () = assert!(FACTS_OFF / dev::LINE == (FACTS_OFF + FACTS_FIRMWARE) / dev::LINE);
 const _: () = assert!(BOOT_SCRATCH_LEN <= 0x100);
 
 /// Het framebuffer-grant-venster (IPA): GB0 is vrij in het canonieke beeld

@@ -66,15 +66,14 @@
 #               tcp/5555 speelt de laatste HOPOS_APPSPIKE_DONE van kern B af
 #               vóór de bootregel van kern A. De rest van de toets kijkt
 #               alleen naar de console van vóór de reset.
-#   eenmalig    (virt, warm) de reset van de O6N (04-10): daar bleef het
-#               pointer/magic-paar van de overdracht na de landing in DRAM
-#               staan (het wissen zat in de cache), en de stickkern
-#               adopteerde de bewoners van een flip die al geland was. QEMU
-#               heeft geen cache, dus zet een loader het paar bij ELKE reset
-#               terug op de boot-scratch (ook bij de eerste boot), naast het
-#               echte blob van de sprong. Groen alleen als kern A beide keren
-#               koud boot met HOPOS_FLIP_STALE (geen merkteken van de
-#               trampoline, dus geen sprong), na de reset geen
+#   eenmalig    (virt, warm) de reset van de O6N (04-10): daar bleef de
+#               overdracht na de landing in DRAM staan, en de stickkern
+#               adopteerde de bewoners van een flip die al geland was. Een
+#               loader zet bij ELKE reset (ook bij de eerste boot) de handoff
+#               in de feitenpagina op de boot-scratch, naast het echte blob
+#               van de sprong. Groen alleen als kern A beide keren koud boot
+#               (HOPOS_BOOT gen=1: x0 van de firmware is niet de pagina, dus
+#               geen sprong, en de pagina komt er opnieuw), na de reset geen
 #               HOPOS_FLIP_BOOT, HOPOS_FLIP_ADOPT, HOPOS_HOP_RESUMED of
 #               HOPOS_HOP_EXIT zegt, en Hop weer opkomt (HOP_UP).
 #
@@ -107,8 +106,9 @@
 #                                           flip springt vanaf core 1, en de
 #                                           nieuwe kern moet op een andere core
 #                                           dan 0 door `_start` (cpu::boot
-#                                           FLIP_ENTRY; dezelfde ingang als de
-#                                           Pi's en de Radxa). Samen te nemen
+#                                           admits: x0 = de feitenpagina;
+#                                           dezelfde ingang als de Pi's en de
+#                                           Radxa). Samen te nemen
 #                                           met BOARD=uefi (daar
 #                                           in hopos.cfg op de ESP, de weg van
 #                                           de O6N).
@@ -118,13 +118,15 @@
 #                                           boot drie keer. Koud op core 0 (de
 #                                           DTB-plek); dan op core 1 met de
 #                                           registers van de chain-trampoline
-#                                           (x0 = dezelfde DTB, x3 = het
-#                                           merkteken cpu::boot::FLIP_ENTRY,
-#                                           core 0 in een WFE-lus): groen als
-#                                           die core door _pi_start en _start
-#                                           tot kmain komt en de DTB een tweede
-#                                           keer leest; en dezelfde sprong
-#                                           ZONDER merkteken: die moet na "P2"
+#                                           (x0 = de feitenpagina op de
+#                                           boot-scratch 0x0F10_0080, met de
+#                                           DTB erin en geen handoff, x1 tot x3
+#                                           nul, core 0 in een WFE-lus): groen
+#                                           als die core door _pi_start en
+#                                           _start tot kmain komt en de DTB een
+#                                           tweede keer leest, uit de pagina;
+#                                           en dezelfde sprong met x0 = de DTB,
+#                                           zoals de firmware: die moet na "P2"
 #                                           parkeren (de koude-boot-poort).
 #   KEEP_LOG=pad tools/qemu-test-flip.sh    bewaart ook een groene console (en
 #                                           die van na de reset in pad.reset)
@@ -165,12 +167,13 @@ if [ "$BOARD" = rpi4 ]; then
 	# De stub op core 1, met de hand gecodeerd (geen assembler nodig): van
 	# EL3 (zo komt een core van raspi4b uit de reset als QEMU hem niet zelf
 	# start) naar EL2, dan precies wat de trampoline van cpu::el2::chain de
-	# nieuwe kern geeft: x0 = de DTB, x1 = x2 = 0, x3 = het merkteken, en de
-	# sprong naar 0x80000 (_pi_start). Core 0 krijgt een WFE-lus.
+	# nieuwe kern geeft: x0 = $2 (de feitenpagina, of de DTB als de
+	# firmware), x1 tot x3 nul, en de sprong naar 0x80000 (_pi_start). Core
+	# 0 krijgt een WFE-lus.
 	stub() {
-		python3 - "$1" "$2" "$3" <<'STUB'
+		python3 - "$1" "$2" <<'STUB'
 import struct, sys
-out, dtb, mark = sys.argv[1], int(sys.argv[2], 16), int(sys.argv[3], 16)
+out, x0, mark = sys.argv[1], int(sys.argv[2], 16), 0
 code = [
     0xd280a029,  # mov x9, #0x501          SCR_EL3: RW, HCE, NS
     0xd51e1109,  # msr scr_el3, x9
@@ -179,7 +182,7 @@ code = [
     0x10000069,  # adr x9, +0xc
     0xd51e4029,  # msr elr_el3, x9
     0xd69f03e0,  # eret
-    0x580000e0,  # ldr x0, dtb
+    0x580000e0,  # ldr x0, x0
     0xaa1f03e1,  # mov x1, xzr
     0xaa1f03e2,  # mov x2, xzr
     0x580000c3,  # ldr x3, mark
@@ -187,7 +190,7 @@ code = [
     0xd61f0120,  # br x9
     0xd503201f,  # nop (uitlijning)
 ]
-b = b"".join(struct.pack("<I", w) for w in code) + struct.pack("<QQQ", dtb, mark, 0x80000)
+b = b"".join(struct.pack("<I", w) for w in code) + struct.pack("<QQQ", x0, mark, 0x80000)
 open(out, "wb").write(b)
 open(out + ".park", "wb").write(struct.pack("<II", 0xd503205f, 0x17ffffff))
 STUB
@@ -201,7 +204,7 @@ STUB
 		con="$1"
 		shift
 		qemu-system-aarch64 -M raspi4b -display none -monitor none -serial "file:$con" \
-			-kernel "$W/kernel8.img" -append "hopos.stage=none" -no-reboot "$@" 2>"$W/qemu.err" &
+			-kernel "$W/kernel8.img" -no-reboot "$@" 2>"$W/qemu.err" &
 		qp=$!
 		sleep "${SECS:-7}"
 		kill "$qp" 2>/dev/null || true
@@ -213,13 +216,18 @@ STUB
 	boot "$W/cold.log" "$@"
 	AT="$(sed -n 's/^fdt: .* bytes at \(0x[0-9a-f]*\).*/\1/p' "$W/cold.log.txt" | head -1)"
 	echo "== koud op core 0: DTB op ${AT:-geen}, $(grep -c '^P2' "$W/cold.log.txt") keer P2 (de reset van de PM-watchdog stopt QEMU)"
-	FLIP=0x4550494C46504F48
-	stub "$W/flip.bin" "${AT:-0}" "$FLIP"
-	stub "$W/none.bin" "${AT:-0}" 0
+	# De feitenpagina (abi::layout::facts_pa van board_raspi::map
+	# BOOT_SCRATCH_PA): de handoff (0: geen bewoners om te adopteren) en de
+	# DTB, zoals kern A hem achterlaat.
+	FACTS=0x0F100080
+	stub "$W/flip.bin" "$FACTS"
+	stub "$W/none.bin" "${AT:-0}"
 	for k in flip none; do
 		boot "$W/$k.log" "$@" \
 			-device "loader,file=$W/$k.bin,addr=0x0F800000,force-raw=on" \
 			-device "loader,file=$W/$k.bin.park,addr=0x0F801000,force-raw=on" \
+			-device loader,addr=0x0F100080,data=0,data-len=8 \
+			-device "loader,addr=0x0F100088,data=${AT:-0},data-len=8" \
 			-device loader,addr=0x0F800000,cpu-num=1 -device loader,addr=0x0F801000,cpu-num=0
 	done
 	fail=0
@@ -227,20 +235,20 @@ STUB
 		echo "   ROOD de koude boot kwam niet tot discover, of niet tot de reset van de PM-watchdog"
 		fail=1
 	fi
-	# Met merkteken: P2 (de ingang op EL2), de bunny (kmain), en dezelfde DTB.
+	# Met de pagina: P2 (de ingang op EL2), de bunny (kmain), en dezelfde DTB.
 	for m in "^P2" "the Rust-only OS" "fdt: .* bytes at ${AT:-0x}"; do
 		if grep -q "$m" "$W/flip.log.txt"; then
-			echo "   ok  core 1 met merkteken: $(grep -m1 "$m" "$W/flip.log.txt")"
+			echo "   ok  core 1 met de feitenpagina: $(grep -m1 "$m" "$W/flip.log.txt")"
 		else
-			echo "   ROOD core 1 met merkteken: '$m' ontbreekt"
+			echo "   ROOD core 1 met de feitenpagina: '$m' ontbreekt"
 			fail=1
 		fi
 	done
-	# Zonder: de koude-boot-poort van _start parkeert hem na de Pi-ingang.
+	# Met de DTB: de koude-boot-poort van _start parkeert hem na de Pi-ingang.
 	if grep -q "^P2" "$W/none.log.txt" && ! grep -q "Rust-only" "$W/none.log.txt"; then
-		echo "   ok  core 1 zonder merkteken: 'P2' en dan niets (geparkeerd in _start)"
+		echo "   ok  core 1 met de DTB in x0: 'P2' en dan niets (geparkeerd in _start)"
 	else
-		echo "   ROOD core 1 zonder merkteken kwam verder dan _start, of niet tot P2"
+		echo "   ROOD core 1 met de DTB in x0 kwam verder dan _start, of niet tot P2"
 		fail=1
 	fi
 	grep -m1 "HOPOS_OSCORE" "$W/flip.log.txt" | sed 's/^/   (de Pi houdt zijn kern op core 0: /; s/$/)/' || true
@@ -397,10 +405,11 @@ if [ "$BOARD" = uefi ]; then
 	QPID=$!
 else
 	# QMP voor de reset van de zwarte doos (hieronder); qemu-run.sh geeft
-	# zijn argumenten door aan QEMU. Warm ook het oude paar ("eenmalig"
-	# hierboven): de pointer naar het blob (flip_handoff_pa: de staging-kop
-	# 0xB010_0000 min 256 KiB) en HAND_MAGIC op de boot-scratch 0xB000_0000
-	# + 0x80 (board/qemuvirt/src/slots.rs, abi::layout), bij elke reset.
+	# zijn argumenten door aan QEMU. Warm ook de oude handoff ("eenmalig"
+	# hierboven): het adres van het blob (flip_handoff_pa: de staging-kop
+	# 0xB010_0000 min 256 KiB) in de feitenpagina op de boot-scratch
+	# 0xB000_0000 + 0x80 (board/qemuvirt/src/slots.rs, abi::layout
+	# facts_pa), bij elke reset.
 	# Kern A met een config in zijn venster; de bundel heeft een leeg.
 	if [ -n "$GROUPFLIP" ]; then
 		printf 'hopos.hop.sharegroup=hop\n' >"$ART/kern-a.cfg"
@@ -409,8 +418,7 @@ else
 	fi
 	set -- -qmp "unix:$ART/q.sock,server=on,wait=off"
 	[ "$MODE" = warm ] && set -- "$@" \
-		-device loader,addr=0xb0000080,data=0xb00c0000,data-len=8 \
-		-device loader,addr=0xb0000088,data=0x31444e4148504f48,data-len=8
+		-device loader,addr=0xb0000080,data=0xb00c0000,data-len=8
 	hop_virt HOPOS_STAMP=A CFG="$ART/kern-a.cfg" CONPORT="$CONPORT" -- "$@"
 fi
 
@@ -428,7 +436,6 @@ echoes() {
 }
 
 A_MARKS="HOPOS_BOOT gen=1 stamp=A|HOPOS_HOP_START slot=1|slot 1: 2 port\\(s\\) published tcp\\+udp on the uplink: :8080 :9080 HOPOS_SLOT_PUBLISH|slot 1: .*HOP_UP"
-[ "$BOARD:$MODE" = virt:warm ] && A_MARKS="HOPOS_FLIP_STALE|$A_MARKS"
 WORK_MARKS="slot 1: .*HOP_JOB_PLACED slot=[2-9]|HOPOS_SLOT_START slot=[2-9]|slot [0-9]+: HOPOS_APPSPIKE_DONE pass=9 fail=0"
 BASE_RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_FLIP_BLOB_BAD|HOPOS_FS_FREEZE_FAIL|HOPOS_CAGE_FAIL|HOPOS_CFG_BAD|HOPOS_FLIP_CFG_NONE|HOPOS_FLIP_CFG_OWN"
 case "$MODE" in
@@ -716,7 +723,7 @@ if [ "$BOARD" = virt ] && [ "$MODE" = warm ]; then
 	*'"return"'*) echo "   ok  system_reset over QMP na de flip" ;;
 	*) echo "   ROOD system_reset over QMP: ${RESET:-niet gedaan (de flip was niet groen)}"; fail=1 ;;
 	esac
-	for m in "HOPOS_BOOT gen=1 stamp=A" "HOPOS_FLIP_STALE" "console: [1-9][0-9]* bytes from before this boot .*HOPOS_CONSOLE_CARRIED" "slot 1: .*HOP_UP"; do
+	for m in "HOPOS_BOOT gen=1 stamp=A" "console: [1-9][0-9]* bytes from before this boot .*HOPOS_CONSOLE_CARRIED" "slot 1: .*HOP_UP"; do
 		if grep -q -E "$m" "$R" 2>/dev/null; then
 			echo "   ok  na de reset: $(grep -m1 -E "$m" "$R")"
 		else

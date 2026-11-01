@@ -398,7 +398,7 @@ fn plan_adressen_en_uitsluiten() {
         plan.park_mbox_pa(c2).unwrap(),
         Pa(0xc200_0000 + PARK_MBOX_OFF + 2 * PARK_MBOX_LEN)
     );
-    assert_eq!(plan.handoff_ptr_pa(), Pa(0xb000_0080));
+    assert_eq!(facts_pa(0xb000_0000), 0xb000_0080);
     assert_eq!(plan.flip_stage_pa(), None);
     assert_eq!(plan.ram_base(), HOP_RAM_START);
     assert_eq!(plan.top_addr(), 0xc200_0000 + 129 * CAGE_STRIDE);

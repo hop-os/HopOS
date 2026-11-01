@@ -27,7 +27,7 @@
 //!    speculatie die een regel terugbrengt);
 //! 4. de I-hygiëne (`ic iallu`, de les van de eerste vier ijzer-flips van
 //!    01-09: het venster was net nog code van een ander), en `br` naar de
-//!    entry met x0 = de firmware-x0 die de oude kern ooit kreeg.
+//!    entry met x0 = de feitenpagina (O6) en x1 tot x3 nul.
 //!
 //! Vóór stap 1 gaat VBAR_EL2 naar een kale vectortabel die met de
 //! trampoline meereist (2 KB verder op dezelfde pagina): een fault tijdens
@@ -41,10 +41,11 @@
 //! ([`take_trap`]).
 //!
 //! De nieuwe kern komt zo binnen op exact de conditie van een koude boot
-//! (EL2, MMU uit, caches schoon), en zijn boot-stub zet alles zelf weer op.
-//! Eén verschil: x3 draagt [`crate::boot::FLIP_ENTRY`]. De sprong komt
-//! van de OS-core, en die is niet per se core 0; zonder merkteken parkeert
-//! `_start` elke core behalve core 0 (de koude-boot-poort, `cpu::boot`).
+//! (EL2, MMU uit, caches schoon), door dezelfde ingang, en zijn boot-stub
+//! zet alles zelf weer op. Eén verschil: x0 is de feitenpagina in plaats van
+//! wat de firmware gaf. De sprong komt van de OS-core, en die is niet per se
+//! core 0; met een ander x0 parkeert `_start` elke core behalve core 0 (de
+//! koude-boot-poort, [`crate::boot::admits`]).
 //!
 //! # riscv64
 //!
@@ -138,7 +139,7 @@ pub struct Jump {
     pub len: u64,
     /// Het fysieke entrypoint van de nieuwe kern (binnen `[dst, dst+len)`).
     pub entry: u64,
-    /// x0 voor de nieuwe kern: wat de firmware óns gaf (de DTB-pointer).
+    /// x0 voor de nieuwe kern: de feitenpagina (`abi::layout::facts_pa`).
     pub x0: u64,
     /// Het cacheable RAM dat geveegd wordt: twee vensters `[a, b)` (een
     /// leeg venster is `a == b`). Samen omvatten ze het kern-RAM en het
@@ -277,7 +278,6 @@ pub unsafe fn chain(j: &Jump) -> ChainError {
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
 mod arch {
     use super::{Jump, TRAP_MAGIC};
-    use crate::boot::FLIP_ENTRY;
 
     // De trampoline. Positie-onafhankelijk (alleen registers en relatieve
     // sprongen en adressen), want hij draait op een adres dat hij niet kent.
@@ -285,8 +285,7 @@ mod arch {
     //
     // In: x0 = dst, x1 = src, x2 = len (8-voud), x3 = entry, x4 = x0 van de
     // nieuwe kern, x5/x6 en x7/x8 = de twee te vegen vensters. Uit: x0 =
-    // de x0 van de firmware, x1 = x2 = 0, x3 = het flip-merkteken
-    // (`crate::boot::FLIP_ENTRY`: elke core mag door `_start`).
+    // de feitenpagina (elke core mag ermee door `_start`), x1 tot x3 nul.
     core::arch::global_asm!(
         r#"
     .pushsection .text.hopos_chain, "ax"
@@ -339,10 +338,7 @@ hopos_chain_tramp:
     mov x0, x4
     mov x1, xzr
     mov x2, xzr
-    movz x3, #{f0}
-    movk x3, #{f1}, lsl #16
-    movk x3, #{f2}, lsl #32
-    movk x3, #{f3}, lsl #48
+    mov x3, xzr
     br x16
 
     // De kale dumper: ESR, ELR en FAR in het record, de magic als laatste,
@@ -382,10 +378,6 @@ hopos_chain_tramp_end:
 
     .popsection
 "#,
-        f0 = const FLIP_ENTRY & 0xffff,
-        f1 = const (FLIP_ENTRY >> 16) & 0xffff,
-        f2 = const (FLIP_ENTRY >> 32) & 0xffff,
-        f3 = const (FLIP_ENTRY >> 48) & 0xffff,
         t0 = const TRAP_MAGIC & 0xffff,
         t1 = const (TRAP_MAGIC >> 16) & 0xffff,
         t2 = const (TRAP_MAGIC >> 32) & 0xffff,

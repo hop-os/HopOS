@@ -59,7 +59,7 @@ use board::Board;
 use board::heap::Heap;
 use board::stage::StagedRole;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
 use cpu::println;
 use executor::Executor;
 use glue::{DevMem, KernConsole};
@@ -162,10 +162,11 @@ const BUNNY: [&str; 5] = [
     "",
 ];
 
-/// De ingang uit `cpu::boot`: `dtb` is x0 van de firmware, `el` het
-/// exception level waarop we binnenkwamen.
+/// De ingang uit `cpu::boot` (en elke andere ingang): `x0` is de
+/// feitenpagina na een sprong, of wat de firmware gaf (`flip::facts`), `el`
+/// het exception level waarop we binnenkwamen.
 #[unsafe(no_mangle)]
-extern "C" fn kmain(dtb: u64, el: u64) -> ! {
+extern "C" fn kmain(x0: u64, el: u64) -> ! {
     let board: &'static Machine = &BOARD;
     let uart = board.console();
     cpu::console::set_sink(uart);
@@ -197,7 +198,8 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     println!("{}", board.firmware());
 
     board.init_heap(&HEAP);
-    board.discover(dtb);
+    // FLIP: de feitenpagina (O6). Een koude boot is een boot zonder handoff.
+    board.discover(flip::facts(x0));
     // De watchdog als eerste (docs/sequence-hopos.md §13.2): de hardware
     // staat er na `discover`, en vanaf hier eindigt elke `fatal` in een
     // reset, ook die van de verhuizing hieronder. Na een flip wapent dit de
@@ -208,12 +210,12 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     // bootparameter kiest. Staat hij daar nog niet, dan verhuist hij nu,
     // vóór er één lijn, timer of bewoner aan deze core hangt; deze core
     // wordt dan een app-core.
-    move_to_os_core(board, dtb, el);
-    boot(board, dtb, el, wd)
+    move_to_os_core(board, el);
+    boot(board, el, wd)
 }
 
-/// De `dtb` en het EL van de boot, voor de kern na zijn verhuizing.
-static BOOT_ARGS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// Het EL van de boot, voor de kern na zijn verhuizing.
+static BOOT_EL: AtomicU8 = AtomicU8::new(0);
 
 /// Verhuist de kern naar de OS-core als hij daar niet draait: die core komt
 /// op met hetzelfde EL2-regime en een verse stack en gaat verder in
@@ -223,7 +225,7 @@ static BOOT_ARGS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// vraagt maar die er niet kan zijn, of een verhuizing die niet lukt, is
 /// `fatal` (§13.2): de kern op een andere core dan gevraagd is een andere
 /// node dan de config beschrijft.
-fn move_to_os_core(board: &'static Machine, dtb: u64, el: u8) {
+fn move_to_os_core(board: &'static Machine, el: u8) {
     let (os, why) = board.os_core();
     let here = board.this_core();
     if let Some(why) = why {
@@ -234,8 +236,7 @@ fn move_to_os_core(board: &'static Machine, dtb: u64, el: u8) {
     if os == here {
         return;
     }
-    BOOT_ARGS[0].store(dtb, Relaxed);
-    BOOT_ARGS[1].store(u64::from(el), Relaxed);
+    BOOT_EL.store(el, Relaxed);
     let target = vboard::slots::mpidr(os);
     println!(
         "oscore: moving the kern from core {here} to core {os} (mpidr {target:#x}) HOPOS_OSCORE_MOVE"
@@ -252,8 +253,7 @@ fn move_to_os_core(board: &'static Machine, dtb: u64, el: u8) {
 /// en zijn pets horen bij de executor van deze core.
 fn moved(core: usize) -> ! {
     println!("oscore: the kern runs on core {core} HOPOS_OSCORE_UP");
-    let el = u8::try_from(BOOT_ARGS[1].load(Relaxed)).unwrap_or(0);
-    boot(&BOARD, BOOT_ARGS[0].load(Relaxed), el, watchdog::arm())
+    boot(&BOARD, BOOT_EL.load(Relaxed), watchdog::arm())
 }
 
 /// De boot vanaf de landing, op de OS-core: de executor en al zijn taken.
@@ -264,11 +264,11 @@ fn moved(core: usize) -> ! {
 /// zolang de kern leeft. Een plaatsing piekte daarop tot 186 van de 256 KB
 /// stack. [`setup`] bouwt alles in een eigen frame dat weg is vóór de
 /// executor draait; hier blijft alleen de slaper over.
-fn boot(board: &'static Machine, dtb: u64, el: u8, wd: watchdog::Armed) -> ! {
+fn boot(board: &'static Machine, el: u8, wd: watchdog::Armed) -> ! {
     let exec: &'static Executor = EXEC.get();
     // De deur van de switch om de slaper heen (`net::doorbell`): zonder
     // hem wachtte elk frame van een app op de failsafe van 1 ms.
-    let mut sleeper = net::doorbell(setup(board, dtb, el, wd));
+    let mut sleeper = net::doorbell(setup(board, el, wd));
     exec.run(&mut sleeper)
 }
 
@@ -285,19 +285,14 @@ fn boot(board: &'static Machine, dtb: u64, el: u8, wd: watchdog::Armed) -> ! {
 /// net (04-10, sinds 302d257 vier KB dieper; A13b en elke kern daarna).
 /// Los zijn het buren: de diepste boot is daar 156 KB, warm en koud.
 #[inline(never)]
-fn setup(
-    board: &'static Machine,
-    dtb: u64,
-    el: u8,
-    wd: watchdog::Armed,
-) -> <Machine as Board>::Sleeper {
-    // FLIP: de landing. Daarvóór gingen in `kmain` alleen de heap,
-    // `discover` (het board), de watchdog (`wd`, gewapend) en de verhuizing
-    // naar de OS-core. De boot
+fn setup(board: &'static Machine, el: u8, wd: watchdog::Armed) -> <Machine as Board>::Sleeper {
+    // FLIP: de landing. Daarvóór gingen in `kmain` alleen de heap, de
+    // feitenpagina, `discover` (het board), de watchdog (`wd`, gewapend) en
+    // de verhuizing naar de OS-core. De boot
     // hieronder is dezelfde reeks met of zonder overdracht; per stap begint
     // hij leeg, of neemt hij het stuk van de vorige kern over (flip.rs,
     // `Landing`).
-    let landing = flip::land(dtb);
+    let landing = flip::land();
 
     let exec: &'static Executor = EXEC.get();
     exec.set_clock(board.clock());

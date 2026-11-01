@@ -38,7 +38,8 @@
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use dev::Pa;
 
-/// De x0 van de firmware zoals de ingang hem zag (boot_args).
+/// De x0 van de firmware (boot_args): bij stroom aan wat de ingang zag, na
+/// een sprong wat de feitenpagina draagt.
 pub(crate) static FIRMWARE_X0: AtomicU64 = AtomicU64::new(0);
 
 /// De dockchannel-basis van de t8132, voor de eerste regel vóór alles
@@ -58,6 +59,15 @@ pub(crate) const DOCK_FALLBACK: u64 = 0x3_8812_8000;
     allow(dead_code) // alleen de ingang roept dit aan
 )]
 extern "C" fn apple_early(x0: u64, pool: u64) -> u64 {
+    // Na een sprong is x0 de feitenpagina (O6, `docs/flip.md`): kern A legde
+    // de boot_args erin en veegde hem naar DRAM, dus hij leest met de MMU
+    // uit. iBoot legt de boot_args onder het venster, nooit daar.
+    let facts = abi::layout::facts_pa(crate::slots::BOOT_SCRATCH_PA);
+    let x0 = if x0 == facts {
+        dev::read64(Pa(facts + abi::layout::FACTS_FIRMWARE))
+    } else {
+        x0
+    };
     FIRMWARE_X0.store(x0, Relaxed);
     let dock = Pa(DOCK_FALLBACK);
     crate::console::raw_line(dock, b"hopos x", x0);
@@ -187,8 +197,6 @@ __apple_head:
 _start_apple:
     msr daifset, #0xf
     mov x20, x0
-    // x3: het merkteken van een flip (cpu::boot::FLIP_ENTERED), na de BSS.
-    mov x22, x3
     mrs x21, CurrentEL
     lsr x21, x21, #2
     and x21, x21, #3
@@ -220,11 +228,6 @@ _start_apple:
     str xzr, [x3], #8
     b 2b
 3:
-    ldr x9, ={flip}
-    cmp x22, x9
-    cset x9, eq
-    adrp x10, {entered}
-    strb w9, [x10, :lo12:{entered}]
     cmp x21, #2
     b.ne 5f
 
@@ -291,8 +294,6 @@ __apple_tables:
     early = sym apple_early,
     magic = const STUB_MAGIC,
     mair = const cpu::boot::MAIR,
-    flip = const cpu::boot::FLIP_ENTRY,
-    entered = sym cpu::boot::FLIP_ENTERED,
     tcr_base = const crate::mmu::tcr(0),
     sctlr = const crate::mmu::SCTLR,
     tables = const crate::mmu::TABLES,

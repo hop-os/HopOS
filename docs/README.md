@@ -45,7 +45,7 @@ Elke ring kiest vrije host-poorten, dus twee runners botsen niet.
 | `sh tools/qemu-test-flip.sh` | de kern-flip: hopfs bevroren en gecommit, de NAT-flows gevangen, de sprong, Hop overleeft zonder herstart, en een uitgaande TCP-verbinding van een app (rol FLIPCONN) loopt door: drie antwoorden via kern A, drie via kern B, over één verbinding |
 | `MISMATCH=1 sh tools/qemu-test-flip.sh` | een bundel met een andere switch-code wordt vóór de sprong geweigerd (Hop geeft 502) |
 | `OSCORE=1 sh tools/qemu-test-flip.sh` | de flip vanaf een verhuisde kern (ook met `BOARD=uefi OSCORE=2`) |
-| `BOARD=rpi4 sh tools/qemu-test-flip.sh` | de flip-ingang van de Pi op raspi4b: een core met het merkteken komt tot de kern en leest de DTB opnieuw |
+| `BOARD=rpi4 sh tools/qemu-test-flip.sh` | de flip-ingang van de Pi op raspi4b: core 1 met x0 = de feitenpagina komt tot de kern en leest de DTB uit de pagina; met de DTB in x0 parkeert hij |
 | `sh tools/qemu-uefi-test.sh` | de EFI-stub op EDK2, ACPI, PCIe, virtio over PCI met MSI-X via de ITS (`nic=` loopt op in de tik), de hele appspike-keten |
 | `GUI=1 sh tools/qemu-uefi-test.sh` | hetzelfde met de GOP van EDK2 als console |
 | `sh tools/qemu-test-nvme.sh` | de NVMe-kern van de O6N en de Altra: het Altra-image op EDK2 met `-device nvme` en igb, appspike in slot 1 en 2 schrijft, leest terug en leest een bundel (`OP_READ_MANY`) door driver/nvme, met de wachtrij op MSI-X via de ITS (`HOPOS_NVME_UP`, `HOPOS_NVME_IRQ`, `HOPOS_APPSPIKE_FS ok`) |

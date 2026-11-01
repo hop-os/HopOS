@@ -16,8 +16,10 @@ Alleen de flip zelf (`hopos/src/flip.rs`, en `setup` in
 
 De code: `hopos/src/flip.rs` (de haak, de vangst, de sprong en de landing),
 `kern/src/kernflip.rs` (het blob, de bundel, de recorder),
-`cpu/src/el2/chain.rs` (de sprong), de ingangen (`cpu/src/boot.rs`,
-`board/uefi/src/entry.rs` en `flip.rs`, `board/raspi/src/arch.rs`,
+`cpu/src/el2/chain.rs` (de sprong), de feitenpagina
+(`abi::layout::facts_pa`, `kernflip::facts`), de poort van de ingangen
+(`cpu/src/boot.rs` `admits`, `board/uefi/src/entry.rs`; de UEFI-feiten in
+`board/uefi/src/flip.rs`, de boot_args van Apple in
 `board/apple/src/head.rs`), `image/flip-bundle.sh` (de bundel) en de
 `FLIP_*`-blokken in `board/*/src/slots.rs` (de adressen).
 
@@ -74,9 +76,9 @@ er nog, zonder gebruiker.
 
 ## Het blob
 
-`kern::kernflip::Handoff`, versie 7 (`FLIP_ABI` 4), op `FLIP_HANDOFF_PA`
-(direct onder het staging-maatwoord), met het pointer/magic-paar als
-laatste op de boot-scratch. De kop is 80 bytes:
+`kern::kernflip::Handoff`, versie 7 (`FLIP_ABI` 5), op `FLIP_HANDOFF_PA`
+(direct onder het staging-maatwoord), met zijn adres als laatste in de
+feitenpagina (de ene ingang, hieronder). De kop is 80 bytes:
 
 | Woord | Wat |
 | --- | --- |
@@ -89,31 +91,36 @@ laatste op de boot-scratch. De kop is 80 bytes:
 Daarachter de bewoners (`SlotState`: partitie, core, SMP-breedte, groep,
 poorten, job, volumes). Versie 7 kwam op 01-11: de conntrack, de koude
 vlag en de nulwoorden van oudere vormen gingen eruit, net als de vier
-recorder-stappen zonder schrijver. `FLIP_ABI` 4 laat een kern van 3.0.20
-(ABI 3) zo'n bundel weigeren vóór de 202; zo'n node komt naar deze vorm
-via zijn bootmedium, niet via een flip.
+recorder-stappen zonder schrijver. `FLIP_ABI` 4 liet een kern van 3.0.20
+(ABI 3) zo'n bundel weigeren vóór de 202; `FLIP_ABI` 5 (01-11, de ene
+ingang) doet hetzelfde met een kern die nog met x3 = `HOPFLIPE` springt.
+Zo'n node komt naar deze vorm via zijn bootmedium, niet via een flip.
 
 ## Inventaris: wie weet van de flip (01-11)
 
 Gemeten met een grep op `flip|handoff|adopt` in code (geen commentaar,
-geen toetsen): 45 bestanden op de start van deze ronde (4461670), 43 na
-de ronde, buiten `flip.rs` en `kernflip.rs` (weg: `net/src/nat.rs`,
+geen toetsen): 45 bestanden op de start van de vorige ronde (4461670), 43 na
+die ronde, buiten `flip.rs` en `kernflip.rs` (weg: `net/src/nat.rs`,
 `switch.rs`, `kern/src/nodecfg.rs`; erbij: `hopos/src/net.rs`, de lease); weggelaten zijn de woorden
 die iets anders betekenen (`cpu/src/smp.rs` `Handoff`, de `adopt_*` van
-applib) en de toetsrol FLIPCONN van appspike. Het getal zakt weinig: de
+applib) en de toetsrol FLIPCONN van appspike. Met de ene ingang (O6) gingen
+er nog drie af: 46 op 4dc42af, 43 erna (dezelfde grep, ook over de
+toetsbestanden die geen `mod tests` zijn; weg: `cpu/src/boot.rs`,
+`cpu/src/el2/chain.rs` en `board/apple/src/head.rs`, die nu alleen een
+adres vergelijken of lezen). Het getal zakt weinig: de
 meeste plekken zijn de adressen van het board (`FLIP_*` in elk
 `slots.rs`) en de adoptie van het hok, en die horen erbij. Wat weg is, zijn
 de takken: geen `flip::landed()`, geen `adopted_ok`, geen koude weg, geen
-conntrack.
+conntrack, geen merkteken in x3 en geen `Stale`.
 
 | Waar | Wat | Kant |
 | --- | --- | --- |
 | `kern/src/system.rs` | `PrivOp::Flip` (n moet 0 zijn), `FlipBundle`, `FLIP_BUNDLE_JOB`, `MAX_FLIP_PATH` bij een start | de haak |
 | `abi/src/systemapi.rs` | `FLIP_BUNDLE_JOB` | de haak |
-| `abi/src/layout` | `FLIP_HANDOFF_LEN`, `HANDOFF_*_OFF`, `flip_handoff_pa` | adressen |
+| `abi/src/layout` | `FLIP_HANDOFF_LEN`, `FACTS_*`, `facts_pa`, `flip_handoff_pa` | adressen, ingang |
 | `board/*/src/slots.rs`, `board/uefi/src/flip.rs`, `facts.rs` | `FLIP_*`, `BLACK_BOX`, de feitenpagina van UEFI | adressen, ingang |
 | `board/*` | `flip_carry_config` (Apple), `flip_carry_seed` (UEFI) | vangst |
-| `cpu/src/boot.rs`, `board/raspi/src/arch.rs`, `board/apple/src/head.rs`, `board/uefi/src/entry.rs` | x3 = `FLIP_ENTRY`, `FLIP_ENTERED`, x1 = 0 op UEFI | ingang (O6, nog niet) |
+| `board/uefi/src/entry.rs` | x0 = de feitenpagina: de flip-ingang naar de UEFI-feiten | ingang |
 | `cpu/src/el2/chain.rs`, `dispatch.rs` | `relocate`, `chain`, `installed_hash`, `adopt` | sprong, hok |
 | `hopos/src/storage.rs` | `freeze_for_flip`; `start(keep)` | opslag |
 | `hopos/src/usb.rs`, `telemetry.rs`, `watchdog.rs` | `quiesce`, de klok vol, een aai | vangst |
@@ -124,41 +131,53 @@ conntrack.
 | `hopos/src/main.rs` | `setup` deelt de stukken uit, `hop_adopted` | de reeks |
 | `kern/src/rpc.rs` | `Freeze` | opslag |
 
-## De ene ingang (O6): nog niet gebouwd
+## De ene ingang (O6)
 
-Nu zijn er drie merktekens: x3 = `FLIP_ENTRY` (de DTB-boards en Apple),
-x1 = 0 plus de feitenpagina (UEFI), en geen (riscv). Het merkteken doet
-twee dingen: het laat een andere core dan core 0 door (de OS-core), en het
-zegt "dit is een sprong, geen firmware-boot" (een oud paar na een
-watchdog-reset adopteert nooit, O6N 04-10).
+Kern B start via dezelfde ingang als bij stroom aan, met dezelfde
+feitenpagina (Derek, 01-11: generiek, overal dezelfde ingang, x3 weg). Er is
+één merkteken op elk arm64-board: **x0 = de feitenpagina**.
 
-De vorm die we zoeken: **x0 = de feitenpagina, op elk board.**
+1. **De pagina** staat op de boot-scratch van elk board
+   (`abi::layout::facts_pa`: boot-scratch + `0x80`, waar tot 01-11 het
+   pointer/magic-paar stond), buiten de kern-RAM en de pool. Twee woorden:
+   de handoff (het adres van het blob, of 0) en wat de firmware bij stroom
+   aan in x0 gaf (de DTB, de boot_args van Apple; op UEFI 0, de feiten van
+   de stub staan daar in een eigen pagina, `FLIP_FACTS_PA`).
+2. **Stroom aan:** de firmware geeft iets anders in x0, en `kmain` bouwt de
+   pagina vóór `discover` opnieuw, met handoff 0 (`flip::facts`,
+   `kernflip::facts`). Een oude handoff (een sprong die niet landde, een
+   reset na een landing, O6N 04-10) gaat zo vanzelf weg: geen `Stale` meer,
+   geen wissen bij het lezen.
+3. **Kern A** legt het blob neer, zet de handoff in de pagina en veegt hem
+   naar DRAM (`kernflip::hand_over`), en springt met x0 = de pagina, x1 tot
+   x3 nul (`cpu::el2::chain`).
+4. **De ingang** toetst x0 tegen het vaste adres: een
+   register-vergelijking, geen lees op een adres dat de firmware gaf, met
+   de MMU uit. Gelijk: een sprong, en elke core mag door (de OS-core is
+   niet per se core 0). Anders: de firmware, en alleen core 0
+   (`cpu::boot::admits`). Geen firmware geeft dat adres: het
+   Linux-bootprotocol zet de DTB of 0 in x0, UEFI de ImageHandle (de
+   pagina ligt in het kernvenster dat de stub pas daarna alloceert), iBoot
+   de boot_args onder het venster van de M4.
+5. **Een koude boot is een boot zonder handoff.** `flip::land` leest het
+   blob alleen als de pagina een handoff draagt; een handoff die niet op
+   het blob wijst, of een blob dat niet decodeert, is `HOPOS_FLIP_BLOB_BAD`
+   (er leven misschien bewoners).
 
-1. Elk board heeft een feitenpagina op een vaste plek naast de recorder
-   (zoals `FLIP_FACTS_PA` op UEFI): magic, versie, wat de firmware gaf (de
-   DTB, de ADT van Apple, op UEFI de tabellen en de memory map), het
-   venster van het koude beeld, en één veld meer: **waar de handoff ligt,
-   of nul**.
-2. Bij stroom aan bouwt de ingang (of `kmain`, vóór `discover`) die pagina
-   uit wat de firmware gaf, met handoff nul. UEFI doet dat al (`prepare`
-   en `go`).
-3. Kern A zet het handoff-veld en springt met x0 = het adres van de
-   pagina, x1 tot x3 nul.
-4. De ingang toetst x0 tegen het vaste adres (een register-vergelijking,
-   geen lees op een adres dat de firmware gaf, met de MMU uit). Gelijk: een
-   sprong, elke core mag door, en `discover` leest de pagina. Anders: de
-   firmware, alleen core 0, en de pagina wordt opnieuw gebouwd (een oude
-   handoff gaat dan vanzelf weg: geen `Stale` meer nodig).
-5. Het pointer/magic-paar op de boot-scratch vervalt: het handoff-veld is
-   het paar.
+Per ingang:
 
-Wat het kost: de vijf ingangen (asm), de trampoline, `discover` per board
-(de DTB uit de pagina), een `FLIP_ABI`-stap (een kern A van nu springt met
-x3, en een kern B van de nieuwe vorm zou dat als firmware-boot lezen, over
-levende bewoners heen; `FLIP_ABI` 4 laat kern A zo'n bundel weigeren vóór
-de 202), en `BOARD=rpi4` krijgt een andere stub. Ongetoetst blijft de M4
-(geen QEMU) en het ijzer van de Pi 5, de O6N en de Altra. Daarom niet in
-deze ronde: eerst de vraag aan Derek (hieronder).
+| Ingang | Board | Wat er met x0 gebeurt |
+| --- | --- | --- |
+| `cpu::boot` `_start` | QEMU virt, Radxa (U-Boot `booti`), de Pi's na `_pi_start` | de poort (`admits` tegen `__hopos_facts`, een absoluut symbool van de binary), x0 ongeschonden naar `kmain` |
+| `board/raspi` `_pi_start` | Pi 4, Pi 5 | x0 in x20 over het kladwerk heen naar `_start` (tot 01-11 ook x3 in x22) |
+| `board/uefi` `_start_efi` | QEMU/EDK2, O6N, Altra | x0 = de pagina: de flip-ingang (de UEFI-feiten terug, `hopos_efi_flip_facts`), en `kmain` krijgt de pagina; anders de koude stub en `kmain(0)` |
+| `board/apple` `_start_apple` | Mac mini M4 | geen poort (de andere cores wachten in de brievenbus); `apple_early` leest de boot_args uit de pagina, met de MMU uit, en `kmain` krijgt de pagina |
+| `cpu::riscv::boot` | QEMU virt riscv64, LicheeRV | niets: riscv64 flipt niet en heeft geen pagina (`flip::FLIPS`); de haak weigert vóór de 202 |
+
+`FLIP_ABI` is 5: een kern A van ABI 4 springt met x3 en de DTB in x0, en een
+kern B van deze vorm zou dat als een firmware-boot lezen (op een andere
+core dan 0 parkeren, op core 0 koud over levende bewoners heen). Kern A
+weigert zo'n bundel vóór de 202, in beide richtingen.
 
 ## De procedure, voor elk board
 
@@ -216,41 +235,39 @@ dezelfde HMAC als een jobspec (met `hopos.insecure=1` zonder).
 Wat per board eerst te kijken is, morgen op het ijzer:
 
 - **UEFI, O6N, Altra.** Een geflipte kern komt binnen zonder firmware:
-  `_start_efi` ziet x1 = 0 en leest de feiten van de koude stub uit de
-  feitenpagina (`FLIP_FACTS_PA`, `board/uefi/src/flip.rs`). Die pagina
-  schrijft alleen een stub van déze versie. Boot de node dus eerst koud van
-  een stick met deze code; een kern van vóór de flip-ingang (tag v3.0.0-alpha.7 en ouder) heeft geen feitenpagina,
-  en een flip vanaf zo'n kern parkeert de nieuwe kern zonder één regel
-  (zie de faalmodi). Na de flip staat er geen `HOPOS_UEFI_STUB` op de
-  console: er is geen ConOut meer, de eerste regel is de bunny. De nieuwe
-  kern moet in de maat van de oude passen (`image too large` anders).
-- **Pi 4, Pi 5.** (De ingang van nu; zie "De ene ingang" voor de vorm
-  die we zoeken.) De nieuwe kern komt binnen op `_pi_start` met x0 = de
-  DTB-pointer die de firmware de eerste kern gaf, x1 = x2 = 0 en x3 =
-  `cpu::boot::FLIP_ENTRY` ("HOPFLIPE"), op de core waar de oude kern
-  draaide. De ingang aanvaardt een andere core dan core 0 alleen met dat
-  merkteken: `_start` laat bij een koude boot alleen affiniteit 0 door
-  (een firmware die alle cores loslaat, krijgt één kern), en `_pi_start`
-  houdt x3 vast over zijn kladwerk heen (x22). De feitenpagina van de Pi
-  is de DTB zelf: de firmware legde hem in het laadvenster
+  `_start_efi` ziet x0 = de feitenpagina en leest de feiten van de koude
+  stub uit de UEFI-pagina (`FLIP_FACTS_PA`, `board/uefi/src/flip.rs`). Die
+  pagina schrijft alleen een stub van déze versie. Boot de node dus eerst
+  koud van een stick met deze code; een kern met de oude ingang (x1 = 0,
+  `FLIP_ABI` 4) weigert de bundel vóór de 202. Na de flip staat er geen
+  `HOPOS_UEFI_STUB` op de console: er is geen ConOut meer, de eerste regel
+  is de bunny. De nieuwe kern moet in de maat van de oude passen (`image
+  too large` anders).
+- **Pi 4, Pi 5.** De nieuwe kern komt binnen op `_pi_start` met x0 = de
+  feitenpagina (`0x0F10_0080`, de boot-scratch in het laadvenster) en x1
+  tot x3 nul, op de core waar de oude kern draaide. `_pi_start` geeft x0
+  door (x20), en `_start` laat een andere core dan core 0 alleen met dat
+  adres door. De pagina draagt de DTB-pointer die de firmware de eerste
+  kern gaf: de firmware legde de DTB in het laadvenster
   (`device_tree_address`), buiten de kern-RAM en de pool, en de oude kern
   toetst vóór de sprong dat daar nog een FDT-kop staat
   (`HOPOS_FLIP_REFUSED firmware DTB gone`). Bewezen op QEMU raspi4b
-  (29-09, `BOARD=rpi4 sh tools/qemu-test-flip.sh`): core 1 met het
-  merkteken komt door `_pi_start` en `_start` tot kmain en leest dezelfde
-  DTB een tweede keer (`fdt:`, `mem:`, `vcmail:`); zonder merkteken
-  parkeert hij na `P2`. De Pi houdt zijn kern op core 0
-  (`board_raspi::os_core`, de SPI-route van de GIC-400), dus op ijzer landt
-  een flip altijd op core 0; een kern die elders landt, verhuist terug
-  (`HOPOS_OSCORE_MOVE`). Op ijzer eerst kijken: de 'P2' en de bunny na
-  `HOPOS_FLIP_JUMP`, en `fdt:` met hetzelfde adres. De staging is de plek
-  van het initramfs van Hop; het nieuwe beeld gaat erachter, zodat Hop er
-  blijft liggen voor een herstart van Hop op de nieuwe kern.
+  (`BOARD=rpi4 sh tools/qemu-test-flip.sh`): core 1 met x0 = de pagina komt
+  door `_pi_start` en `_start` tot kmain en leest dezelfde DTB uit de
+  pagina (`fdt:`); met de DTB in x0, zoals de firmware, parkeert hij na
+  `P2`. De Pi houdt zijn kern op core 0 (`board_raspi::os_core`, de
+  SPI-route van de GIC-400), dus op ijzer landt een flip altijd op core 0;
+  een kern die elders landt, verhuist terug (`HOPOS_OSCORE_MOVE`). Op ijzer
+  eerst kijken: de 'P2' en de bunny na `HOPOS_FLIP_JUMP`, en `fdt:` met
+  hetzelfde adres als bij de koude boot. De staging is de plek van het
+  initramfs van Hop; het nieuwe beeld gaat erachter, zodat Hop er blijft
+  liggen voor een herstart van Hop op de nieuwe kern.
 - **Radxa.** De ingang is `_start` zelf (U-Boot `booti`), met dezelfde
   poort als virt: `OSCORE=1 sh tools/qemu-test-flip.sh` bewijst een flip
   vanaf core 1 op precies die code. De DTB en de initrd (`hopos.cfg`)
-  liggen in gaten van de pool (`FW_HOLES`), dus ook daar is de DTB de
-  feitenpagina.
+  liggen in gaten van de pool (`FW_HOLES`), en de feitenpagina op de
+  boot-scratch in het structuurvenster (`0x062E_0080`) draagt het adres van
+  de DTB.
   De trampoline staat in de kern-RAM (de bovenste heap-pagina):
   het enige uitvoerbare RAM buiten de pool. `cpu::el2::chain` staat dat toe
   zolang het beeld hem niet raakt. Eerst bewijzen dat de heap die pagina op
@@ -259,6 +276,14 @@ Wat per board eerst te kijken is, morgen op het ijzer:
   `holes_are_reused_before_the_tail`), dus die pagina raakt hij pas als
   zijn gebied bijna vol is; ook dan weigert de flip niet, maar overschrijft
   hij die pagina vlak voor de sprong, en daarna leest niemand hem meer.
+- **Mac mini M4.** De nieuwe kern komt binnen op `_start_apple` met x0 =
+  de feitenpagina op de boot-scratch (`LOADER` + `0x80`); `apple_early`
+  leest daar met de MMU uit de boot_args van iBoot, en `kmain` krijgt de
+  pagina. iBoot legt het bootobject bij elke firmware-boot terug over de
+  boot-scratch, en dat mag: bij stroom aan komt de pagina er toch opnieuw.
+  Op ijzer eerst kijken: de eerste regel op de dockchannel (`hopos x`) na
+  `HOPOS_FLIP_JUMP` draagt dezelfde boot_args als bij de koude boot, en de
+  kaart en de pool van `fwinfo` zijn die van de koude boot.
 
 ## De faalmodi
 
@@ -269,7 +294,7 @@ Vóór de 202 is elke fout een weigering (`HOPOS_FLIP_REFUSED <reden>`,
 | --- | --- |
 | `sha256 mismatch` | de bytes zijn niet wat de som zegt |
 | `bundle invalid` | geen HOPRELO1-staart, een afgekapte stroom, een beeld buiten de grenzen, een relocatie die niet klopt |
-| `bundle carries no switch code sum`, `flip ABI mismatch` | een bundel van een andere vorm (een kern van ABI 3 weigert een bundel van ABI 4, en omgekeerd) |
+| `bundle carries no switch code sum`, `flip ABI mismatch` | een bundel van een andere vorm (een kern van ABI 4 weigert een bundel van ABI 5, en omgekeerd) |
 | `switch code mismatch` | de EL2-switch-code is een andere dan die waarin de bewoners draaien |
 | `image too large` | het beeld past niet in de staging of op het koude adres |
 | `jump layout` | de trampoline, de vensters of de kopie van de sprong kloppen niet (`Jump::check`) |
@@ -284,7 +309,7 @@ beginnen opnieuw, hopfs houdt hun volumes):
 | Marker na `HOPOS_FATAL` | Waar |
 | --- | --- |
 | `HOPOS_FS_FREEZE_FAIL`, `HOPOS_FLIP_FAIL` | kern A: de vangst of de sprong |
-| `HOPOS_FLIP_BLOB_BAD` | kern B: het paar was geldig maar het blob niet |
+| `HOPOS_FLIP_BLOB_BAD` | kern B: de feitenpagina draagt een handoff, maar die wijst niet op het blob, of het blob decodeert niet |
 | `HOPOS_FLIP_ADOPT_FAIL` | kern B: de cage, een bewoner of de lifecycle weigert de adoptie |
 | `HOPOS_NIC_FAIL`, `HOPOS_NET_FAIL` | kern B: het net komt niet terug |
 
@@ -292,7 +317,6 @@ En verder:
 
 | Marker | Wat er gebeurt |
 | --- | --- |
-| `HOPOS_FLIP_STALE` | een firmware-boot vond nog een geldig paar: gewist en niet gelezen, de boot is koud |
 | niets na `HOPOS_FLIP_JUMP` | kern B hangt vóór zijn console; alleen een hardware-watchdog helpt. De volgende koude boot zegt waar het stopte |
 | `HOPOS_FLIP_LAST`, `HOPOS_FLIP_ARCHIVED` | op de volgende koude boot: de stap waar de laatste flip stopte, en de poging daarvoor |
 | `HOPOS_CONSOLE_CARRIED` | bij elke boot, als eerste regel: hoeveel bytes van een vorige kern nog in de console-ring staan; `nc NODE 5555` speelt ze af vóór de nieuwe boot (de zwarte doos, hieronder) |

@@ -1,6 +1,7 @@
 //! De boot-stub: van de eerste instructie tot `kmain`.
 //!
-//! `_start` doet precies wat Rust nog niet kan: alleen core 0 gaat door,
+//! `_start` doet precies wat Rust nog niet kan: alleen core 0 gaat door (of
+//! de core van een sprong, [`admits`]),
 //! de stack komt op zijn plek, BSS wordt gewist, en op EL2 gaan de vectoren
 //! en de MMU aan. Daarna `kmain(dtb, el)`, dat de binary levert.
 //!
@@ -20,7 +21,9 @@
 //! - `__stack_guard`: de pagina direct onder de boot-stack (4 KB-gealigneerd,
 //!   de stack begint erboven). De stub maakt hem ongeldig in de map (zie
 //!   de wachtpagina hieronder);
-//! - `kmain`: `extern "C" fn(dtb: u64, el: u64) -> !`;
+//! - `kmain`: `extern "C" fn(x0: u64, el: u64) -> !`;
+//! - `__hopos_facts`: het adres van de feitenpagina van de flip (de binary,
+//!   `hopos/src/flip.rs`), een absoluut symbool voor de poort hieronder;
 //! - `__heap_start`, `__heap_end`: de heap ([`heap_bounds`]), achter image,
 //!   BSS en stack. Ook in de riscv-linkscripts; de UEFI-boards nemen hun
 //!   heap uit de EFI-allocatie en noemen deze symbolen niet.
@@ -47,8 +50,6 @@
 //!
 //! De MMU-attributen staan hier vast, zodat elk board dezelfde indexen
 //! gebruikt: [`ATTR_DEVICE`], [`ATTR_NORMAL`], [`ATTR_NORMAL_NC`].
-
-use core::sync::atomic::AtomicBool;
 
 /// MAIR-index 0: Device-nGnRnE (MMIO).
 pub const ATTR_DEVICE: u64 = 0;
@@ -133,41 +134,22 @@ pub unsafe fn guard_page(l2_entry: dev::Pa, l3: dev::Pa, guard: u64) -> bool {
     true
 }
 
-/// Het merkteken van een kern-flip in x3 bij de ingang ("HOPFLIPE"
-/// little-endian): de trampoline van `cpu::el2::chain` zet het, geen
-/// firmware doet dat (het Linux-bootprotocol eist x1 tot en met x3 nul, en
-/// de Pi-firmware, U-Boot en QEMU houden zich daaraan).
-///
-/// Waarom: `_start` laat bij een koude boot alleen de core met affiniteit 0
-/// door; een firmware die alle cores op de ingang loslaat, krijgt zo één
-/// kern en een parkeerlus. Een geflipte kern springt vanaf de OS-core, en
-/// die is niet per se core 0 (`hopos.oscore`, PORT.md beslissing 2): zonder
-/// dit merkteken parkeerde de nieuwe kern zich zonder één regel (29-09,
-/// gezien in de ingang, niet op ijzer). Met het merkteken mag elke core
-/// door; er komt er ook maar één, want de app-cores draaien in de
-/// switch-code in de plan-regio en raken het beeld nooit.
-pub const FLIP_ENTRY: u64 = 0x4550_494C_4650_4F48;
-
-/// Kwam deze kern binnen met [`FLIP_ENTRY`] in x3, dus uit de trampoline van
-/// een flip en niet uit de firmware? De ingang zet het na het wissen van de
-/// BSS (`_start` hieronder en `_start_apple`; op UEFI de flip-ingang, x1 = 0).
-///
-/// Waarom: een overdracht in het geheugen hoort alleen bij de sprong die
-/// deze kern bracht. Na een harde reset (de watchdog) ligt het blob van een
-/// eerdere sprong er nog, maar de firmware zet geen merkteken; die boot is
-/// koud, en adopteert niemand (gezien 04-10 op de O6N: de stickkern adopteerde
-/// de overdracht van een flip die al geland was). Zo doet Linux het ook: de
-/// kexec'ende kern geeft de kdump-kern `elfcorehdr=` mee, een herstart via de
-/// firmware krijgt dat niet, wat er ook nog in het geheugen staat.
-pub static FLIP_ENTERED: AtomicBool = AtomicBool::new(false);
-
 /// De poort van `_start`, als Rust: gaat een core met MPIDR-affiniteit
-/// `aff` en `x3` bij de ingang door naar `kmain`? De assembly hieronder is
-/// dezelfde beslissing in vier instructies; deze vorm is er voor de
-/// host-tests.
+/// `aff` en `x0` bij de ingang door naar `kmain`, op een board met de
+/// feitenpagina op `facts`? De assembly hieronder is dezelfde beslissing;
+/// deze vorm is er voor de host-tests.
+///
+/// Bij stroom aan alleen de core met affiniteit 0: een firmware die alle
+/// cores op de ingang loslaat, krijgt zo één kern en een parkeerlus. Een
+/// geflipte kern springt vanaf de OS-core, en die is niet per se core 0
+/// (`hopos.oscore`, PORT.md beslissing 2), met x0 = de feitenpagina (O6,
+/// `docs/flip.md`): dat adres geeft geen firmware (het Linux-bootprotocol
+/// zet daar de DTB, of 0), dus elke core met dat adres mag door. Er komt er
+/// ook maar één, want de app-cores draaien in de switch-code in de
+/// plan-regio en raken het beeld nooit.
 #[must_use]
-pub const fn admits(aff: u64, x3: u64) -> bool {
-    aff & 0xff_ffff == 0 || x3 == FLIP_ENTRY
+pub const fn admits(aff: u64, x0: u64, facts: u64) -> bool {
+    aff & 0xff_ffff == 0 || x0 == facts
 }
 
 /// Parkeert deze core voor altijd: een WFE-lus, zodat hij niets verbruikt
@@ -247,10 +229,10 @@ mod arch {
     }
 }
 
-// De stub. Registers: x19 = MPIDR-affiniteit, x20 = DTB (x0 van de
-// firmware), x21 = het EL. x3 = [`FLIP_ENTRY`] laat elke core door
-// ([`admits`]): een geflipte kern komt op de OS-core binnen; na de BSS gaat
-// het merkteken in [`FLIP_ENTERED`].
+// De stub. Registers: x19 = MPIDR-affiniteit, x20 = x0 van de ingang (de
+// DTB van de firmware, of na een sprong de feitenpagina), x21 = het EL.
+// x0 = `__hopos_facts` laat elke core door ([`admits`]): een geflipte kern
+// komt op de OS-core binnen.
 //
 // TCR_EL2 (niet-VHE): T0SZ = 25 (39-bit VA, start op niveau 1), IRGN0 en
 // ORGN0 = WB-WA, SH0 = inner, TG0 = 4 KB, PS uit ID_AA64MMFR0_EL1.PARange,
@@ -270,8 +252,8 @@ core::arch::global_asm!(
 _start:
     mrs x19, mpidr_el1
     and x19, x19, #0xffffff
-    ldr x9, ={flip}
-    cmp x3, x9
+    ldr x9, =__hopos_facts
+    cmp x0, x9
     b.eq 8f
     cbnz x19, 9f
 8:
@@ -293,12 +275,6 @@ _start:
     str xzr, [x1], #8
     b 1b
 2:
-    // x3 is nog die van de ingang: het merkteken in FLIP_ENTERED.
-    ldr x9, ={flip}
-    cmp x3, x9
-    cset x9, eq
-    adrp x10, {entered}
-    strb w9, [x10, :lo12:{entered}]
     cmp x21, #2
     b.ne 3f
 
@@ -378,8 +354,6 @@ _start:
     .ltorg
 "#,
     mair = const MAIR,
-    flip = const FLIP_ENTRY,
-    entered = sym FLIP_ENTERED,
 );
 
 // De niveau-3-tabel van de wachtpagina: 4 KB in de BSS, gevuld door de stub
@@ -411,19 +385,25 @@ mod tests {
 
     #[test]
     fn only_core_zero_boots_cold_and_any_core_lands_a_flip() {
-        // Koud: de core met affiniteit 0, en alleen die.
-        assert!(admits(0, 0));
-        assert!(!admits(1, 0), "a second core must park on a cold boot");
-        assert!(!admits(0x100, 0), "Pi 5: core 1 is aff1 = 1");
+        let facts = 0xB000_0080;
+        // Koud: de core met affiniteit 0, en alleen die, wat x0 ook is.
+        assert!(admits(0, 0, facts));
+        assert!(admits(0, 0x4000_0000, facts), "the DTB of the firmware");
+        assert!(
+            !admits(1, 0, facts),
+            "a second core must park on a cold boot"
+        );
+        assert!(
+            !admits(0x100, 0x4000_0000, facts),
+            "Pi 5: core 1 is aff1 = 1"
+        );
         // Een flip vanaf de OS-core: core 2 op virt, core 1 op de Pi 5.
-        assert!(admits(2, FLIP_ENTRY));
-        assert!(admits(0x100, FLIP_ENTRY));
-        // Alleen het volle merkteken; rommel in x3 is geen flip.
-        assert!(!admits(3, FLIP_ENTRY ^ 1));
-        assert!(!admits(3, u64::from(FLIP_ENTRY as u32)));
+        assert!(admits(2, facts, facts));
+        assert!(admits(0x100, facts, facts));
+        // Alleen het adres zelf; rommel in x0 is geen flip.
+        assert!(!admits(3, facts + 8, facts));
         // De bovenste bits van MPIDR (U, MT, RES1) tellen niet mee.
-        assert!(admits(0x8000_0000, 0));
-        assert_eq!(&FLIP_ENTRY.to_le_bytes(), b"HOPFLIPE");
+        assert!(admits(0x8000_0000, 0, facts));
     }
 
     #[test]

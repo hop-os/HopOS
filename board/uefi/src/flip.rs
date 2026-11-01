@@ -1,7 +1,8 @@
 //! De kern-flip op UEFI: de feiten van de stub voor een kern die zonder
 //! firmware binnenkomt (`hopos/src/flip.rs`, `docs/flip.md`).
 //!
-//! Een geflipte kern begint in `_start_efi` met x1 = 0: er is geen
+//! Een geflipte kern begint in `_start_efi` met x0 = de feitenpagina van
+//! elk board (O6, `abi::layout::facts_pa`, met de handoff): er is geen
 //! SystemTable meer, de boot services zijn al bij de koude boot verlaten.
 //! Alles wat de stub toen over de machine leerde ([`crate::facts`]: ACPI, de
 //! memory map, de config, het image, de identity map) staat in de BSS van
@@ -172,13 +173,9 @@ fn take_seed() {
 
 /// De flip-ingang, met de MMU van de pagina aan en vóór `kmain`: de feiten
 /// terug in de statics van DEZE kern. De assembly toetste de magic al.
-///
-/// Alleen een sprong komt hier (x1 = 0, geen SystemTable): dit is het
-/// merkteken van een flip op UEFI (`cpu::boot::FLIP_ENTERED`).
 #[unsafe(no_mangle)]
-extern "C" fn hopos_efi_flip_facts(pa: u64) {
-    cpu::boot::FLIP_ENTERED.store(true, Relaxed);
-    if pa != FLIP_FACTS_PA || dev::read64(at(W_VERSION)) != FACTS_VERSION {
+extern "C" fn hopos_efi_flip_facts() {
+    if dev::read64(at(W_VERSION)) != FACTS_VERSION {
         return;
     }
     let w = |i: u64| dev::read64(at(W_CORES + i));

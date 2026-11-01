@@ -51,7 +51,7 @@ na het lezen nog een keer apart tegen de code is gehouden.
 ```
 firmware ─► boot-stub (cpu::boot | uefi entry | apple head | riscv boot)
             stack, BSS, [vectoren, EL2-regime, MMU]
-         ─► kmain: console, bunny, EL2-toets, heap, discover
+         ─► kmain: console, bunny, EL2-toets, heap, feitenpagina, discover
          ─► move_to_os_core  (start de OS-core, boot-core wacht in el2::hold)
          ─► setup  (in een eigen frame dat weg is vóór de executor draait)
               flip::land ─ klok ─ conport ─ wandklok ─ zaad ─ Privilege
@@ -86,34 +86,39 @@ de reden zijn:
 
 ## 2. Stroom aan tot `kmain`
 
-Er zijn vier ingangen. Alle vier eindigen in `kmain(dtb, el)` in
-`hopos/src/main.rs`.
+Er zijn vier ingangen. Alle vier eindigen in `kmain(x0, el)` in
+`hopos/src/main.rs`. Een flip komt door dezelfde ingang binnen als stroom
+aan, met x0 = de feitenpagina op de boot-scratch (O6, 01-11,
+`docs/flip.md`): de handoff, of nul, en wat de firmware bij stroom aan gaf.
+`kmain` leest de pagina vóór `discover` (`flip::facts`), en bouwt hem bij
+stroom aan opnieuw, met handoff nul. Een koude boot is een boot zonder
+handoff.
 
 ### 2.1 `cpu/src/boot.rs` `_start` (qemuvirt, rk3566; de Pi via `_pi_start`)
 
-1. **De poort.** Een core met affiniteit ≠ 0 parkeert voorgoed in een
-   wfe-lus, zonder stack. Behalve als x3 = `FLIP_ENTRY`.
+1. **De poort** (`admits`). Een core met affiniteit ≠ 0 parkeert voorgoed
+   in een wfe-lus, zonder stack. Behalve als x0 = de feitenpagina
+   (`__hopos_facts`, een absoluut symbool van de binary): een
+   register-vergelijking, geen lees.
    - **Waarom:** een firmware die alle cores loslaat, geeft zo toch één kern.
      Een flip komt van de OS-core, en die is niet per se core 0 (29-09).
-2. x20 = DTB, x21 = CurrentEL, sp = `__stack_top`, BSS op nul.
-3. **`FLIP_ENTERED` = (x3 == `FLIP_ENTRY`).**
-   - **Verplicht:** ná de BSS (anders gewist) en vóór x3 hergebruikt wordt.
-   - **Waarom:** een harde reset laat een oud handoff-blob liggen. Alleen een
-     echte sprong mag adopteren (d7b82c9, O6N 04-10).
-4. Is het EL niet 2, dan meteen naar `kmain`. Die meldt het luid en
+     Geen firmware geeft dat adres in x0 (de DTB, of 0).
+2. x20 = x0, x21 = CurrentEL, sp = `__stack_top`, BSS op nul.
+3. Is het EL niet 2, dan meteen naar `kmain`. Die meldt het luid en
    parkeert.
-5. VBAR_EL2, HCR_EL2 (RW|IMO|FMO|AMO), MAIR, TCR (39 bit, 4 KB).
+4. VBAR_EL2, HCR_EL2 (RW|IMO|FMO|AMO), MAIR, TCR (39 bit, 4 KB).
    - **Waarom IMO:** zonder IMO wordt een IRQ op EL2 nooit genomen.
    - De plek van VBAR (vóór de MMU; UEFI en Apple doen het erna): *geen
      reden gedocumenteerd* [S1].
-6. **De wachtpagina onder de stack**, met de MMU nog uit.
+5. **De wachtpagina onder de stack**, met de MMU nog uit.
    - **Waarom:** een stackoverloop schreef stil in `.bss` (5682072, 30-09).
    - **Verplicht:** vóór SCTLR.M=1, want dan is break-before-make niet nodig.
-7. TTBR0, `tlbi`, SCTLR (M|C|I|SA), `kmain`.
+6. TTBR0, `tlbi`, SCTLR (M|C|I|SA), `kmain`.
 
 De Pi heeft een eigen stap ervóór, `board/raspi/src/arch.rs` `_pi_start`:
 
-- x3 bewaren in x22 (voor de flip).
+- x0 bewaren in x20 (de DTB, of na een sprong de feitenpagina), en
+  ongeschonden door naar `_start`.
 - Een 'P' op de UART.
 - De Linux-`init_el2`-set: MDCR, CPTR, HSTR, VTTBR=0, CNTHCTL, CNTVOFF.
 - `dc ivac` boven 0x80000.
@@ -122,8 +127,10 @@ De Pi heeft een eigen stap ervóór, `board/raspi/src/arch.rs` `_pi_start`:
 
 ### 2.2 UEFI (generiek, O6N, Altra): `board/uefi/src/entry.rs`
 
-1. **x1 = 0 is een flip.** Dat wordt getoetst vóór de eerste store, omdat de
-   stack van de oude kern op onze code kan liggen.
+1. **x0 = de feitenpagina is een flip** (geen ImageHandle: de pagina ligt
+   in het kernvenster dat de stub pas daarna alloceert). Dat wordt getoetst
+   vóór de eerste store, omdat de stack van de oude kern op onze code kan
+   liggen.
 2. **Koude weg:**
    1. Zelf-relocatie, dan de BSS.
    2. `hopos_efi_main`, met de boot services nog levend: console, de
@@ -146,9 +153,10 @@ De Pi heeft een eigen stap ervóór, `board/raspi/src/arch.rs` `_pi_start`:
       ICH_HCR.
    5. MAIR, TCR, TTBR0, SCTLR, VBAR, sp.
    6. `kmain(0, el)`: er is geen DTB.
-4. **Flip-weg:** relocatie en BSS, de magic van de feitenpagina, en het
-   regime van de koude boot terugzetten. Dan dezelfde enter. Na MMU-aan
-   zet `hopos_efi_flip_facts` `FLIP_ENTERED` en de statics terug.
+4. **Flip-weg:** relocatie en BSS, de magic van de UEFI-feiten
+   (`FLIP_FACTS_PA`), en het regime van de koude boot terugzetten. Dan
+   dezelfde enter. Na MMU-aan zet `hopos_efi_flip_facts` de statics terug,
+   en `kmain` krijgt de feitenpagina in x0.
 
 UEFI heeft geen wachtpagina onder de stack. Dat is gedocumenteerd in
 `board/uefi/src/boot.rs` [S2].
@@ -163,10 +171,10 @@ UEFI heeft geen wachtpagina onder de stack. Dat is gedocumenteerd in
    zichzelf naar het linkadres, met `dc civac` op bron en doel.
 3. **`_start_apple`:**
    1. BSS en stack vegen (de firmware schreef met caches aan), BSS op nul.
-   2. `FLIP_ENTERED` uit x22.
-   3. HCR met E2H (dat is daar RES1), CNTHCTL.
-   4. `apple_early` met de MMU uit: de dockchannel en de map met wachtpagina.
-   5. MAIR, TCR, TTBR0, SCTLR, VBAR, `kmain`.
+   2. HCR met E2H (dat is daar RES1), CNTHCTL.
+   3. `apple_early` met de MMU uit: na een sprong de boot_args uit de
+      feitenpagina, de dockchannel en de map met wachtpagina.
+   4. MAIR, TCR, TTBR0, SCTLR, VBAR, `kmain` met de x0 van de ingang.
 
 ### 2.4 riscv64 machine mode: `cpu/src/riscv/boot.rs`
 
@@ -176,7 +184,9 @@ UEFI heeft geen wachtpagina onder de stack. Dat is gedocumenteerd in
 2. Hart 0: sp, BSS, `kmain(a1, 3)`. Er is geen MMU en geen wachtpagina.
 3. De andere harts gaan in een postvak in `.data`.
    - **Waarom `.data`:** hart 0 wist de BSS terwijl de andere harts kijken.
-4. Er is geen flip-merkteken: `jumped()` is op riscv altijd waar [F17].
+4. riscv64 flipt niet (`flip::FLIPS`) en heeft geen feitenpagina: `kmain`
+   leest er niets, dus een oud blob wordt er nooit gelezen (F17 is weg,
+   01-11).
 
 ### 2.5 Te wegen
 
@@ -186,8 +196,8 @@ UEFI heeft geen wachtpagina onder de stack. Dat is gedocumenteerd in
   (`hopos_smp_entry`) zet niets naast het regime. Dezelfde letterlijke
   waarden (HCR, SCTLR 0x30c50830, CPTR 0x33ff) staan op vier tot vijf
   plekken.
-- **Drie flip-merktekens [S3]:** x3 = `FLIP_ENTRY`, x1 = 0 plus de
-  feitenpagina, en op riscv geen.
+- **Eén flip-ingang [S3, gedaan 01-11]:** x0 = de feitenpagina op elk
+  arm64-board; riscv flipt niet.
 
 ---
 

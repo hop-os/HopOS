@@ -12,9 +12,8 @@
 //! lifecycle; de kern rekent hem uit met [`super::Tail`].
 
 use super::{
-    BOOT_SCRATCH_LEN, CAGE_STRIDE, CTRL_STRIDE, CTX_OFF, Core, HANDOFF_PTR_OFF, HOP_RAM_START,
-    PARK_CODE_OFF, PARK_MBOX_LEN, PARK_MBOX_OFF, SLOT_CAP, SMP_CTX_OFF, SWITCH_CODE_OFF, Slot,
-    USB_DMA_SIZE,
+    BOOT_SCRATCH_LEN, CAGE_STRIDE, CTRL_STRIDE, CTX_OFF, Core, HOP_RAM_START, PARK_CODE_OFF,
+    PARK_MBOX_LEN, PARK_MBOX_OFF, SLOT_CAP, SMP_CTX_OFF, SWITCH_CODE_OFF, Slot, USB_DMA_SIZE,
 };
 use crate::{Error, Region, Result};
 use bounded::BoundedVec;
@@ -402,12 +401,6 @@ impl Plan {
     pub fn node_ctrl_pa(&self, core: Core) -> Result<Pa> {
         self.within(core.get())?;
         Ok(Pa(self.spec.node_ctrl_pa + core.get() as u64 * CTRL_STRIDE))
-    }
-
-    /// Het fysieke handoff-pointer-woord van de kern-flip.
-    #[must_use]
-    pub fn handoff_ptr_pa(&self) -> Pa {
-        Pa(self.spec.boot_scratch_pa + HANDOFF_PTR_OFF)
     }
 
     /// Het vluchtrecorder-woord van de kern-flip, als het board er een heeft.

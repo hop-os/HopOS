@@ -79,7 +79,7 @@ net kent geen kern. Alleen hopos kent alles en verbindt het.
 
 | Pad | Ingang | Wie |
 | --- | --- | --- |
-| arm64 nVHE (qemuvirt, Pi's, Radxa) | `cpu/src/boot.rs` `_start` (op de Pi eerst `_pi_start`) | core 0, of een core met `FLIP_ENTRY` in x3 |
+| arm64 nVHE (qemuvirt, Pi's, Radxa) | `cpu/src/boot.rs` `_start` (op de Pi eerst `_pi_start`) | core 0, of een core met de feitenpagina in x0 (`admits`) |
 | UEFI (generiek, O6N, Altra; VHE of nVHE) | `board/uefi/src/entry.rs` `_start_efi`: zelf-relocatie, EFI-memmap, `ExitBootServices`, `uefi_enter_kernel` | de BSP |
 | Mac mini M4 | `board/apple/src/head.rs` (eigen relocatie, VHE-only) | iBoot of m1n1 |
 | riscv64 machine mode | `cpu/src/riscv/boot.rs` `_start`; andere harts in een postvak-lus | hart 0 |
@@ -87,9 +87,12 @@ net kent geen kern. Alleen hopos kent alles en verbindt het.
 De drie arm64-ingangen zetten stack, BSS, vectoren (`__hopos_vectors`),
 de identity map en de MMU. Die van riscv zet stack, BSS, `mtvec` (de trap
 `__hopos_trap`) en de FPU, zonder MMU: machine mode vertaalt niet. Alle
-vier roepen `kmain(dtb, el)` in `hopos/src/main.rs` aan. Een
-flip-boot komt via dezelfde ingangen binnen (x3 = `FLIP_ENTRY`, op UEFI een
-feitenpagina).
+vier roepen `kmain(x0, el)` in `hopos/src/main.rs` aan. Een
+flip-boot komt via dezelfde ingangen binnen, met x0 = de feitenpagina op de
+boot-scratch (O6, `docs/flip.md`): de handoff en wat de firmware bij stroom
+aan gaf. `kmain` leest de pagina vóór `discover` (`flip::facts`), en bouwt
+hem bij stroom aan opnieuw, zonder handoff: een koude boot is een boot
+zonder handoff. riscv64 flipt niet en heeft geen pagina.
 
 `kmain` doet console, privilegetoets (EL2 of M-mode, anders parkeren), heap,
 `discover`, en `move_to_os_core`: wijst `hopos.oscore` een andere core aan,
@@ -768,8 +771,8 @@ Grotendeels opgelost op 04-10 (67e5a3a, "De drivers").
   met elk eigen MAIR/TCR/SCTLR, en de nVHE-tak van uefi met letterlijke
   waarden die ook in `el2.rs` en `boot.rs` staan. H. Deels moet het blob
   blijven.
-- Twee flip-ingangen (x3 = `FLIP_ENTRY` en de UEFI-feitenpagina). V dat één
-  protocol kan.
+- Eén flip-ingang sinds 01-11 (O6): x0 = de feitenpagina op elk
+  arm64-board (`docs/flip.md`). Gedaan.
 
 ### 8.9 Config en firmware-feiten
 

@@ -80,10 +80,12 @@ __efi_head:
     .section .text.efientry, "ax"
     .global _start_efi
 _start_efi:
-    // x1 = 0: geen SystemTable, dus een kern-flip (crate::flip). Vóór de
-    // eerste store: de stack van de oude kern ligt misschien waar nu onze
-    // code staat.
-    cbz x1, 20f
+    // x0 = de feitenpagina: een kern-flip (O6, crate::flip), geen
+    // ImageHandle. Vóór de eerste store: de stack van de oude kern ligt
+    // misschien waar nu onze code staat.
+    ldr x9, ={head}
+    cmp x0, x9
+    b.eq 20f
     stp x29, x30, [sp, #-32]!
     mov x29, sp
     stp x19, x20, [sp, #16]
@@ -99,9 +101,10 @@ _start_efi:
 
     // De flip-ingang: MMU uit, geen firmware. Eigen stack, dezelfde
     // relocatie en BSS als hierboven, en dan de weg van de koude stub naar
-    // kmain, met de feiten van de koude boot (FLIP_FACTS_PA). Zonder
-    // feiten parkeert de core: een kern zonder console, ACPI en kaart kan
-    // niets, en de guard van de oude generatie is er niet meer.
+    // kmain, met de feiten van de koude boot (FLIP_FACTS_PA) en x0 = de
+    // feitenpagina. Zonder feiten parkeert de core: een kern zonder console,
+    // ACPI en kaart kan niets, en de guard van de oude generatie is er niet
+    // meer.
 20: adrp x9, __stack_top
     add x9, x9, :lo12:__stack_top
     mov sp, x9
@@ -249,12 +252,12 @@ uefi_enter_flipped:
 8:  adrp x9, __stack_top
     add x9, x9, :lo12:__stack_top
     mov sp, x9
+    mov x0, xzr
     cbz x23, 11f
-    mov x0, x23
     bl hopos_efi_flip_facts
+    ldr x0, ={head}
 11: mov x29, xzr
     mov x30, xzr
-    mov x0, xzr
     mov x1, x21
     bl kmain
 9:  wfe
@@ -267,6 +270,7 @@ uefi_enter_flipped:
     cptr = const crate::el2::CPTR,
     sctlr = const crate::el2::SCTLR,
     facts = const crate::slots::FLIP_FACTS_PA,
+    head = const abi::layout::facts_pa(crate::slots::BOOT_SCRATCH_PA),
     facts_magic = const crate::flip::FACTS_MAGIC,
     ttbr0 = const crate::flip::W_TTBR0 * 8,
 );

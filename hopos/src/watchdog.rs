@@ -96,16 +96,18 @@ pub(crate) fn request_reset(reason: &'static str) {
     }
 }
 
-/// De gewapende watchdog, van [`arm`] (de eerste stap van `setup`) tot
+/// De gewapende watchdog, van [`arm`] (in `kmain`, na `discover`) tot
 /// [`start`] (de taak die aait zodra de executor draait).
 pub(crate) struct Armed {
     p: Policy,
     hw: Hw,
 }
 
-/// Wapent de watchdog als eerste stap van de boot (docs/sequence-hopos.md
-/// §13.2): vanaf hier loopt de ene guard van `kern::watchdog`, ook over de
-/// synchrone rest van `setup` heen (de mount, de probe van de NIC). Die
+/// Wapent de watchdog als eerste stap van de boot, in `kmain` meteen na
+/// `discover` (docs/sequence-hopos.md §13.2): vanaf hier loopt de ene guard
+/// van `kern::watchdog`, ook over de verhuizing naar de OS-core en de
+/// synchrone rest van `setup` heen (de mount, de probe van de NIC). Na een
+/// verhuizing wapent de OS-core hem nog eens: de teller loopt door. Die
 /// moet dus binnen de timeout van de hardware vallen, want de pets komen
 /// pas met de executor. Tot 01-11 wapende de taak pas in de eerste ronde
 /// van de executor, en parkeerde een fout in de mount voorgoed.

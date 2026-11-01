@@ -46,7 +46,8 @@
 #
 # Een HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_HOP_FAULT, HOPOS_HOP_EXIT,
 # HOP_STATE_SKIPPED, of een OS-core die niet deelt (HOPOS_OS_SELFTEST_FAIL,
-# HOPOS_OS_CORE_FAIL, HOPOS_OSCORE_FALLBACK, HOPOS_CAGE_FAIL) is meteen rood.
+# HOPOS_OS_CORE_FAIL, HOPOS_CAGE_FAIL; een OS-core die niet gehonoreerd
+# wordt is HOPOS_FATAL) is meteen rood.
 # Rood bewaart de console (en drukt hem af).
 #
 # Dezelfde kring op riscv64 is tools/qemu-riscv-test-hop.sh: dit script
@@ -132,7 +133,7 @@ if [ "$TARGET" = riscv64gc-unknown-none-elf ]; then
 	BOOT_MARKS="$BOOT_MARKS|HOPOS_OS_CORE_UP"
 	RED="$RED|HOPOS_OS_CORE_NONE|HOPOS_CAGE_FAIL"
 else
-	RED="$RED|HOPOS_OSCORE_FALLBACK|HOPOS_CAGE_FAIL"
+	RED="$RED|HOPOS_CAGE_FAIL"
 fi
 BOOT_MARKS="$BOOT_MARKS|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |slot 1: 2 port\\(s\\) published tcp\\+udp on the uplink: :8080 :9080 HOPOS_SLOT_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 if [ "$TARGET" != riscv64gc-unknown-none-elf ]; then

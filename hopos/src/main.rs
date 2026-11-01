@@ -198,12 +198,18 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
 
     board.init_heap(&HEAP);
     board.discover(dtb);
+    // De watchdog als eerste (docs/sequence-hopos.md §13.2): de hardware
+    // staat er na `discover`, en vanaf hier eindigt elke `fatal` in een
+    // reset, ook die van de verhuizing hieronder. Na een flip wapent dit de
+    // teller die de vertrekkende kern liet lopen opnieuw, vóór het
+    // framebuffer-geduld (de Pi 5, 30-09).
+    let wd = watchdog::arm();
     // De OS-core (PORT.md beslissing 2): de kern woont op de core die de
     // bootparameter kiest. Staat hij daar nog niet, dan verhuist hij nu,
     // vóór er één lijn, timer of bewoner aan deze core hangt; deze core
     // wordt dan een app-core.
     move_to_os_core(board, dtb, el);
-    boot(board, dtb, el)
+    boot(board, dtb, el, wd)
 }
 
 /// De `dtb` en het EL van de boot, voor de kern na zijn verhuizing.
@@ -213,16 +219,17 @@ static BOOT_ARGS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// op met hetzelfde EL2-regime en een verse stack en gaat verder in
 /// [`boot`], en deze core wacht tot de kooi-regio er is en parkeert dan als
 /// app-core (`cpu::el2::hold`; de kooi haalt hem daar op). Keert alleen
-/// terug als er niet verhuisd hoeft te worden, of als het niet kan (luid:
-/// de kern blijft dan waar hij is).
+/// terug als er niet verhuisd hoeft te worden. Een OS-core die de config
+/// vraagt maar die er niet kan zijn, of een verhuizing die niet lukt, is
+/// `fatal` (§13.2): de kern op een andere core dan gevraagd is een andere
+/// node dan de config beschrijft.
 fn move_to_os_core(board: &'static Machine, dtb: u64, el: u8) {
     let (os, why) = board.os_core();
     let here = board.this_core();
     if let Some(why) = why {
-        println!(
-            "oscore: hopos.oscore not honoured ({why}), the kern stays on core {here} HOPOS_OSCORE_FALLBACK"
+        cpu::fatal!(
+            "oscore: hopos.oscore not honoured ({why}), the kern would stay on core {here}"
         );
-        return;
     }
     if os == here {
         return;
@@ -235,15 +242,18 @@ fn move_to_os_core(board: &'static Machine, dtb: u64, el: u8) {
     );
     match cpu::smp::start_one(os, target, moved) {
         Ok(()) => cpu::el2::hold(),
-        Err(e) => println!("oscore: {e}, the kern stays on core {here} HOPOS_OSCORE_FALLBACK"),
+        Err(e) => cpu::fatal!("oscore: {e}, the kern cannot move from core {here} to core {os}"),
     }
 }
 
-/// De kern op de OS-core na de verhuizing: verder waar `kmain` was.
+/// De kern op de OS-core na de verhuizing: verder waar `kmain` was. De
+/// watchdog wapende de boot-core al; hier neemt de OS-core hem over zoals
+/// na een flip (de teller loopt door, `arm` herlaadt hem), want het beleid
+/// en zijn pets horen bij de executor van deze core.
 fn moved(core: usize) -> ! {
     println!("oscore: the kern runs on core {core} HOPOS_OSCORE_UP");
     let el = u8::try_from(BOOT_ARGS[1].load(Relaxed)).unwrap_or(0);
-    boot(&BOARD, BOOT_ARGS[0].load(Relaxed), el)
+    boot(&BOARD, BOOT_ARGS[0].load(Relaxed), el, watchdog::arm())
 }
 
 /// De boot vanaf de landing, op de OS-core: de executor en al zijn taken.
@@ -254,11 +264,11 @@ fn moved(core: usize) -> ! {
 /// zolang de kern leeft. Een plaatsing piekte daarop tot 186 van de 256 KB
 /// stack. [`setup`] bouwt alles in een eigen frame dat weg is vóór de
 /// executor draait; hier blijft alleen de slaper over.
-fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
+fn boot(board: &'static Machine, dtb: u64, el: u8, wd: Option<watchdog::Armed>) -> ! {
     let exec: &'static Executor = EXEC.get();
     // De deur van de switch om de slaper heen (`net::doorbell`): zonder
     // hem wachtte elk frame van een app op de failsafe van 1 ms.
-    let mut sleeper = net::doorbell(setup(board, dtb, el));
+    let mut sleeper = net::doorbell(setup(board, dtb, el, wd));
     exec.run(&mut sleeper)
 }
 
@@ -275,14 +285,15 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
 /// net (04-10, sinds 302d257 vier KB dieper; A13b en elke kern daarna).
 /// Los zijn het buren: de diepste boot is daar 156 KB, warm en koud.
 #[inline(never)]
-fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleeper {
-    // De watchdog als eerste (docs/sequence-hopos.md §13.2): de hardware
-    // staat er na `discover`, en vanaf hier eindigt elke `fatal` in een
-    // reset. Na een flip wapent dit de teller die de vertrekkende kern liet
-    // lopen opnieuw, vóór het framebuffer-geduld (de Pi 5, 30-09).
-    let wd = watchdog::arm();
+fn setup(
+    board: &'static Machine,
+    dtb: u64,
+    el: u8,
+    wd: Option<watchdog::Armed>,
+) -> <Machine as Board>::Sleeper {
     // FLIP: de landing. Daarvóór gingen in `kmain` alleen de heap,
-    // `discover` (het board) en de verhuizing naar de OS-core. De boot
+    // `discover` (het board), de watchdog (`wd`, gewapend) en de verhuizing
+    // naar de OS-core. De boot
     // hieronder is dezelfde reeks met of zonder overdracht; per stap begint
     // hij leeg, of neemt hij het stuk van de vorige kern over (flip.rs,
     // `Landing`).

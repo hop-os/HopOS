@@ -28,8 +28,9 @@ pub enum Error {
     StillOwned { slot: usize },
     /// Het slot bezit geen partitie.
     NotOwned { slot: usize },
-    /// Het slot staat in quarantaine: uitvoering niet bevestigd beëindigd.
-    Quarantined { slot: usize },
+    /// Het slot leeft niet (een stroom, een dode context): niet over te
+    /// dragen in een flip.
+    NotLive { slot: usize },
     /// Een bereik dat vrij had moeten zijn, is (deels) van een ander.
     NotFree { base: u64, size: u64 },
     /// De tabel of lijst is vol (een vaste maat uit de bron).
@@ -43,17 +44,8 @@ pub enum Error {
     NoCores { cores: usize },
     /// Een core van een bestaande groep heeft een andere klasse dan gevraagd.
     ClassMismatch { core: usize },
-    /// Het startschot faalde: de uitkomst is ONBEKEND, de core kan alsnog
-    /// aangaan. De eigenaar blijft volledig gereserveerd.
-    Dispatch { slot: usize, core: usize },
-    /// De core weigerde het startschot en liep zeker niet
-    /// ([`crate::cage::CageError::NEVER_RAN`]); de partitie is terug en de
-    /// core is tot een koude boot uit de plaatsing.
-    NeverStarted { slot: usize, core: usize },
     /// Een core draait nog waar hij stil had moeten staan.
     CoreBusy { core: usize },
-    /// Stop kon de beëindiging niet bevestigen; de eigenaar blijft staan.
-    NotStopped { slot: usize, core: usize },
     /// De kooi weigerde (bouwen, bereik, venster).
     Cage { slot: usize, code: u32 },
     /// Een ongeldig bereik voor een stage-2-map of grant.
@@ -113,9 +105,7 @@ impl fmt::Display for Error {
             ),
             Self::StillOwned { slot } => write!(f, "slot {slot} still owns a partition"),
             Self::NotOwned { slot } => write!(f, "slot {slot} owns no partition"),
-            Self::Quarantined { slot } => {
-                write!(f, "slot {slot}: owner retained, execution unconfirmed")
-            }
+            Self::NotLive { slot } => write!(f, "slot {slot} is not live"),
             Self::NotFree { base, size } => {
                 write!(f, "range {base:#x}+{size:#x} is not free in this pool")
             }
@@ -127,20 +117,7 @@ impl fmt::Display for Error {
             ),
             Self::NoCores { cores } => write!(f, "no free run of {cores} app core(s)"),
             Self::ClassMismatch { core } => write!(f, "core {core} has another class"),
-            Self::Dispatch { slot, core } => {
-                write!(
-                    f,
-                    "slot {slot}: dispatch on core {core} failed, outcome unknown"
-                )
-            }
-            Self::NeverStarted { slot, core } => write!(
-                f,
-                "slot {slot}: core {core} refused the start and never ran, core retired"
-            ),
             Self::CoreBusy { core } => write!(f, "core {core} still running"),
-            Self::NotStopped { slot, core } => {
-                write!(f, "slot {slot}: core {core} not stopped after revocation")
-            }
             Self::Cage { slot, code } => write!(f, "slot {slot}: cage refused (code {code})"),
             Self::Range { base, size } => write!(f, "invalid range {base:#x}+{size:#x}"),
             Self::Corrupt { at } => write!(f, "corrupt record at byte {at}"),

@@ -153,9 +153,6 @@ pub struct Places {
     groups: [Option<Group>; MAX_GROUPS],
     core_group: [Option<u8>; CORE_CAP + 1],
     core_apps: [u16; CORE_CAP + 1],
-    /// Cores die een startschot weigerden: tot een koude boot geen plaatsing
-    /// meer, anders landt elke herstart van Hop op dezelfde dode core.
-    retired: [bool; CORE_CAP + 1],
     cages: [Option<CagePlace>; SLOT_CAP + 1],
 }
 
@@ -168,16 +165,7 @@ impl Places {
             groups: [const { None }; MAX_GROUPS],
             core_group: [None; CORE_CAP + 1],
             core_apps: [0; CORE_CAP + 1],
-            retired: [false; CORE_CAP + 1],
             cages: [None; SLOT_CAP + 1],
-        }
-    }
-
-    /// Haalt core `c` uit de plaatsing tot een koude boot: hij weigerde een
-    /// startschot en liep nooit.
-    pub fn retire(&mut self, c: Core) {
-        if let Some(r) = self.retired.get_mut(c.get()) {
-            *r = true;
         }
     }
 
@@ -256,13 +244,11 @@ impl Places {
         Ok(self.reserve(slot, Core::OS, 1, Some(gid)))
     }
 
-    /// Een app-core zonder groepsclaim, zonder levende kooi en niet
-    /// uitgeschakeld ([`Self::retire`]).
+    /// Een app-core zonder groepsclaim en zonder levende kooi.
     #[must_use]
     pub fn core_free(&self, c: usize) -> bool {
         self.core_group.get(c).is_some_and(Option::is_none)
             && self.core_apps.get(c).is_some_and(|n| *n == 0)
-            && self.retired.get(c).is_some_and(|r| !r)
     }
 
     /// Staan er `n` opeenvolgende vrije app-cores vanaf `primary`?

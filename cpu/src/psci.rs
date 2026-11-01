@@ -75,18 +75,6 @@ impl Error {
             Self::Other(c) => c,
         }
     }
-
-    /// Weigerde CPU_ON de core vóór hij aanging? Dan liep hij zeker niet:
-    /// NOT_SUPPORTED, INVALID_PARAMETERS, DENIED en INVALID_ADDRESS (-9)
-    /// zeggen dat niets de core aanzette (DEN 0022, 5.6). ALREADY_ON,
-    /// ON_PENDING en INTERNAL_FAILURE zeggen dat niet.
-    #[must_use]
-    pub const fn is_refusal(self) -> bool {
-        matches!(
-            self,
-            Self::NotSupported | Self::InvalidParams | Self::Denied | Self::Other(-9)
-        )
-    }
 }
 
 impl fmt::Display for Error {
@@ -205,15 +193,6 @@ mod tests {
             Affinity::from_ret((-2i64) as u64),
             Affinity::Err(Error::InvalidParams)
         );
-    }
-
-    #[test]
-    fn refusals_are_certain() {
-        assert!(Error::InvalidParams.is_refusal());
-        assert!(Error::Other(-9).is_refusal());
-        assert!(!Error::AlreadyOn.is_refusal());
-        assert!(!Error::OnPending.is_refusal());
-        assert!(!Error::InternalFailure.is_refusal());
     }
 
     #[test]

@@ -2335,7 +2335,6 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 Occupancy::Empty => SlotState::Empty,
                 Occupancy::Streaming => SlotState::Streaming,
                 Occupancy::Running => SlotState::Running,
-                Occupancy::Quarantined => SlotState::Quarantined,
             } as u8,
             core_on: u8::from(st.cage.core_on),
             reserved: 0,

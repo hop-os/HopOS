@@ -162,18 +162,6 @@ fn a_failed_arm_refuses_the_start_and_leaves_nothing() {
     start_env(&mut a, 2, b"", &[]).unwrap();
 }
 
-// Quarantaine: de beëindiging is onbevestigd, de houder kan nog tekenen,
-// dus de grant blijft van het slot.
-#[test]
-fn quarantine_keeps_the_grant() {
-    let (svc, con) = (Servicers::new(), FakeConsole::default());
-    let mut a = counted(&svc, &con, Obey::Never);
-    start_env(&mut a, 2, b"GUI=display\n", &[]).unwrap();
-    assert!(stop(&mut a, 2).is_err());
-    assert_eq!(a.status(s(2)).occupancy, Occupancy::Quarantined);
-    assert!(a.grants.release.is_empty());
-}
-
 // De env-haak hoort bij een stroom: zonder claim is er niemand die hem
 // terug kan geven, en een lopend slot heeft zijn env al.
 #[test]

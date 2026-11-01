@@ -245,15 +245,6 @@ fn dispatch_resets_the_rotation_and_fires_the_mailbox() {
     assert_eq!(ctx_state(ctx), Some(CtxState::Running));
     assert_eq!(core_state(&p, core(1)), Ok(CoreState::Running(0x5100_0000)));
 
-    // Een geweigerde CPU_ON draait terug: de core is weer koud en de
-    // volgende start is weer een koude.
-    unwind_cold(&p, core(1), ctx).unwrap();
-    assert_eq!(core_state(&p, core(1)), Ok(CoreState::Cold));
-    assert_eq!(ctx_state(ctx), Some(CtxState::Empty));
-    assert_eq!(dev::read64(mb.add(SCHED_COUNT)), 0);
-    let start = dispatch(&p, core(1), ctx, Pa(0x4000_A100), 0x5100_0000).unwrap();
-    assert_eq!(start, Start::Cold);
-
     // Een draaiende core wordt niet gekaapt.
     assert_eq!(
         dispatch(&p, core(1), ctx, Pa(0x4000_A100), 0x5100_0000),

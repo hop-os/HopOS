@@ -518,20 +518,6 @@ pub fn dispatch(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result
     Ok(Start::Woken)
 }
 
-/// Draait een [`Start::Cold`] terug waarvan de CPU_ON weigerde: de core
-/// ging nooit aan, dus woord 0 weer koud, de bewonerslijst leeg en de
-/// ctx-staat leeg. Zo is de volgende start op deze core weer een koude
-/// start, en meldt [`core_state`] geen core die nooit liep.
-pub fn unwind_cold(plan: &Plan, core: Core, ctx: Pa) -> Result<(), Error> {
-    let mb = plan.park_mbox_pa(core).map_err(Error::Plan)?;
-    dev::write64(mb.add(SCHED_MBOX_CTX), PARK_COLD);
-    dev::write64(mb.add(SCHED_MBOX_PC), 0);
-    roster::reset(mb, None);
-    dev::push(mb, PARK_MBOX_LEN as usize);
-    ctx_write(ctx, CTX_STATE, CtxState::Empty.raw());
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // De rotatie van een app-core: bewoners erbij en eraf (share.go).
 // ---------------------------------------------------------------------------

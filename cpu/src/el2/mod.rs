@@ -36,7 +36,7 @@ pub use dispatch::{
     CoreState, Flavor, Installed, Join, MAX_BLOB, Start, adopt, apple_ipi_target, chain,
     core_state, ctx_read, ctx_state, ctx_write, dispatch, evict, image_hash, init_app_cores,
     install_switch_code, installed_hash, join, kick, os_ctx_read, os_ctx_write, prepare_secondary,
-    prepare_smp, revoke, rx_due, unwind_cold,
+    prepare_smp, revoke, rx_due,
 };
 pub use oscore::{
     Back, Bell, Next, OsCore, Probe, STATS as OS_STATS, TURN_CAP_NS, Turn, apple_ipi_ack,

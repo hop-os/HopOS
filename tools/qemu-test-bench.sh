@@ -29,8 +29,7 @@
 #      per commandomaat, sequentieel, willekeurig en hopfs
 #      (HOPOS_NVMEBENCH_SEQ, _RAND, "hopfs bench:" en HOPOS_NVMEBENCH_DONE),
 #      en daarna mount de opslag dezelfde schijf (HOPOS_FS_UP): de bench
-#      leent hem, `probe_disk` gebeurt één keer. HOPOS_DISK_FAIL of
-#      HOPOS_FS_FAIL is rood.
+#      leent hem, `probe_disk` gebeurt één keer. HOPOS_FATAL is rood.
 #
 # UDP meet netmeter wel, maar niet hier: de hostfwd van image/qemu-run.sh
 # is alleen TCP. Op ijzer: `netmeter NODE:PORT --phases udp`.
@@ -235,8 +234,8 @@ if [ "${NVME:-1}" != 0 ]; then
 		}
 	done
 	IFS="$IFS_WAS"
-	if has "HOPOS_NVMEBENCH_FAIL|HOPOS_DISK_FAIL|HOPOS_FS_FAIL|HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION"; then
-		echo "   ROOD $(first 'HOPOS_NVMEBENCH_FAIL|HOPOS_DISK_FAIL|HOPOS_FS_FAIL|HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION')"
+	if has "HOPOS_NVMEBENCH_FAIL|HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION"; then
+		echo "   ROOD $(first 'HOPOS_NVMEBENCH_FAIL|HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION')"
 		fail=1
 	fi
 	if [ "$fail" != 0 ]; then

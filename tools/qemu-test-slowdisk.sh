@@ -28,9 +28,9 @@
 #   de tik       elke HOPOS_TICK na de eerste met late_ms onder 100, en geen
 #                tiknummer overgeslagen.
 #
-# Een HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_APP_PANIC, HOPOS_HOP_FAULT,
-# HOPOS_HOP_EXIT, HOPOS_HOP_FAIL of HOPOS_FS_COMMIT_FAIL is meteen rood. Rood
-# bewaart de console (en drukt hem af).
+# Een HOPOS_PANIC, HOPOS_FATAL (ook een mislukte commit), HOPOS_EXCEPTION,
+# HOPOS_APP_PANIC, HOPOS_HOP_FAULT, HOPOS_HOP_EXIT of HOPOS_HOP_FAIL is
+# meteen rood. Rood bewaart de console (en drukt hem af).
 #
 #   tools/qemu-test-slowdisk.sh                TIMEOUT=120 s tot de pagina
 #   DISKLAT=2500000000 tools/qemu-test-slowdisk.sh   de trage schijf van de soak
@@ -67,7 +67,7 @@ tick() { tr -d '\r' <"$LOG" | sed -n 's/^HOPOS_TICK \([0-9]*\) .*/\1/p' | tail -
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP|HOPOS_NET_UP|HOPOS_HOP_START slot=1 core=0 |slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: .*HOPOS_WELCOME_UP port=80"
-RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_FS_COMMIT_FAIL"
+RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL"
 
 JOB='{"name":"welcome","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/welcome.elf"}],"memory_limit":33554432,"ports":{"http":80}}'
 POSTED=""

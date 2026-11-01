@@ -14,8 +14,8 @@
 #             kwam aan);
 #   per slot  HOPOS_APPSPIKE_FS ok en HOPOS_APPSPIKE_DONE ... fail=0.
 #
-# Rood is ook: HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_NVME_FAIL, HOPOS_FS_FAIL
-# en HOPOS_FS_IO. Rood bewaart de console (en drukt hem af).
+# Rood is ook: HOPOS_PANIC, HOPOS_FATAL (ook een blokfout of een mislukte
+# mount), HOPOS_EXCEPTION en HOPOS_NVME_FAIL. Rood bewaart de console (en drukt hem af).
 #
 #   tools/qemu-test-nvme.sh                TIMEOUT=120 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-nvme.sh   bewaart ook een groene console
@@ -46,7 +46,7 @@ MARKS="HOPOS_NVME_UP|HOPOS_DISK_UP model=QEMU NVMe Ctrl blocks=131072|HOPOS_FS_U
 MARKS="$MARKS|MSI-X via the ITS, LPI [0-9]+.*HOPOS_NVME_IRQ"
 MARKS="$MARKS|slot 1: HOPOS_APPSPIKE_FS ok|slot 1: HOPOS_APPSPIKE_DONE pass=[0-9]+ fail=0"
 MARKS="$MARKS|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=[0-9]+ fail=0"
-RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_NVME_FAIL|HOPOS_FS_FAIL|HOPOS_FS_IO|HOPOS_APPSPIKE_FS FAIL"
+RED="HOPOS_PANIC|HOPOS_FATAL|HOPOS_EXCEPTION|HOPOS_NVME_FAIL|HOPOS_APPSPIKE_FS FAIL"
 
 echo "== booten op QEMU virt met EDK2 en een NVMe (tot ${TIMEOUT}s)"
 qemu_edk2 neoverse-n1 "$VARS" "$ESP" \

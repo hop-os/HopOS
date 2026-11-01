@@ -52,6 +52,14 @@
 //! `fsCommitEvery`) en meteen na de stop van een slot (de servicer-tabel
 //! luidt zijn bel), zodat wat een app schreef een stroomuitval overleeft.
 //! De data zelf staat er al; de commit is de boom die haar terugvindt.
+//!
+//! # Hard falen
+//!
+//! Een blokfout van het device (onder een call, een lezing van de kern,
+//! een commit) is het ijzer dat faalt, geen antwoord aan een app: `fatal`,
+//! en de watchdog reset de node (docs/sequence-hopos.md §13.6). Tot 01-11
+//! ging hij als fout terug naar de app, en werd een mislukte commit
+//! stil herhaald.
 
 use crate::cage::{Console, Timer};
 use crate::hopfs::{self, BLOCK_SIZE, BatchRead, BlockIo, Fs, ReadStep, Tree};
@@ -512,10 +520,6 @@ struct Desk<'s, L> {
     /// Per slot de levensduur waarvan de eerste schrijf in een volume al
     /// een regel kreeg.
     saved: [Option<u32>; SLOT_CAP + 1],
-    /// Mislukte commits: de eerste paar krijgen een regel, daarna tellen we.
-    commit_fails: u64,
-    /// Blokfouten onder een call; dezelfde regel.
-    io_fails: u64,
     /// Bevroren voor de kern-flip ([`FsMsg::Freeze`]): calls worden
     /// geweigerd, commits overgeslagen. De boom op de schijf is dan die
     /// van de nieuwe kern.
@@ -533,8 +537,8 @@ struct Desk<'s, L> {
     alone: bool,
 }
 
-/// Hoeveel mislukte commits (en blokfouten) een eigen regel krijgen.
-const LOUD_COMMIT_FAILS: u64 = 3;
+/// Hoeveel geweigerde calls tijdens de bevriezing een eigen regel krijgen.
+const LOUD_FROZEN_CALLS: u64 = 3;
 
 /// Wat een slot in de lucht heeft: de volgorde per app ([`FsActor`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -637,9 +641,10 @@ async fn run_call<D: BlockIo + Copy>(
 /// achteraan in `c.out`, één per opdracht. Zo draagt de future geen blok en
 /// geen future per opdracht, en blijft de plaats in de pool van de actor zo
 /// groot als die van een gewone lees. Daarna schuiven de bytes aaneen achter
-/// de tabel met de uitkomsten. Een opdracht die faalt, krijgt een fout en
-/// nul bytes, de andere blijven staan. [`Desk::plan`] toetste de lijst en
-/// de ruimte.
+/// de tabel met de uitkomsten. Een opdracht buiten het bestand krijgt een
+/// fout en nul bytes, de andere blijven staan; een blokfout is de hele call
+/// (en `fatal` in [`Desk::land`]). [`Desk::plan`] toetste de lijst en de
+/// ruimte.
 async fn read_many<D: BlockIo + Copy>(
     t: &Tree<D>,
     n: usize,
@@ -696,12 +701,10 @@ async fn read_many<D: BlockIo + Copy>(
         if step.iter().all(Option::is_none) {
             break;
         }
-        let mut ok = [false; M];
         {
             // De stukken van deze ronde, op volgorde uit `room` en `edges`
             // geknipt: elke lees haar eigen bytes.
             let mut batch: BoundedVec<BatchRead<'_>, M> = BoundedVec::new();
-            let mut who = [0usize; M];
             let (mut r, mut e, mut base) = (&mut *room, &mut *edges, 0usize);
             for (i, s) in step.iter().enumerate().take(count) {
                 let (block, rest_e) = core::mem::take(&mut e)
@@ -716,20 +719,15 @@ async fn read_many<D: BlockIo + Copy>(
                 let (dst, tail) = tail.split_at_mut_checked(k).ok_or(short)?;
                 (r, base) = (tail, from + k);
                 let into = if part.is_some() { block } else { dst };
-                who[batch.len()] = i;
                 batch.push(BatchRead::new(lba, into)).map_err(|_| short)?;
             }
             disk.read_batch(batch.as_mut_slice()).await;
-            for (k, op) in batch.as_slice().iter().enumerate() {
-                ok[who[k]] = op.result.is_ok();
+            for op in batch.as_slice() {
+                op.result?;
             }
         }
         for (i, s) in step.iter().enumerate().take(count) {
             let Some((_, k, part)) = *s else { continue };
-            if !ok[i] {
-                failed[i] = true;
-                continue;
-            }
             if let Some(a) = part {
                 let from = at[i] + done[i];
                 let src = edges.get(i * BLOCK_SIZE + a..i * BLOCK_SIZE + a + k);
@@ -780,8 +778,6 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
                 log,
                 prepared: [None; SLOT_CAP + 1],
                 saved: [None; SLOT_CAP + 1],
-                commit_fails: 0,
-                io_fails: 0,
                 frozen: false,
                 frozen_calls: 0,
                 path: PathBuf::new(),
@@ -822,10 +818,9 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
                     Admit::Done => {}
                     Admit::Go(job) => {
                         if pool.as_mut().push(work(tree, job)).is_err() {
-                            // `admit` liet hem alleen toe met een vrije plaats.
-                            desk.log.log(format_args!(
-                                "hopfs: no room for an admitted call HOPOS_FS_FAIL"
-                            ));
+                            // `admit` liet hem alleen toe met een vrije
+                            // plaats: dit is een gebroken invariant.
+                            desk.log.fatal(format_args!("hopfs: no room for an admitted call"));
                         }
                     }
                 }
@@ -917,8 +912,10 @@ impl<L: Console> Desk<'_, L> {
         let reply = env.reply;
         match env.msg {
             FsMsg::Call(c) => self.admit_call(t, c, reply, idle),
-            FsMsg::Commit(_) if self.frozen => Admit::Done,
-            FsMsg::Commit(why) if !self.committing => {
+            // Een commit tijdens een commit valt weg: `dirty` draagt wat
+            // daarna veranderde al naar de volgende (S16, §13.6).
+            FsMsg::Commit(_) if self.frozen || self.committing => Admit::Done,
+            FsMsg::Commit(why) => {
                 self.committing = true;
                 Admit::Go(Job::Commit(why))
             }
@@ -926,7 +923,7 @@ impl<L: Console> Desk<'_, L> {
                 (self.committing, self.alone) = (true, true);
                 Admit::Go(Job::Freeze(reply))
             }
-            msg @ (FsMsg::Commit(_) | FsMsg::Freeze) => Admit::Wait(FsEnvelope { msg, reply }),
+            msg @ FsMsg::Freeze => Admit::Wait(FsEnvelope { msg, reply }),
             FsMsg::KernRead(r) => self.admit_kern(t, r, reply),
             FsMsg::Thaw => {
                 self.frozen = false;
@@ -951,7 +948,7 @@ impl<L: Console> Desk<'_, L> {
             // Luid, de eerste paar keer: een call die hier strandt hoort de
             // aanroeper opnieuw te doen op de nieuwe kern.
             self.frozen_calls += 1;
-            if self.frozen_calls <= LOUD_COMMIT_FAILS {
+            if self.frozen_calls <= LOUD_FROZEN_CALLS {
                 self.log.log(format_args!(
                     "hopfs: slot {} op {} refused, frozen for the kernel flip HOPOS_FS_FROZEN_CALL",
                     c.slot, c.op
@@ -1064,8 +1061,11 @@ impl<L: Console> Desk<'_, L> {
     }
 
     /// Een call is terug van zijn I/O: de regels vrij, het antwoord naar
-    /// zijn plek.
+    /// zijn plek. Een blokfout is het ijzer: `fatal` (de module-doc).
     fn land(&mut self, job: Job<'_>, r: Result<(u64, usize)>) {
+        if let Err(Error::Io { lba }) = r {
+            self.log.fatal(format_args!("hopfs: block I/O failed at LBA {lba}"));
+        }
         match job {
             Job::Call {
                 c,
@@ -1090,10 +1090,8 @@ impl<L: Console> Desk<'_, L> {
                     }
                     Work::Truncate(_) => self.alone = false,
                     Work::Sync => self.committing = false,
-                    Work::ReadMany(_) => self.many_failed(&c, &r),
-                    Work::Read(_) | Work::Done(..) => {}
+                    Work::Read(_) | Work::ReadMany(_) | Work::Done(..) => {}
                 }
-                self.io_failed(&c, &r);
                 answer(reply, c, r);
             }
             Job::Kern { r: k, reply, .. } => {
@@ -1126,43 +1124,6 @@ impl<L: Console> Desk<'_, L> {
         }
     }
 
-    /// Een blokfout is de schijf, niet de app: luid, de eerste paar keer
-    /// (de driver zelf print niet).
-    fn io_failed(&mut self, c: &FsCall, r: &Result<(u64, usize)>) {
-        if let Err(Error::Io { lba }) = r {
-            self.io_fails += 1;
-            if self.io_fails <= LOUD_COMMIT_FAILS {
-                self.log.log(format_args!(
-                    "hopfs: slot {} op {}: block I/O failed at LBA {lba} ({} so far) HOPOS_FS_IO",
-                    c.slot, c.op, self.io_fails
-                ));
-            }
-        }
-    }
-
-    /// Een opdracht van een bundel die faalde, staat alleen in de tabel van
-    /// het antwoord; dezelfde regel als [`Desk::io_failed`], met het aantal.
-    fn many_failed(&mut self, c: &FsCall, r: &Result<(u64, usize)>) {
-        if r.is_err() {
-            return;
-        }
-        let count = c.data.len() / many::OP_LEN;
-        let table = c.out.get(HDR_LEN..).unwrap_or(&[]);
-        let bad = (0..count)
-            .filter(|&i| many::result(table, i).is_some_and(|(_, s)| s != STATUS_OK))
-            .count();
-        if bad == 0 {
-            return;
-        }
-        self.io_fails += 1;
-        if self.io_fails <= LOUD_COMMIT_FAILS {
-            self.log.log(format_args!(
-                "hopfs: slot {} op {}: {bad} of {count} reads failed ({} so far) HOPOS_FS_IO",
-                c.slot, c.op, self.io_fails
-            ));
-        }
-    }
-
     /// De regel van een vastlegging: één per nieuwe generatie.
     fn committed(&mut self, why: CommitWhy, r: Result<Option<u64>>) {
         match r {
@@ -1176,15 +1137,9 @@ impl<L: Console> Desk<'_, L> {
                 )),
             },
             Ok(None) => {}
-            Err(e) => {
-                self.commit_fails += 1;
-                if self.commit_fails <= LOUD_COMMIT_FAILS {
-                    self.log.log(format_args!(
-                        "hopfs: commit failed: {e} ({} so far) HOPOS_FS_COMMIT_FAIL",
-                        self.commit_fails
-                    ));
-                }
-            }
+            // De boom kan niet vastgelegd worden: de belofte van de commit
+            // is weg (§13.6).
+            Err(e) => self.log.fatal(format_args!("hopfs: commit failed: {e}")),
         }
     }
 

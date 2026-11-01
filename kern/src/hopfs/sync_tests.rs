@@ -112,8 +112,11 @@ fn barrier_survives_power_loss_in_place_overwrite_truncate_and_journal_remove() 
         "ongewijzigde boom vraagt ook een echte flush"
     );
 }
+/// Een commit die faalt, geeft zijn fout en laat de schijf bij de vorige
+/// generatie; de aanroeper valt dan (`fatal`, §13.6), er is geen tweede
+/// poging op dezelfde boom.
 #[test]
-fn every_commit_failure_is_returned_without_advancing_generation_and_can_retry() {
+fn every_commit_failure_is_returned_without_advancing_generation() {
     // commit: dataflush, metadatabody, metadatakop, metadataflush.
     for fault in 1..=4 {
         let disk = Disk::new();
@@ -138,12 +141,6 @@ fn every_commit_failure_is_returned_without_advancing_generation_and_can_retry()
         let old = mount(&reboot);
         assert_eq!(read(&old, b"before"), b"old");
         assert_eq!(old.borrow_mut().stat(b"after"), Err(Error::NoEnt));
-        disk.0.borrow_mut().fail = None;
-        assert_eq!(on(sync(&fs)).unwrap(), 2);
-        drop(fs);
-        disk.crash();
-        let fs = mount(&disk);
-        assert_eq!(read(&fs, b"after"), b"new");
     }
 }
 #[test]

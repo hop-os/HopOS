@@ -9,9 +9,12 @@
 //! GEM op de Pi 5, GENET op de Pi 4). De scan en de autonegotiatie staan
 //! hier één keer (Go: `metal/driver/nic/mdio`).
 //!
-//! Deze crate bezit geen registers en geen tijd: de bus komt als trait, de
-//! klok als functie van de aanroeper. Daarom is hij `forbid(unsafe_code)` en
-//! volledig op de host te toetsen met een PHY in RAM.
+//! Deze crate bezit geen registers en geen tijd: de bus komt als trait. Hij
+//! wacht ook niet: [`start_autoneg`] zet de autonegotiatie in gang en
+//! [`link`] kijkt één keer; wie op de link wacht, is de taak (Linux:
+//! `phy_state_machine` pollt de PHY, en `adjust_link` zet de MAC bij de
+//! wissel). Daarom is hij `forbid(unsafe_code)` en volledig op de host te
+//! toetsen met een PHY in RAM.
 //!
 //! Een PHY-eigenaardigheid hoort bij de PHY en niet bij een board: het
 //! volgende board met dezelfde chip krijgt hem gratis ([`rtl8211f`]).
@@ -79,11 +82,6 @@ pub const LPA_100_HD: u16 = 1 << 7;
 /// ANLPAR: 10BASE-T full duplex.
 pub const LPA_10_FD: u16 = 1 << 6;
 
-/// Hoe vaak de autonegotiatie BMSR leest: elke 50 ms, zoals in Go. Een
-/// MDIO-transactie bezet de bus, en een PHY die traint heeft niets aan
-/// gehamer.
-const POLL_NS: u64 = 50_000_000;
-
 /// Waarom de PHY-laag weigert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -95,13 +93,6 @@ pub enum Error {
         /// Het register.
         reg: u8,
     },
-    /// Geen link binnen de grens.
-    NoLink {
-        /// Het laatst gelezen BMSR.
-        bmsr: u16,
-        /// De grens in milliseconden.
-        ms: u64,
-    },
 }
 
 impl fmt::Display for Error {
@@ -109,9 +100,6 @@ impl fmt::Display for Error {
         match self {
             Self::Bus { phy, reg } => {
                 write!(f, "mdio: bus stuck on phy {phy} register {reg}")
-            }
-            Self::NoLink { bmsr, ms } => {
-                write!(f, "phy: no link within {ms} ms (BMSR {bmsr:#06x})")
             }
         }
     }
@@ -195,54 +183,39 @@ pub fn answers_as<M: Mdio + ?Sized>(m: &mut M, addr: u8, found: &Phy) -> bool {
     )
 }
 
-/// Start autonegotiatie en wacht, begrensd, op een link.
-///
-/// Adverteert 10/100 half en full, en met `gigabit` ook 1000 full; herstart
-/// de autonegotiatie; leest BMSR elke 50 ms tot autonegotiatie klaar én
-/// link; en leidt de snelheid af uit GBSR (1000 full) en anders ANLPAR.
+/// Start de autonegotiatie, zonder te wachten: adverteert 10/100 half en
+/// full, met `gigabit` ook 1000 full, en herstart hem. De link komt later,
+/// en [`link`] ziet hem.
 ///
 /// Zonder `gigabit` (de ePHY van de SG2002 op de LicheeRV Nano) worden GBCR
 /// en GBSR (register 9 en 10) niet aangeraakt: die bestaan op zo'n PHY niet,
 /// en op bring-up-silicium schrijven we niets waarvan we de betekenis niet
 /// kennen.
-///
-/// Busy-wait op `now` (monotone nanoseconden): dit draait bij boot, in de
-/// NIC-probe, vóór de executor iets anders te doen heeft.
-pub fn autoneg<M: Mdio + ?Sized>(
-    m: &mut M,
-    phy: u8,
-    gigabit: bool,
-    now: fn() -> u64,
-    timeout_ns: u64,
-) -> Result<Link> {
+pub fn start_autoneg<M: Mdio + ?Sized>(m: &mut M, phy: u8, gigabit: bool) -> Result {
     m.write(phy, reg::ANAR, ANAR_10_100)?;
     if gigabit {
         m.write(phy, reg::GBCR, GBCR_1000_FD)?;
     }
-    m.write(phy, reg::BMCR, BMCR_AN_ENABLE | BMCR_AN_RESTART)?;
-    let mut s = Ok(0);
-    let up = dev::poll_until(now, timeout_ns, || {
-        s = m.read(phy, reg::BMSR);
-        let up = s.map_or(true, |s| s & BMSR_AN_COMPLETE != 0 && s & BMSR_LINK != 0);
-        if !up {
-            dev::delay(now, POLL_NS);
-        }
-        up
-    });
-    let s = s?;
-    if !up {
-        return Err(Error::NoLink {
-            bmsr: s,
-            ms: timeout_ns / 1_000_000,
-        });
+    m.write(phy, reg::BMCR, BMCR_AN_ENABLE | BMCR_AN_RESTART)
+}
+
+/// Eén blik op de link (`genphy_update_link` plus `genphy_read_status`):
+/// `None` zolang BMSR niet autonegotiatie klaar én link zegt, anders de
+/// snelheid uit GBSR (1000 full, alleen met `gigabit`) en anders ANLPAR.
+/// Het link-bit is latched-low: een link die even weg was, leest één keer
+/// laag, en de volgende blik ziet hem.
+pub fn link<M: Mdio + ?Sized>(m: &mut M, phy: u8, gigabit: bool) -> Result<Option<Link>> {
+    let s = m.read(phy, reg::BMSR)?;
+    if s & (BMSR_AN_COMPLETE | BMSR_LINK) != BMSR_AN_COMPLETE | BMSR_LINK {
+        return Ok(None);
     }
     if gigabit && m.read(phy, reg::GBSR)? & GBSR_LP_1000_FD != 0 {
-        return Ok(Link {
+        return Ok(Some(Link {
             mbps: 1000,
             full_duplex: true,
-        });
+        }));
     }
-    Ok(link_from_lpa(m.read(phy, reg::ANLPAR)?))
+    Ok(Some(link_from_lpa(m.read(phy, reg::ANLPAR)?)))
 }
 
 /// De link uit ANLPAR: de beste gemeenschappelijke stand onder gigabit.

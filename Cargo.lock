@@ -445,9 +445,6 @@ dependencies = [
 [[package]]
 name = "driver-mdio"
 version = "3.0.20"
-dependencies = [
- "dev",
-]
 
 [[package]]
 name = "driver-ns16550"

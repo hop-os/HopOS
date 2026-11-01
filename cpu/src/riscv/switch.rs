@@ -781,8 +781,8 @@ __hopos_mentry:
     // (`th.dcache.cipa` plus `th.sync.is`) en leest ze opnieuw uit DRAM,
     // naast de kern en de DMA van de NIC. Daarom eerst 0x4000 rondjes niets,
     // zoals de Go-switcher (`spin`/`pause` in cpu/mmode/switch.s, de
-    // v2-getallen van dit board): enkele tientallen µs op de 700 MHz van de C906L, onder elke wektijd
-    // van een app en onder de 300 µs van de NIC-poll van de kern.
+    // v2-getallen van dit board): enkele tientallen µs op de 700 MHz van de
+    // C906L, onder elke wektijd van een app.
 62:
     li t0, 0x4000
 63:

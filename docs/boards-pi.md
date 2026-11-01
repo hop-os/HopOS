@@ -97,12 +97,15 @@ Per stap: wat er moet staan, en wat het betekent als het er niet staat.
 9. **`irq: GIC-400: GICD ... CTLR 0x1 ... cpu mask 0x1`**. CTLR 0 of mask
    0: TF-A liet de GIC anders achter; noteer de regel.
 10. **Pi 4 NIC**: `net: genet rev 0x6000..., PHY at 1 (0x600d:...)`, dan
-    `net: genet up, 1000 Mbps full duplex, polled`, `HOPOS_NIC_UP` en een
-    DHCP-lease. `not a v5` of `no PHY`: noteer; `no link within 8 s`:
-    kabel.
+    `net: genet up, link pending (autoneg), RX and TX done on INTID 189`,
+    `HOPOS_NIC_UP`, en (de probe wacht niet meer op de link, 01-11) uit de
+    pomp-taak `net: link up at 1000 Mbps after N ms HOPOS_LINK_UP`, pas
+    dan de DHCP-lease. `not a v5` of `no PHY`: noteer; geen
+    `HOPOS_LINK_UP`: kabel, of de MDIO (de guard reset de node na 120 s).
 11. **Pi 5 NIC**: `net: pcie2 link up (status 0x..b0), RP1 1de4:0001`,
-    `net: rp1 up, PHY at 1`, `net: gem up, 1000 Mbps full duplex, RX on
-    INTID 166`. De lijn is een flank (een MSI via de MIP): het board
+    `net: rp1 up, PHY at 1`, `net: gem up, link pending (autoneg), RX and
+    TX done on INTID 166`, en dan `net: link up at 1000 Mbps after N ms
+    HOPOS_LINK_UP`. De lijn is een flank (een MSI via de MIP): het board
     registreert hem als `Trigger::Edge` en de dispatcher zet GICD_ICFGR
     vóór de enable (`cpu::irq::enable_as`). `PCIe bring-up failed` met de status in de regel ervoor:
     RESCAL, PLL of training (de bewezen probe6-reeks).

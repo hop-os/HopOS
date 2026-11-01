@@ -400,7 +400,7 @@ fn wire_virtio(
         root_bus,
         f,
     };
-    irq::wire(&at, irq::Mode::Msix, bell, irq::no_ack, irq::no_ack)
+    irq::wire_msix(&at, bell, irq::no_ack)
 }
 
 /// De eerste virtio-functie van type `ty` op een van de segmenten, met

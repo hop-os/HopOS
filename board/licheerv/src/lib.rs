@@ -458,9 +458,11 @@ impl Board for LicheeRv {
     }
 
     /// De ethernet-keten (Go, board/licheerv/hop/net.go): klokken, leeft de
-    /// MAC, de ePHY aan, PHY-scan, autonegotiatie, DMA. Elke stap meldt zich
-    /// met het getal erbij: een boot-cyclus is hier duur (kaart eruit, in de
-    /// Mac, terug).
+    /// MAC, de ePHY aan, PHY-scan, de start van de autonegotiatie, DMA. De
+    /// probe wacht niet op de link: dat doet de taak (`netdev::Device::link`),
+    /// en dan gaat de MAC aan op de snelheid. Elke stap meldt zich met het
+    /// getal erbij: een boot-cyclus is hier duur (kaart eruit, in de Mac,
+    /// terug).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
         if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
@@ -484,32 +486,20 @@ impl Board for LicheeRv {
                 "no PHY on the MDIO bus (ePHY init did not take)",
             ));
         };
-        let link = driver_mdio::autoneg(
-            &mut probe,
-            phy.addr,
-            false,
-            cpu::riscv::idle::now,
-            8_000_000_000,
-        )
-        .map_err(|_| Error::Nic("autonegotiation failed (cable plugged in?)"))?;
+        probe
+            .start_link(phy.addr)
+            .map_err(|_| Error::Nic("MDIO stuck starting autoneg"))?;
         cpu::println!(
-            "net: dwmac version {v:#x}, PHY {} id {:04x}:{:04x}, link {link}",
+            "net: dwmac version {v:#x}, PHY {} id {:04x}:{:04x}, link pending (autoneg)",
             phy.addr,
             phy.id1,
             phy.id2
         );
         // SAFETY: NET_DMA is van deze driver alleen, lijn-gealigneerd en
         // onder 4 GB; de driver doet het cache-onderhoud (dev met `thead`).
-        let mut nic = unsafe {
-            probe.start(
-                NET_DMA.base,
-                NET_DMA.size,
-                Self::node_mac(),
-                link.mbps,
-                link.full_duplex,
-            )
-        }
-        .map_err(|_| Error::Nic("dwmac start failed"))?;
+        let mut nic =
+            unsafe { probe.start(NET_DMA.base, NET_DMA.size, Self::node_mac(), phy.addr, None) }
+                .map_err(|_| Error::Nic("dwmac start failed"))?;
         // De lijn op de PLIC van de C906B ([`GMAC_IRQ`]); wil hij niet aan,
         // dan is dat een fout (docs/sequence-hopos.md §14.1 O3). De kern
         // hoort een app op de C906L na elke slaap van hooguit 2 ms
@@ -519,7 +509,7 @@ impl Board for LicheeRv {
         cpu::irq::enable(Line(GMAC_IRQ), Some(nic_ack), Some(&NIC_BELL))
             .map_err(|_| Error::Irq("dwmac source refused by the PLIC"))?;
         nic.set_irq(&NIC_BELL);
-        cpu::println!("net: dwmac irq {GMAC_IRQ} on the PLIC HOPOS_NIC_IRQ");
+        cpu::println!("net: dwmac irq {GMAC_IRQ} on the PLIC (RX and TX done) HOPOS_NIC_IRQ");
         cpu::println!("net: dwmac {}", nic.diag());
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))

@@ -16,6 +16,12 @@
 //! registers delen niets met de ringen. Over PCI is de lijn MSI-X zonder
 //! ack.
 //!
+//! De TX-completion zit vanzelf op de lijn: de driver zet
+//! `VIRTQ_AVAIL_F_NO_INTERRUPT` nooit, dus een TX-buffer die het device in
+//! de used-ring teruggeeft, meldt zich zoals een ontvangen frame (virtio 1.2
+//! §2.7.7; over PCI krijgen beide queues de vector). Zo wekt een volle ring
+//! die leegloopt de pomp.
+//!
 //! Batching: [`transmit`](netdev::Device::transmit) en de RX-recycle zetten
 //! descriptors klaar; de doorbell (avail.idx publiceren plus QueueNotify)
 //! valt pas in [`flush`](netdev::Device::flush), één keer per burst. Dat is

@@ -32,7 +32,10 @@
 //!
 //! De interrupt: [`ack_irq`] (masker dicht, latch gewist) is de device-ack
 //! van de dispatcher; de RX-pomp heropent hem als hij de ring leeg vindt
-//! (het rearm-ritme van `hopnet.rxLoop` in Go).
+//! (het rearm-ritme van `hopnet.rxLoop` in Go). Op de lijn: RCOMP, en de
+//! TX-kant zoals Linux' `MACB_TX_INT_FLAGS`: TCOMP (een frame ging de draad
+//! op, er is ring vrij) en TXUBR (de zender las een vrije descriptor en
+//! stopte; de herstart van [`Gem::tx_restart`] volgt in de pomp-ronde).
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -165,8 +168,14 @@ const MAN_MUST_BE_10: u32 = 0b10 << 16;
 /// RP1 (rp1.dtsi): cdns,ar2r-max-pipe = 8, aw2w-max-pipe = 8, use-aw2b-fill.
 const AMP_RP1: u32 = 8 | (8 << 8) | (1 << 16);
 
-/// Receive complete (MACB_RCOMP): de enige lijn die de RX-pomp wekt.
+/// Receive complete (MACB_RCOMP).
 const INT_RCOMP: u32 = 1 << 1;
+/// TX used bit read (MACB_TXUBR): de zender stopte op een vrije descriptor.
+const INT_TXUBR: u32 = 1 << 3;
+/// Transmit complete (MACB_TCOMP).
+const INT_TCOMP: u32 = 1 << 7;
+/// Wat de pomp wekt: ontvangen, verzonden, en de zender die stilviel.
+const INT_LINE: u32 = INT_RCOMP | INT_TXUBR | INT_TCOMP;
 
 /// Buffergrootte per descriptor (64-voud).
 pub const BUF: usize = 1536;
@@ -306,7 +315,7 @@ pub unsafe fn stop(base: Pa) {
 /// De device-ack van de dispatcher: masker dicht (IDR) en de latch gewist.
 ///
 /// Alleen wissen is niet genoeg: zolang de ring werk heeft, zet de GEM RCOMP
-/// meteen weer. En altijd het expliciete bit schrijven, nooit de
+/// meteen weer. En altijd de expliciete bits schrijven, nooit de
 /// teruggelezen waarde: de ISR van deze GEM is "clear on write" (RP1,
 /// DCFG1.IRQCOR=0); een gemaskeerd bit leest als 0 maar blijft gelatcht, en
 /// bij IER kwam de lijn meteen terug: 134k interrupts/s op een stille Pi 5
@@ -318,8 +327,8 @@ pub unsafe fn stop(base: Pa) {
 pub unsafe fn ack_irq(base: Pa) {
     // SAFETY: de voorwaarde van deze functie.
     let r = unsafe { regs(base) };
-    r.idr.write(INT_RCOMP);
-    r.isr.write(INT_RCOMP);
+    r.idr.write(INT_LINE);
+    r.isr.write(INT_LINE);
 }
 
 /// Eén GEM.
@@ -337,6 +346,8 @@ pub struct Gem {
     irq: Option<&'static Signal>,
     /// De board-kant van de rearm (RP1: de MSI-X IACK).
     rearm: Option<fn()>,
+    /// Het adres van de PHY ([`Gem::start_link`]).
+    phy: u8,
 }
 
 impl Gem {
@@ -367,6 +378,7 @@ impl Gem {
             tx_head: 0,
             irq: None,
             rearm: None,
+            phy: 0,
         }
     }
 
@@ -387,10 +399,11 @@ impl Gem {
         (0..MDIO_POLLS).any(|_| s.read() & STATUS_MDIO_IDLE != 0)
     }
 
-    /// Zet ringen en MAC-config klaar en zet RX en TX aan, op de snelheid
-    /// die de autonegotiatie afsprak; de RP1-CLKGEN volgt de MAC-snelheid
-    /// vanzelf. Het volledige `macb_reset_hw`-recept vooraf.
-    pub fn init(&mut self, link: Link) -> Result {
+    /// Zet ringen en MAC-config klaar, met de management-poort aan; RX en
+    /// TX blijven uit tot de link er is ([`netdev::Device::link`]): hun
+    /// snelheid is die van de autonegotiatie. Het volledige
+    /// `macb_reset_hw`-recept vooraf.
+    pub fn init(&mut self) -> Result {
         if self.dma_size < DMA_NEED {
             return Err(Error::Dma {
                 have: self.dma_size,
@@ -440,7 +453,7 @@ impl Gem {
         r.spaddr1b
             .write(u32::from_le_bytes([m[0], m[1], m[2], m[3]]));
         r.spaddr1t.write(u32::from_le_bytes([m[4], m[5], 0, 0]));
-        r.nwcfg.write(cfg_for(r.dcfg1.read(), link));
+        r.nwcfg.write(cfg_for(r.dcfg1.read(), None));
         // RP1 (Linux `gem_init_axi`, kernel-breed alléén voor de RP1): de
         // outstanding AXI-reads/writes van de GEM-DMA op 8/8 en writes tellen
         // tot de B-response. De DMA steekt hier een AXI-naar-PCIe-brug over;
@@ -460,19 +473,35 @@ impl Gem {
         r.rbqph.write((rx >> 32) as u32);
         r.txqbase.write(tx as u32);
         r.tbqph.write((tx >> 32) as u32);
-        r.nwctrl.write(CTRL_MGMT_EN | CTRL_TX_EN | CTRL_RX_EN);
+        r.nwctrl.write(CTRL_MGMT_EN);
         Ok(())
+    }
+
+    /// Start de autonegotiatie op de PHY op `phy`, zonder te wachten: de
+    /// link komt in de taak ([`netdev::Device::link`]).
+    pub fn start_link(&mut self, phy: u8) -> driver_mdio::Result {
+        self.phy = phy;
+        driver_mdio::start_autoneg(self, phy, true)
+    }
+
+    /// De MAC op de link: NWCFG op snelheid en duplex, dan RX en TX aan
+    /// (`macb_mac_link_up`, de `adjust_link` van Linux); de RP1-CLKGEN volgt
+    /// de MAC-snelheid vanzelf.
+    fn adjust_link(&self, link: Link) {
+        let r = self.r();
+        r.nwcfg.write(cfg_for(r.dcfg1.read(), Some(link)));
+        r.nwctrl.write(CTRL_MGMT_EN | CTRL_TX_EN | CTRL_RX_EN);
     }
 
     /// Hangt de NIC aan zijn lijn: `bell` is het signaal van de dispatcher,
     /// `rearm` de board-kant van het heropenen (RP1: IACK). Opent de
-    /// RX-interrupt.
+    /// interrupts van de lijn.
     pub fn set_irq(&mut self, bell: &'static Signal, rearm: fn()) {
         self.irq = Some(bell);
         self.rearm = Some(rearm);
         let r = self.r();
-        r.isr.write(INT_RCOMP);
-        r.ier.write(INT_RCOMP);
+        r.isr.write(INT_LINE);
+        r.ier.write(INT_LINE);
     }
 
     /// Latch gewist, de board-ack (met het masker nog dicht, zodat de RP1
@@ -480,9 +509,9 @@ impl Gem {
     fn rearm_irq(&self) {
         let Some(board) = self.rearm else { return };
         let r = self.r();
-        r.isr.write(INT_RCOMP);
+        r.isr.write(INT_LINE);
         board();
-        r.ier.write(INT_RCOMP);
+        r.ier.write(INT_LINE);
     }
 
     /// Linux' `macb_tx_restart`: staat de zender stil (TGO laag) terwijl de
@@ -490,9 +519,9 @@ impl Gem {
     /// TSTART. RP1-eigenaardigheid (macb_main.c, "TSTART write might get
     /// dropped"): over de PCIe-backed AXI kan de TSTART-schrijf verloren
     /// gaan terwijl de DMA net stopt. Linux doet dit op de TXUBR-interrupt;
-    /// hier bij een volle ring en bij elke lege RX-ronde van de pomp (de
-    /// vangrail van 10 ms is dus de langste stilstand). Elke volgende
-    /// TSTART haalt ook alles mee wat ervoor bleef liggen.
+    /// hier bij een volle ring en bij elke lege RX-ronde van de pomp, en
+    /// TXUBR zit op de lijn, dus de stilgevallen zender wekt die ronde zelf.
+    /// Elke volgende TSTART haalt ook alles mee wat ervoor bleef liggen.
     ///
     /// Tot 04-10 wachtte `transmit` hier per frame tot de descriptor terug
     /// was, in stappen van 10 µs: één frame tegelijk op de draad, 55 MB/s uit
@@ -506,15 +535,18 @@ impl Gem {
     }
 }
 
-/// NWCFG voor een link, met de busbreedte uit DCFG1.DBWDEF (4 = 128,
-/// 2 = 64, anders 32 bits).
-fn cfg_for(dcfg1: u32, link: Link) -> u32 {
+/// NWCFG met de busbreedte uit DCFG1.DBWDEF (4 = 128, 2 = 64, anders 32
+/// bits), en met een link zijn snelheid en duplex.
+fn cfg_for(dcfg1: u32, link: Option<Link>) -> u32 {
     let dbw = match (dcfg1 >> 25) & 0x7 {
         d if d >= 4 => 2,
         d if d >= 2 => 1,
         _ => 0,
     };
     let mut cfg = CFG_MDC_DIV48 | CFG_RX_FCS | CFG_PAE | (dbw << CFG_DBW_SHIFT);
+    let Some(link) = link else {
+        return cfg;
+    };
     if link.full_duplex {
         cfg |= CFG_FD;
     }
@@ -633,6 +665,13 @@ impl netdev::Device for Gem {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    /// Eén blik op de PHY; bij link de MAC erop.
+    fn link(&mut self) -> Option<u32> {
+        let l = driver_mdio::link(self, self.phy, true).ok()??;
+        self.adjust_link(l);
+        Some(l.mbps)
     }
 }
 

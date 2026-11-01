@@ -387,7 +387,9 @@ procedure).
 De kern wacht op een bel (R1 van docs/sequence-hopos.md §13.1): de NIC, de
 kick van een app-core (het interne LAN: de TX-ringen en de outboxen), de
 schijf, en de timer van een deadline. Elke NIC en elke schijf heeft een
-lijn (§14.1 O3); een board dat er geen bedraadt, start niet. Daarnaast
+lijn (§14.1 O3); een board dat er geen bedraadt, start niet. Op de lijn
+van de NIC zit ook de TX-completion (elke driver, sinds 01-11): een volle
+TX-ring die leegloopt, wekt de pomp (`netif_wake_queue`). Daarnaast
 wacht elke wacht hoogstens zijn termijn (de 5 s van een blok-opdracht,
 `blkdev::TERM`), en dat is geen poll. Wat wél op een klok kijkt in plaats
 van op een bel, staat hier, met de reden. De code verwijst bij elke poll
@@ -397,7 +399,7 @@ naar deze tabel. Verder pollt niets (O4, 01-11).
 | --- | --- | --- | --- |
 | De USB-invoer | `gui/usbin` (`POLL_INTERVAL_NS`), alleen met `gui` | 4 ms | Besluit O4: een optioneel vlak, en een poll houdt de flip eenvoudiger dan een extra lijn (xHCI) |
 | De codec | `kern/src/codecabi.rs` (`POLL_PUMP`), alleen met `media` | 1 ms, alleen tijdens een wachtende `OP_CODEC_POLL` | Besluit O4: de engine heeft hier geen interrupt (`media/mve`); de VPU-lijn (intid 358 op de O6N) vraagt ijzer |
-| Een frame dat de NIC niet nam | `net/src/pump.rs` (`NIC_POLL`) | 300 µs, alleen zolang de pomp een frame vasthoudt | Niet elke NIC-driver zet een interrupt op een vrijgekomen TX-descriptor (virtio wel, de rest is niet nagegaan). Open: per driver de TX-completion als lijn, dan kan dit weg |
+| De link, vóór de pomp start | `hopos/src/net.rs` (`LINK_POLL`), via `netdev::Device::link` | 50 ms, alleen tot de eerste link | De PHY heeft hier geen bel: geen board bedraadt een PHY-interrupt, en een link-wissel van de MAC zelf (de LinkChg van de Realtek) heeft niet elke NIC; één weg voor alle boards. Linux pollt zo'n PHY elke seconde (phylib `PHY_POLL`, `phy_state_machine`) en zet de MAC bij de wissel (`adjust_link`); hier zet de driver hem bij de eerste link, en daarna kijkt niemand meer. De probe wacht niet (01-11, elk board); begrensd door de guard van 120 s |
 | De slaap van de kern op de LicheeRV | `cpu::riscv::idle::WFI_CAP_NS` (`board/licheerv`) | hoogstens 2 ms | IJzer: op de SG2002 wekt een `wfi` op `mtimecmp` niet betrouwbaar (01-08), en de C906L heeft geen bel naar de C906B. Na elke slaap kijkt de deur in de ringen en de outboxen |
 | De slaap van de kern op WFE | `cpu::idle::Mode::Wfe`: de Pi's, de M4 als de timer-FIQ zijn core niet bereikt | de event-stream, ~1 ms | IJzer: WFI op de timer is op de Pi's niet gemeten, en op de M4 bereikt de timer-FIQ een door de kern opgebrachte core niet (29-08). Een slaap die niet wekt is een hang |
 | De wekker van de app-cores op de M4 | `hopos/src/cage.rs` (`WAKE_EVERY`) | 1 ms | IJzer: een app-core die in de WFI van de switcher slaapt, wekt geen eigen timer-FIQ (02-09); de kern is de enige die hem wekt |

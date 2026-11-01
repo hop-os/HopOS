@@ -348,16 +348,16 @@ fn refusals_are_named() {
 // ── De link ─────────────────────────────────────────────────────────────────
 
 #[test]
-fn link_up_restarts_autoneg_and_sets_the_port_mode() {
+fn the_link_restarts_autoneg_and_sets_the_port_mode() {
     let m = chip(true);
     let mut n = up(&m);
-    let l = n.link_up(1_000_000_000).unwrap();
+    n.start_link().unwrap();
     assert_eq!(
-        l,
-        Link {
+        n.link_now(),
+        Ok(Some(Link {
             mbps: 1000,
             full_duplex: true
-        }
+        }))
     );
     let writes = chip_state(|c| c.phy_writes.clone());
     assert!(writes.contains(&(
@@ -371,11 +371,12 @@ fn link_up_restarts_autoneg_and_sets_the_port_mode() {
 }
 
 #[test]
-fn no_cable_is_a_named_timeout() {
+fn no_cable_is_no_link_and_no_wait() {
     let m = chip(false);
     let mut n = up(&m);
-    let e = n.link_up(100_000_000).unwrap_err();
-    assert_eq!(e, Error::NoLink { bmsr: 0, ms: 100 });
+    n.start_link().unwrap();
+    assert_eq!(n.link_now(), Ok(None));
+    assert_eq!(netdev::Device::link(&mut n), None);
 }
 
 #[test]

@@ -164,8 +164,6 @@ pub const RAM_MAPPED_END: u64 = 0xF000_0000;
 
 /// Het MDIO-adres van de PHY volgens de DTS (`rgmii_phy1: reg = <0x1>`).
 pub const PHY_ADDR_DTS: u8 = 1;
-/// Hoe lang de autonegotiatie mag duren (Go: 8 s).
-const AUTONEG_NS: u64 = 8_000_000_000;
 /// Zonder DTB: vier A55's.
 const CORES_DEFAULT: usize = 4;
 /// De grootste initrd (config plus image) die de kern naar de heap haalt:
@@ -422,8 +420,9 @@ impl Rk3566 {
     }
 
     /// De PHY: scan, het DTS-adres als dat hetzelfde antwoordt, de
-    /// RGMII-delays, en de autonegotiatie. Geeft adres en link.
-    fn bring_up_phy(p: &mut Probe) -> Result<(u8, driver_mdio::Link), Error> {
+    /// RGMII-delays, en de start van de autonegotiatie (zonder wachten: de
+    /// link is van de taak, `netdev::Device::link`). Geeft het adres.
+    fn bring_up_phy(p: &mut Probe) -> Result<u8, Error> {
         let Some(found) = driver_mdio::scan(p) else {
             let (sel, gate, rst) = soc::gmac_clocks();
             cpu::println!(
@@ -464,16 +463,16 @@ impl Rk3566 {
                 phy.id2
             );
         }
-        match driver_mdio::autoneg(p, phy.addr, true, cpu::idle::now, AUTONEG_NS) {
-            Ok(link) => Ok((phy.addr, link)),
+        match p.start_link(phy.addr) {
+            Ok(()) => Ok(phy.addr),
             Err(e) => {
                 cpu::println!(
-                    "net: PHY {} (id {:04x}:{:04x}): {e}, cable plugged in? HOPOS_NIC_FAIL",
+                    "net: PHY {} (id {:04x}:{:04x}): {e} starting autoneg HOPOS_NIC_FAIL",
                     phy.addr,
                     phy.id1,
                     phy.id2
                 );
-                Err(Error::Nic("no link"))
+                Err(Error::Nic("MDIO stuck starting autoneg"))
             }
         }
     }
@@ -692,29 +691,35 @@ impl Board for Rk3566 {
             );
             return Err(Error::Nic("DMA soft reset stuck"));
         }
-        // 6. De PHY en de autonegotiatie.
-        let (phy, link) = Self::bring_up_phy(&mut p)?;
-        // 7. De klokdeler op de onderhandelde snelheid.
-        soc::gmac_set_speed(link.mbps);
-        // 8. De ringen in de NIC-DMA-regio.
+        // 6. De PHY en de start van de autonegotiatie.
+        let phy = Self::bring_up_phy(&mut p)?;
+        // 7. De ringen in de NIC-DMA-regio. De klokdeler en de MAC volgen
+        //    bij de link (`soc::gmac_set_speed` als `fix_speed`).
         let mac = Self::node_mac();
         // SAFETY: NET_DMA is van deze driver alleen: onder 4 GB, buiten de
         // kern-RAM, Normal-NC gemapt met NET_BUF als Normal-WB-blok erin
         // (`mmu`), door niets anders uitgedeeld.
-        let mut nic =
-            unsafe { p.start(NET_DMA.base, NET_DMA.size, mac, link.mbps, link.full_duplex) }
-                .map_err(|e| {
-                    cpu::println!("net: {e} HOPOS_NIC_FAIL");
-                    Error::Nic("dwmac4 start failed")
-                })?;
-        // 9. De lijn. Een lijn die niet aan wil, is een fout: de pomp pollt
+        let mut nic = unsafe {
+            p.start(
+                NET_DMA.base,
+                NET_DMA.size,
+                mac,
+                phy,
+                Some(soc::gmac_set_speed),
+            )
+        }
+        .map_err(|e| {
+            cpu::println!("net: {e} HOPOS_NIC_FAIL");
+            Error::Nic("dwmac4 start failed")
+        })?;
+        // 8. De lijn. Een lijn die niet aan wil, is een fout: de pomp pollt
         // niet (docs/sequence-hopos.md §14.1 O3).
         NIC_ACK.set(nic.irq_ack());
         cpu::irq::enable(Line(GMAC1_INTID), Some(nic_ack), Some(&NIC_BELL))
             .map_err(|_| Error::Irq("dwmac4 line refused"))?;
         nic.set_irq(&NIC_BELL);
         cpu::println!(
-            "net: dwmac4 at {:#x} version {version:#x}, PHY {phy}, link {link}, intid {GMAC1_INTID}, rings {}+{} in {:#x}",
+            "net: dwmac4 at {:#x} version {version:#x}, PHY {phy}, link pending (autoneg), intid {GMAC1_INTID} (RX and TX done), rings {}+{} in {:#x}",
             GMAC1.0,
             dwmac4::NUM_RX,
             dwmac4::NUM_TX,

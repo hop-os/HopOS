@@ -231,17 +231,18 @@ fn the_mac0_fallback_is_used_when_the_backup_is_empty() {
 }
 
 #[test]
-fn link_up_on_the_8126a_advertises_5g_and_reads_physr() {
+fn link_on_the_8126a_advertises_5g_and_reads_physr() {
     let m = chip(0x64a, true);
     let mut n = up(&m);
-    let l = n.link_up(5_000_000_000).unwrap();
+    n.start_link().unwrap();
     assert_eq!(
-        l,
-        Link {
+        n.poll_link().unwrap(),
+        Some(Link {
             mbps: 5000,
             full_duplex: true
-        }
+        })
     );
+    assert_eq!(n.link(), Some(5000));
     let writes = CHIP.with(|c| c.borrow().phy_writes.clone());
     assert!(
         writes.contains(&(PHY_NBASET, 0x0180)),
@@ -263,8 +264,8 @@ fn the_8125b_runs_its_ephy_table_and_phy_steps() {
     assert_eq!(ephy[0], (0x0b, 0xa908));
     assert_eq!(ephy[2], (0x4b & 0x1f, 0xa908));
     assert_eq!(ephy[4], (0x22 & 0x1f, (0x1234 & !0x0030) | 0x0020));
-    let l = n.link_up(5_000_000_000).unwrap();
-    assert_eq!(l.mbps, 5000); // de nep-PHYSR; op ijzer zegt de 8125B 2500
+    n.start_link().unwrap();
+    assert_eq!(n.link(), Some(5000)); // de nep-PHYSR; op ijzer zegt de 8125B 2500
     let writes = CHIP.with(|c| c.borrow().phy_writes.clone());
     let params: Vec<u16> = writes
         .iter()
@@ -278,21 +279,12 @@ fn the_8125b_runs_its_ephy_table_and_phy_steps() {
 }
 
 #[test]
-fn no_link_reports_bmsr_and_phystatus() {
+fn no_link_is_none_and_no_wait() {
     let m = chip(0x649, false);
     let mut n = up(&m);
-    let e = n.link_up(100_000_000).unwrap_err();
-    assert!(
-        matches!(
-            e,
-            Error::NoLink {
-                bmsr: 0,
-                ms: 100,
-                ..
-            }
-        ),
-        "{e:?}"
-    );
+    n.start_link().unwrap();
+    assert_eq!(n.poll_link(), Ok(None));
+    assert_eq!(n.link(), None);
 }
 
 #[test]
@@ -406,9 +398,12 @@ fn transmit_pads_batches_and_honours_ownership() {
         0,
         "last descriptor ends the ring"
     );
-    // Descriptor 0 is nog van de NIC: vol, en de driver belt nog eens.
+    // Descriptor 0 is nog van de NIC: vol, en de driver belt nog eens en
+    // wist de TX-bits, zodat de volgende TxOK een flank geeft.
+    dev::write32(at(m.base, 0x3c), 0);
     assert_eq!(n.transmit(&[1; 100]), Err(TxError::Full));
     assert_eq!(n.stats.doorbells, 2);
+    assert_eq!(dev::read32(at(m.base, 0x3c)), INT_TX, "W1C of TxOK, TxErr");
     dev::write32(tx(0), 0); // de NIC gaf hem terug
     n.transmit(&[1; 100]).unwrap();
     assert_eq!(n.transmit(&[]), Err(TxError::Size(0)));
@@ -420,7 +415,7 @@ fn the_irq_masks_on_ack_and_rearms_on_an_empty_ring() {
     let m = chip(0x649, false);
     let mut n = fake(&m);
     n.set_irq(&BELL);
-    assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX, "mask open");
+    assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX | INT_TX, "mask open");
     let ack = n.irq_ack();
     dev::write32(at(m.base, 0x3c), INT_RX_OK);
     ack.ack();
@@ -435,6 +430,6 @@ fn the_irq_masks_on_ack_and_rearms_on_an_empty_ring() {
     assert_eq!(dev::read32(at(m.base, 0x38)), 0, "not drained yet");
     // Leeg: het masker gaat weer open.
     assert_eq!(n.receive(&mut [0; 4096]), None);
-    assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX);
+    assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX | INT_TX);
     assert!(!BELL.take(), "the driver never rings the bell itself");
 }

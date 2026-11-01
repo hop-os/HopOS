@@ -94,14 +94,18 @@ const OP_TX_START: u32 = 1 << 13;
 /// De RX-DMA loopt.
 const OP_RX_START: u32 = 1 << 1;
 
-// De RX-interrupt (Linux `dwmac_dma.h`). De 3.x-indeling: NIE en NIS op bit
+// De interrupts (Linux `dwmac_dma.h`). De 3.x-indeling: NIE en NIS op bit
 // 16, niet op 15 zoals de 4.10+ van `dwmac4`. Status is W1C.
 /// DMA_INTR_ENA: normal interrupt summary enable.
 const INTR_NIE: u32 = 1 << 16;
 /// DMA_INTR_ENA: receive interrupt enable.
 const INTR_RIE: u32 = 1 << 6;
+/// DMA_INTR_ENA: transmit interrupt enable.
+const INTR_TIE: u32 = 1 << 0;
 /// DMA_STATUS: receive interrupt.
 const STAT_RI: u32 = 1 << 6;
+/// DMA_STATUS: transmit interrupt (een descriptor met IC is klaar).
+const STAT_TI: u32 = 1 << 0;
 /// DMA_STATUS: normal interrupt summary.
 const STAT_NIS: u32 = 1 << 16;
 
@@ -137,6 +141,8 @@ const RX_STS_FIRST: u32 = 1 << 9;
 /// LS: laatste descriptor van het frame.
 const RX_STS_LAST: u32 = 1 << 8;
 
+/// TDES1 IC: TI als deze descriptor klaar is (`TDES1_INTERRUPT`).
+const TX_CNTL_IC: u32 = 1 << 31;
 /// TDES1 LS.
 const TX_CNTL_LAST: u32 = 1 << 30;
 /// TDES1 FS.
@@ -231,7 +237,7 @@ const fn rx_cntl(last: bool) -> u32 {
 /// past in TBS1): eerste én laatste descriptor (wij versturen nooit
 /// gefragmenteerd), en de ring-end-bit op de laatste van de ring.
 const fn tx_cntl(len: usize, last: bool) -> u32 {
-    let c = TX_CNTL_FIRST | TX_CNTL_LAST | len as u32;
+    let c = TX_CNTL_IC | TX_CNTL_FIRST | TX_CNTL_LAST | len as u32;
     if last { c | RING_END } else { c }
 }
 
@@ -281,8 +287,8 @@ impl Ops for Hw {
         read: 0,
         write: 1 << 1,
     };
-    const INTR_RX: u32 = INTR_NIE | INTR_RIE;
-    const STAT_RX: u32 = STAT_RI | STAT_NIS;
+    const INTR: u32 = INTR_NIE | INTR_RIE | INTR_TIE;
+    const STAT: u32 = STAT_RI | STAT_TI | STAT_NIS;
 
     fn version(r: &Regs) -> &Reg<u32> {
         &r.version
@@ -301,12 +307,11 @@ impl Ops for Hw {
     }
 
     /// RMII: 10 of 100.
-    fn speed_ok(mbps: u32) -> bool {
-        matches!(mbps, 10 | 100)
-    }
+    const GIGABIT: bool = false;
 
-    /// De volgorde van de Go-driver (en van de vendor).
-    fn program(r: &Regs, ring: &Rings<Self>, mac: Mac, mbps: u32, full_duplex: bool) -> Result {
+    /// De volgorde van de Go-driver (en van de vendor); MAC_CONFIG volgt bij
+    /// de link (`set_link`).
+    fn program(r: &Regs, ring: &Rings<Self>, mac: Mac) -> Result {
         // Het MAC-adres vóór RX aan, anders draait de MAC even met een
         // 00:00:00:00:00:00-filter.
         set_mac_addr(&r.addr0_hi, &r.addr0_lo, mac);
@@ -328,10 +333,15 @@ impl Ops for Hw {
         r.mmc_tx_mask.write(MMC_INT_ALL);
         r.mmc_ipc_mask.write(MMC_INT_ALL);
         r.status.update(|v| v); // sticky bits van vóór de reset wissen (W1C)
-        r.conf.write(mac_conf(mbps, full_duplex));
         r.op_mode.update(|v| v | OP_TX_START | OP_RX_START);
         dev::mb();
         Ok(())
+    }
+
+    /// MAC_CONFIG voor de link: RMII, snelheid, duplex, zender en ontvanger.
+    fn set_link(r: &Regs, mbps: u32, full_duplex: bool) {
+        r.conf.write(mac_conf(mbps, full_duplex));
+        dev::mb();
     }
 
     /// De RX-poll-demand: de DMA leest de ring opnieuw.

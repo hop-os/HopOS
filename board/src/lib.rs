@@ -469,11 +469,12 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
 
     /// Vindt en initialiseert de NIC, met zijn lijn (§14.1 O3): een lijn
     /// die niet aan wil is [`Error::Irq`]. `Ok(None)` = geen NIC. Eén keer
-    /// per boot: na een `Err` (geen link) is er geen tweede poging, de guard
-    /// van de watchdog reset de node en de koude boot probeert opnieuw. De
-    /// wacht op de link valt binnen de hardware-timeout van de watchdog van
-    /// het board, want de pets komen pas met de executor (de O6N wacht hier
-    /// niet: zijn autonegotiatie duurt langer dan zijn 8,6 s).
+    /// per boot: na een `Err` is er geen tweede poging, de guard van de
+    /// watchdog reset de node en de koude boot probeert opnieuw. De probe
+    /// wacht niet op de link: hij start de autonegotiatie, en de link-wacht
+    /// is van de taak (`netdev::Device::link`, vóór de pomp start), want de
+    /// pets van de hardware-watchdog komen pas met de executor en een
+    /// autonegotiatie duurt tot 12 s (01-11, elk board).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error>;
 
     /// De lineaire framebuffer van dit board, als er een beeld loopt (GOP,

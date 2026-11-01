@@ -48,7 +48,7 @@ pub(crate) struct Rig<O: Ops> {
 pub(crate) fn rig<O: Ops>() -> Rig<O> {
     let regs = mem(size_of::<O::Regs>());
     let dma = mem(O::NEED_BYTES as usize);
-    let n = Stmmac::at(regs.base, TEST_MAC, dma.base);
+    let n = Stmmac::at(probe::<O>(&regs), TEST_MAC, dma.base);
     Rig {
         _regs: regs,
         _dma: dma,
@@ -104,8 +104,8 @@ impl Ops for Fake {
         read: 3 << 2,
         write: 1 << 2,
     };
-    const INTR_RX: u32 = 0x41;
-    const STAT_RX: u32 = 0x41;
+    const INTR: u32 = 0x41;
+    const STAT: u32 = 0x41;
 
     fn version(r: &FakeRegs) -> &Reg<u32> {
         &r.version
@@ -119,11 +119,12 @@ impl Ops for Fake {
     fn irq(r: &FakeRegs) -> (&Reg<u32>, &Reg<u32>) {
         (&r.intr_ena, &r.status)
     }
-    fn speed_ok(mbps: u32) -> bool {
-        mbps <= 100
-    }
-    fn program(_: &FakeRegs, _: &Rings<Self>, _: Mac, _: u32, _: bool) -> Result {
+    const GIGABIT: bool = false;
+    fn program(_: &FakeRegs, _: &Rings<Self>, _: Mac) -> Result {
         Ok(())
+    }
+    fn set_link(r: &FakeRegs, mbps: u32, full_duplex: bool) {
+        r.rx_tail.write(mbps | u32::from(full_duplex) << 31);
     }
     fn rx_doorbell(r: &FakeRegs, tail: Pa) {
         r.rx_tail.write(lo(tail));
@@ -164,7 +165,7 @@ type F = Fake;
 /// Een draaiende nep-driver.
 fn running<O: Ops>() -> Rig<O> {
     let mut f = rig::<O>();
-    f.n.bring_up(100, true).unwrap();
+    f.n.bring_up().unwrap();
     f
 }
 
@@ -183,28 +184,24 @@ fn start_refuses_a_dead_mac_a_small_or_misplaced_region_and_a_stuck_reset() {
     assert_eq!(p.check(), Err(Error::NoMac { version: 0 }));
     // In RAM blijft de reset-bit staan: het beeld van de Radxa op 05-08.
     assert_eq!(p.reset(), Err(Error::ResetStuck { bus_mode: 1 }));
-    let refuse = |dma: Pa, size: u64, mbps: u32| {
+    let refuse = |dma: Pa, size: u64| {
         // SAFETY: `start` weigert vóór hij iets aanraakt.
-        unsafe { probe::<F>(&regs).start(dma, size, TEST_MAC, mbps, true) }.err()
+        unsafe { probe::<F>(&regs).start(dma, size, TEST_MAC, 1, None) }.err()
     };
     assert_eq!(
-        refuse(Pa(0x8000_0000), 64, 100),
+        refuse(Pa(0x8000_0000), 64),
         Some(Error::DmaTooSmall { need, have: 64 })
     );
     for dma in [Pa(0x8000_0008), Pa(0xFFFF_FF00)] {
         assert_eq!(
-            refuse(dma, need, 100),
+            refuse(dma, need),
             Some(Error::DmaPlace { base: dma.0 }),
             "{dma:?}"
         );
     }
-    assert_eq!(
-        refuse(Pa(0x8000_0000), need, 1000),
-        Some(Error::Speed { mbps: 1000 })
-    );
     // Alles goed: dan de reset, die hier blijft hangen.
     assert_eq!(
-        refuse(Pa(0x8000_0000), need, 100),
+        refuse(Pa(0x8000_0000), need),
         Some(Error::ResetStuck { bus_mode: 1 })
     );
 }
@@ -464,16 +461,16 @@ fn the_irq_masks_on_ack_and_rearms_when_the_ring_is_empty() {
     assert_eq!(n.regs().intr_ena.read(), 0);
     n.set_irq(&BELL);
     let r = n.regs();
-    assert_eq!(r.intr_ena.read(), F::INTR_RX);
+    assert_eq!(r.intr_ena.read(), F::INTR);
     r.status.write(u32::MAX);
     n.irq_ack().ack();
-    assert_eq!(r.status.read(), F::STAT_RX, "W1C of the RX bits only");
+    assert_eq!(r.status.read(), F::STAT, "W1C of the line's bits only");
     assert_eq!(r.intr_ena.read(), 0, "ack leaves the line masked");
     // De pomp leest de ring leeg: het masker gaat weer open, één keer.
     let mut out = [0u8; 64];
     let rearms = n.stats.rearms;
     assert_eq!(n.receive(&mut out), None);
-    assert_eq!(r.intr_ena.read(), F::INTR_RX);
+    assert_eq!(r.intr_ena.read(), F::INTR);
     assert_eq!(n.receive(&mut out), None);
     assert_eq!(n.stats.rearms, rearms + 1);
     assert!(n.irq().is_some());

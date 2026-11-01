@@ -13,27 +13,22 @@
 //!
 //! Een volle TX-ring van de NIC is geen drop maar een stop, zoals Linux'
 //! `netif_stop_queue` in een driver die geen descriptor meer heeft: de pomp
-//! houdt het frame vast en probeert het de volgende ronde als eerste, en
-//! zolang hij vasthoudt kijkt hij elke [`NIC_POLL`]: niet elke driver zet
-//! een interrupt op een vrijgekomen TX-descriptor (een poll met een reden:
-//! docs/description.md §4.11). De egress-rij loopt dan vol, en de switch stopt met lezen
-//! uit de TX-ringen ([`crate::switch::Xoff`]); de pomp opent hem weer zodra
-//! hij een frame uit de rij nam (`netif_wake_queue`). Tot 24-10 ging het
-//! frame na één flush weg ("drop, TCP herstelt"), en elk gat kostte de TCP
-//! van de app een go-back-N of een RTO.
+//! houdt het frame vast en probeert het de volgende ronde als eerste. Die
+//! ronde komt van de lijn: elke driver zet de TX-completion op dezelfde
+//! lijn als de ontvangst, en een vrijgekomen descriptor wekt de pomp zoals
+//! de TX-clean van NAPI de queue wekt (`netif_wake_queue`). De egress-rij
+//! loopt intussen vol, en de switch stopt met lezen uit de TX-ringen
+//! ([`crate::switch::Xoff`]); de pomp opent hem weer zodra hij een frame uit
+//! de rij nam. Tot 24-10 ging het frame na één flush weg ("drop, TCP
+//! herstelt"), en elk gat kostte de TCP van de app een go-back-N of een
+//! RTO; tot 01-11 keek de pomp zolang hij vasthield elke 300 µs.
 
 use crate::switch::Xoff;
 use crate::{Frame, Stats, UPLINK_QUEUE};
 use core::sync::atomic::Ordering::Relaxed;
-use core::time::Duration;
-use executor::Executor;
 use netdev::{Device, TxError};
 use sync::spsc::{Receiver, Sender};
 use sync::{Signal, select, yield_now};
-
-/// Hoe vaak de pomp kijkt zolang hij een frame vasthoudt dat de volle
-/// TX-ring van de NIC niet nam (een poll: docs/description.md §4.11).
-pub const NIC_POLL: Duration = Duration::from_micros(300);
 
 /// Frames per RX-burst. De RX-doorbell gaat per burst, niet per frame: per
 /// frame scheelt dat één tot drie PCIe-acties, en op een 1 Gbit-link zijn
@@ -167,11 +162,16 @@ impl<'a, D: Device> Pump<'a, D> {
         n
     }
 
-    /// Eén ronde zonder wachten: TX, dan een RX-burst, dan de doorbells,
+    /// Eén ronde zonder wachten: een RX-burst, dan TX, dan de doorbells,
     /// en de meetlat van de driver naar de tellers. `true` = er was werk.
+    ///
+    /// RX eerst: een lege RX-ring heropent de lijn (in `receive`), en de
+    /// TX-ronde daarna is de blik ná het openen. Een descriptor die de NIC
+    /// vrijgaf terwijl de lijn dicht was, ziet die ronde; een die later
+    /// vrijkomt, wekt de lijn (de netdev-regel van NAPI, nu ook voor TX).
     pub fn pass(&mut self) -> bool {
-        let sent = self.tx_pass();
         let got = self.rx_pass();
+        let sent = self.tx_pass();
         if sent || got > 0 {
             self.nic.flush();
         }
@@ -189,8 +189,9 @@ impl<'a, D: Device> Pump<'a, D> {
         sent || got > 0
     }
 
-    /// De lus van de pomp; keert niet terug.
-    pub async fn run<const T: usize, const M: usize>(&mut self, exec: &'static Executor<T, M>) {
+    /// De lus van de pomp; keert niet terug. Een vastgehouden frame wacht
+    /// net als de rest op de lijn: de TX-completion van de NIC wekt hem.
+    pub async fn run(&mut self) {
         let line = self.line;
         loop {
             if self.pass() {
@@ -198,14 +199,7 @@ impl<'a, D: Device> Pump<'a, D> {
                 continue;
             }
             self.stats.rx_idle.fetch_add(1, Relaxed);
-            if self.held.is_some() {
-                // Een vastgehouden frame wacht op een descriptor die de NIC
-                // vrijgeeft, niet elke NIC met een interrupt: de poll van
-                // docs/description.md §4.11.
-                select(self.bell.wait(), select(line.wait(), exec.after(NIC_POLL))).await;
-            } else {
-                select(self.bell.wait(), line.wait()).await;
-            }
+            select(self.bell.wait(), line.wait()).await;
         }
     }
 }
@@ -214,6 +208,7 @@ impl<'a, D: Device> Pump<'a, D> {
 mod tests {
     use super::*;
     use crate::{Egress, Ingress};
+    use executor::Executor;
     use netdev::Mac;
     use std::collections::VecDeque;
 
@@ -432,6 +427,65 @@ mod tests {
         );
     }
 
+    /// Een vastgehouden frame wacht op de lijn, niet op een klok: zonder bel
+    /// blijft het liggen, en de TX-completion (de lijn) zet het de draad op.
+    #[test]
+    fn de_tx_completion_wekt_een_vastgehouden_frame() {
+        use core::cell::Cell;
+        struct Ring {
+            free: &'static Cell<usize>,
+            line: &'static Signal,
+            sent: &'static Cell<usize>,
+        }
+        impl Device for Ring {
+            fn transmit(&mut self, _: &[u8]) -> Result<(), TxError> {
+                if self.free.get() == 0 {
+                    return Err(TxError::Full);
+                }
+                self.free.set(self.free.get() - 1);
+                self.sent.set(self.sent.get() + 1);
+                Ok(())
+            }
+            fn receive(&mut self, _: &mut [u8]) -> Option<usize> {
+                None
+            }
+            fn mac(&self) -> Mac {
+                Mac([2, 0, 0, 0, 0, 9])
+            }
+            fn irq(&self) -> Option<&'static Signal> {
+                Some(self.line)
+            }
+        }
+        let exec: &'static Executor<4, 4> = leak(Executor::new());
+        let (ing_tx, _ing_rx) = leak(Ingress::new()).split().unwrap();
+        let (mut eg_tx, eg_rx) = leak(Egress::new()).split().unwrap();
+        let (free, sent, line) = (leak(Cell::new(1)), leak(Cell::new(0)), leak(Signal::new()));
+        let nic = Ring { free, line, sent };
+        let mut p = Pump::new(
+            nic,
+            ing_tx,
+            eg_rx,
+            leak(Signal::new()),
+            leak(Signal::new()),
+            leak(Xoff::new()),
+            leak(Stats::new()),
+        )
+        .unwrap();
+        for i in 0..2u8 {
+            assert!(eg_tx.try_send(Frame::from_slice(&[i; 42]).unwrap()).is_ok());
+        }
+        exec.spawn(async move { p.run().await }).unwrap();
+        while exec.step() {}
+        assert_eq!(sent.get(), 1, "the second frame is held");
+        while exec.step() {}
+        assert_eq!(sent.get(), 1, "no clock retries it");
+        // De NIC gaf een descriptor vrij en trok de lijn.
+        free.set(1);
+        line.set();
+        while exec.step() {}
+        assert_eq!(sent.get(), 2, "the line did not release the held frame");
+    }
+
     /// De lus slaapt op de lijn: zonder bel geen ronde, en de bel van de
     /// lijn haalt het frame op.
     #[test]
@@ -460,7 +514,7 @@ mod tests {
         .unwrap();
         p.nic().rx.push_back(vec![7; 64]);
         // De taak bezit de pomp; de test kijkt via de rij en de tellers.
-        exec.spawn(async move { p.run(exec).await }).unwrap();
+        exec.spawn(async move { p.run().await }).unwrap();
         while exec.step() {}
         assert_eq!(ing_rx.len(), 1, "het frame kwam niet door");
         let idle = stats.rx_idle.load(Relaxed);

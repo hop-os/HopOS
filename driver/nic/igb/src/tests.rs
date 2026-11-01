@@ -182,19 +182,13 @@ fn rdt_waits_for_the_rx_queue_enable() {
 }
 
 #[test]
-fn link_up_restarts_autoneg_through_the_mdic() {
+fn start_link_restarts_autoneg_through_the_mdic() {
     let m = mem(Hw { link: true, ..hw() });
     with_mac(&m);
     // SAFETY: registers en DMA liggen in `m`.
     let mut n = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.unwrap();
-    let l = n.link_up(1_000_000_000).unwrap();
-    assert_eq!(
-        l,
-        Link {
-            mbps: 1000,
-            full_duplex: true
-        }
-    );
+    n.start_link().unwrap();
+    assert_eq!(n.link(), Some(1000));
     let mdic = dev::read32(reg(0x20));
     assert_eq!(mdic & 0xffff, 0x1200, "BMCR AN enable + restart");
     assert_eq!((mdic >> 21) & 0x1f, u32::from(PHY_ADDR));
@@ -204,15 +198,13 @@ fn link_up_restarts_autoneg_through_the_mdic() {
 }
 
 #[test]
-fn no_link_reports_the_status() {
+fn no_link_is_none() {
     let m = mem(hw());
     with_mac(&m);
     // SAFETY: registers en DMA liggen in `m`.
     let mut n = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.unwrap();
-    assert_eq!(
-        n.link_up(5_000_000),
-        Err(Error::NoLink { status: 0, ms: 5 })
-    );
+    n.start_link().unwrap();
+    assert_eq!(n.link(), None);
 }
 
 #[test]
@@ -337,8 +329,9 @@ fn set_irq_writes_the_single_vector_msix_mode() {
     let m = mem(hw());
     let mut n = fake(&m);
     n.init().unwrap();
-    // TX-queue 0 in byte 1 van IVAR0 blijft staan.
-    dev::write32(reg(0x1700), 0x0000_8100);
+    // Een vector die een vorige kern voor TX-queue 0 achterliet, telt niet:
+    // RX en TX van queue 0 gaan samen op vector 0. Queue 1 blijft staan.
+    dev::write32(reg(0x1700), 0x8200_8100);
     n.set_irq(&BELL);
     assert_eq!(
         dev::read32(reg(0x1514)),
@@ -347,14 +340,15 @@ fn set_irq_writes_the_single_vector_msix_mode() {
     );
     assert_eq!(
         dev::read32(reg(0x1700)),
-        0x0000_8180,
-        "IVAR0: RX 0 on vector 0, valid"
+        0x8200_8080,
+        "IVAR0: RX 0 and TX 0 on vector 0, valid"
     );
     assert_eq!(dev::read32(reg(0x152c)), 1, "EIAC");
     assert_eq!(dev::read32(reg(0x1530)), 1, "EIAM");
     assert_eq!(dev::read32(reg(0x1524)), 1, "EIMS");
     assert!(core::ptr::eq(n.irq().unwrap(), &BELL));
-    assert_eq!(ivar_rx0(0xffff_ffff, 3), 0xffff_ff83);
+    assert_eq!(ivar_q0(0xffff_ffff, 3), 0xffff_8383);
+    assert_eq!(ivar_q0(0, 0), 0x8080, "RX0 and TX0 on vector 0, both valid");
 
     // De ack sluit de vector (EIMC), de zelftest vuurt hem (EICS).
     n.irq_ack().ack();
@@ -363,10 +357,10 @@ fn set_irq_writes_the_single_vector_msix_mode() {
     assert_eq!(dev::read32(reg(0x1520)), 1, "EICS");
     dev::write32(reg(0x1580), 1);
     let d = n.irq_regs();
-    assert_eq!((d.gpie, d.ivar0, d.eicr), (0xc000_0011, 0x8180, 1));
+    assert_eq!((d.gpie, d.ivar0, d.eicr), (0xc000_0011, 0x8200_8080, 1));
     assert_eq!(
         d.to_string(),
-        "GPIE 0xc0000011 IVAR0 0x8180 EIMS 0x1 EICR 0x1"
+        "GPIE 0xc0000011 IVAR0 0x82008080 EIMS 0x1 EICR 0x1"
     );
 
     // Terug naar pollen: alles dicht, geen bel.

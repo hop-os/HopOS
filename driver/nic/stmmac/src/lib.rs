@@ -22,7 +22,12 @@
 //! anders: [`Mii`], Linux' `mii_regs`), de indeling van de regio (RX- en
 //! TX-descriptors onderin, de buffers vanaf [`Ops::BUF_OFF`]), de lengte-
 //! en foutcontrole van een RX-frame, en het ritme van de interrupt: masker
-//! dicht bij de claim, open als de pomp de ring leeg las.
+//! dicht bij de claim, open als de pomp de ring leeg las. Op de lijn zitten
+//! RX en TX (Linux `DMA_CHAN_INTR_NORMAL`: NIE, RIE en TIE), en elke
+//! TX-descriptor vraagt zijn interrupt (IOC): een vrijgekomen descriptor
+//! wekt de pomp. Linux zet IOC maar om de zoveel frames en ruimt de rest
+//! op met een timer (`tx_coal_frames`, `stmmac_tx_timer`); hier geen timer,
+//! dus op elk frame.
 //!
 //! De SoC-glue (klokken, pinmux, PHY-reset, de RGMII-deler) zit NIET hier
 //! maar in het board; de clause-22-PHY-logica komt uit `driver-mdio`, via
@@ -30,7 +35,11 @@
 //!
 //! De levensloop is een type (handboek §1.2): een [`Probe`] is het blok
 //! vóór de ringen (versie, reset, MDIO), [`Probe::start`] maakt er een
-//! [`Stmmac`] van, en alleen die draagt frames.
+//! [`Stmmac`] van, en alleen die draagt frames. De MAC wacht daarbij niet
+//! op de link: [`Probe::start_link`] start de autonegotiatie, `start` legt
+//! ringen en DMA, en zender en ontvanger gaan pas aan op de snelheid van de
+//! link als de taak hem ziet ([`netdev::Device::link`]; Linux
+//! `stmmac_mac_link_up`, met `fix_mac_speed` voor de klok van de SoC).
 //!
 //! Batching: [`transmit`](netdev::Device::transmit) en de RX-teruggave
 //! zetten descriptors klaar; de doorbells vallen pas in
@@ -144,10 +153,10 @@ pub trait Ops: Copy + 'static {
     const RX_LIMIT: usize;
     /// De velden van het MDIO-adresregister.
     const MII: Mii;
-    /// De RX-interrupt in het enable-register.
-    const INTR_RX: u32;
-    /// De statusbits (W1C) die de RX-interrupt wissen.
-    const STAT_RX: u32;
+    /// De interrupts van de lijn (RX en TX) in het enable-register.
+    const INTR: u32;
+    /// De statusbits (W1C) die ze wissen.
+    const STAT: u32;
 
     /// Het VERSION-register.
     fn version(r: &Self::Regs) -> &Reg<u32>;
@@ -155,20 +164,19 @@ pub trait Ops: Copy + 'static {
     fn bus_mode(r: &Self::Regs) -> &Reg<u32>;
     /// Het MDIO-adres- en het MDIO-dataregister.
     fn mii(r: &Self::Regs) -> (&Reg<u32>, &Reg<u32>);
-    /// Het interrupt-enable- en het statusregister van de RX-DMA.
+    /// Het interrupt-enable- en het statusregister van de DMA.
     fn irq(r: &Self::Regs) -> (&Reg<u32>, &Reg<u32>);
 
-    /// Kan deze MAC de onderhandelde snelheid? Gevraagd vóór de reset.
-    fn speed_ok(mbps: u32) -> bool;
-    /// Programmeert MAC en DMA en zet ze aan: na de reset, met de ringen al
-    /// gelegd (Linux `stmmac_hw_setup`).
-    fn program(
-        r: &Self::Regs,
-        ring: &Rings<Self>,
-        mac: Mac,
-        mbps: u32,
-        full_duplex: bool,
-    ) -> Result;
+    /// Kan deze MAC gigabit? Zonder (de DWMAC1000 via RMII) adverteert de
+    /// PHY het niet en leest de link de gigabit-registers niet.
+    const GIGABIT: bool;
+    /// Programmeert MAC en DMA en zet de DMA aan: na de reset, met de ringen
+    /// al gelegd (Linux `stmmac_hw_setup`). Zender en ontvanger van de MAC
+    /// blijven uit tot [`Ops::set_link`].
+    fn program(r: &Self::Regs, ring: &Rings<Self>, mac: Mac) -> Result;
+    /// De MAC op de snelheid en duplex van de link, en zender en ontvanger
+    /// aan (Linux `stmmac_mac_link_up`).
+    fn set_link(r: &Self::Regs, mbps: u32, full_duplex: bool);
     /// De RX-doorbell; `tail` is de descriptor die de kern als volgende
     /// leest.
     fn rx_doorbell(r: &Self::Regs, tail: Pa);
@@ -227,12 +235,6 @@ pub enum Error {
         /// Het begin.
         base: u64,
     },
-    /// Een snelheid die deze MAC niet kan (de DWMAC1000 via RMII: alleen 10
-    /// en 100).
-    Speed {
-        /// De gevraagde snelheid.
-        mbps: u32,
-    },
     /// HW_FEATURE1 van de DWMAC4 geeft onmogelijke FIFO-maten: een blok
     /// zonder klok.
     Fifo {
@@ -263,7 +265,6 @@ impl fmt::Display for Error {
                 f,
                 "stmmac: DMA region at {base:#x} is unaligned or above 4 GB"
             ),
-            Self::Speed { mbps } => write!(f, "stmmac: {mbps} Mbps is not a speed of this MAC"),
             Self::Fifo {
                 tx,
                 rx,
@@ -387,9 +388,18 @@ impl<O: Ops> Probe<O> {
         dev::poll_until(self.now, MDIO_TIMEOUT_NS, || addr.read() & MII_BUSY == 0)
     }
 
-    /// Legt de ringen in de DMA-regio en zet MAC en DMA aan: na de
-    /// board-glue en na de autonegotiatie, want `mbps` en `full_duplex`
-    /// komen daaruit. Doet zelf de softreset.
+    /// Start de autonegotiatie op de PHY op `phy`, zonder te wachten (met
+    /// gigabit als de MAC het kan, [`Ops::GIGABIT`]).
+    pub fn start_link(&mut self, phy: u8) -> driver_mdio::Result {
+        driver_mdio::start_autoneg(self, phy, O::GIGABIT)
+    }
+
+    /// Legt de ringen in de DMA-regio en zet de DMA aan: na de board-glue en
+    /// na [`start_link`](Self::start_link), met de PHY op `phy`. Doet zelf de
+    /// softreset. Zender en ontvanger gaan aan bij de link
+    /// ([`netdev::Device::link`]); `fix_speed` zet dan eerst de klok van de
+    /// SoC op de snelheid (Linux `fix_mac_speed`; de RGMII-deler van de
+    /// RK3566).
     ///
     /// # Safety
     ///
@@ -402,8 +412,8 @@ impl<O: Ops> Probe<O> {
         dma: Pa,
         dma_size: u64,
         mac: Mac,
-        mbps: u32,
-        full_duplex: bool,
+        phy: u8,
+        fix_speed: Option<fn(u32)>,
     ) -> Result<Stmmac<O>> {
         if dma_size < O::NEED_BYTES {
             return Err(Error::DmaTooSmall {
@@ -414,12 +424,11 @@ impl<O: Ops> Probe<O> {
         if !dma.is_aligned(O::DESC_STRIDE) || dma.0.saturating_add(O::NEED_BYTES) > 1 << 32 {
             return Err(Error::DmaPlace { base: dma.0 });
         }
-        if !O::speed_ok(mbps) {
-            return Err(Error::Speed { mbps });
-        }
         self.reset()?;
-        let mut n = Stmmac::at(self.base, mac, dma);
-        n.bring_up(mbps, full_duplex)?;
+        let mut n = Stmmac::at(self, mac, dma);
+        n.phy = phy;
+        n.fix_speed = fix_speed;
+        n.bring_up()?;
         Ok(n)
     }
 }
@@ -520,12 +529,12 @@ pub struct Stats {
     pub tx_full: u64,
     /// Doorbells: poll-demands of tail-pointers.
     pub doorbells: u64,
-    /// Keren dat de RX-interrupt weer open ging.
+    /// Keren dat de lijn weer open ging.
     pub rearms: u64,
 }
 
 /// Het interrupt-pad van de NIC: alleen het enable- en het statusregister
-/// van de RX-DMA, die niets met de ringen delen. `Copy`, zodat het board hem
+/// van de DMA, die niets met de ringen delen. `Copy`, zodat het board hem
 /// naast de driver houdt.
 #[derive(Clone, Copy)]
 pub struct IrqAck<O: Ops> {
@@ -543,13 +552,14 @@ impl<O: Ops> netdev::IrqAck for IrqAck<O> {
         // het enable- en statusregister delen niets met de ringen.
         let (ena, status) = O::irq(unsafe { dev::regs(self.base) });
         ena.write(0);
-        status.write(O::STAT_RX);
+        status.write(O::STAT);
     }
 }
 
 /// Eén draaiende DesignWare MAC.
 pub struct Stmmac<O: Ops> {
-    base: Pa,
+    /// Het blok en zijn MDIO-master, voor de blik op de link.
+    bus: Probe<O>,
     mac: Mac,
     ring: Rings<O>,
     /// De volgende RX-descriptor die wij lezen.
@@ -561,16 +571,20 @@ pub struct Stmmac<O: Ops> {
     /// Er zijn TX-descriptors gevuld sinds de laatste doorbell.
     tx_dirty: bool,
     irq: Option<&'static Signal>,
+    /// Het adres van de PHY.
+    phy: u8,
+    /// De klok van de SoC op de linksnelheid, vóór de MAC aangaat.
+    fix_speed: Option<fn(u32)>,
     /// De meetlat.
     pub stats: Stats,
 }
 
 impl<O: Ops> Stmmac<O> {
-    /// Een driver op registerblok `base` met de ringen in `dma`, nog niet
+    /// Een driver op het blok van `bus` met de ringen in `dma`, nog niet
     /// aangezet.
-    fn at(base: Pa, mac: Mac, dma: Pa) -> Self {
+    fn at(bus: Probe<O>, mac: Mac, dma: Pa) -> Self {
         Self {
-            base,
+            bus,
             mac,
             ring: Rings::at(dma),
             rx_cur: 0,
@@ -578,17 +592,18 @@ impl<O: Ops> Stmmac<O> {
             rx_dirty: false,
             tx_dirty: false,
             irq: None,
+            phy: 0,
+            fix_speed: None,
             stats: Stats::default(),
         }
     }
 
     fn regs(&self) -> &'static O::Regs {
-        // SAFETY: de voorwaarde van `Probe::new`, waar `base` vandaan komt.
-        unsafe { dev::regs(self.base) }
+        self.bus.regs()
     }
 
     /// Legt de ringen en programmeert de generatie; de reset is al gedaan.
-    fn bring_up(&mut self, mbps: u32, full_duplex: bool) -> Result {
+    fn bring_up(&mut self) -> Result {
         // Eerst geen regel van de buffers meer in de cache: een vuile regel
         // van vóór ons (de bootloader, een vorige kern) mag later niet over
         // een frame heen worden teruggeschreven dat de DMA erin zette.
@@ -602,21 +617,28 @@ impl<O: Ops> Stmmac<O> {
         // De descriptors naar het geheugen; op een ongecachete ring doet
         // alleen de barrière iets.
         dev::push(self.ring.rx_desc, Rings::<O>::DESC_BYTES as usize);
-        O::program(self.regs(), &self.ring, self.mac, mbps, full_duplex)
+        O::program(self.regs(), &self.ring, self.mac)
+    }
+
+    /// De MAC op de link: eerst de klok van de SoC, dan de generatie.
+    fn adjust_link(&self, mbps: u32, full_duplex: bool) {
+        if let Some(f) = self.fix_speed {
+            f(mbps);
+        }
+        O::set_link(self.regs(), mbps, full_duplex);
     }
 
     /// Het interrupt-pad, voor het board.
     #[must_use]
     pub fn irq_ack(&self) -> IrqAck<O> {
         IrqAck {
-            base: self.base,
+            base: self.bus.base,
             _ops: PhantomData,
         }
     }
 
     /// Hangt de bel van de NIC-interrupt aan de driver en zet de
-    /// RX-interrupt open. De RX-pomp wacht dan op de bel in plaats van te
-    /// pollen.
+    /// interrupts van de lijn open (RX en TX). De pomp wacht dan op de bel.
     pub fn set_irq(&mut self, bell: &'static Signal) {
         self.irq = Some(bell);
         self.rearm();
@@ -625,8 +647,8 @@ impl<O: Ops> Stmmac<O> {
     /// Status gewist, masker open.
     fn rearm(&mut self) {
         let (ena, status) = O::irq(self.regs());
-        status.write(O::STAT_RX);
-        ena.write(O::INTR_RX);
+        status.write(O::STAT);
+        ena.write(O::INTR);
         self.stats.rearms += 1;
     }
 
@@ -755,6 +777,13 @@ impl<O: Ops> netdev::Device for Stmmac<O> {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    /// Eén blik op de PHY; bij link de MAC erop.
+    fn link(&mut self) -> Option<u32> {
+        let l = driver_mdio::link(&mut self.bus, self.phy, O::GIGABIT).ok()??;
+        self.adjust_link(l.mbps, l.full_duplex);
+        Some(l.mbps)
     }
 
     fn stats(&self) -> netdev::Stats {

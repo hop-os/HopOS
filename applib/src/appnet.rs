@@ -312,15 +312,13 @@ pub fn up(app: &'static App) -> Result<&'static Net> {
     let nic = Nic::open(app).map_err(NetError::Nic)?;
     let budget = budget_for(app.ram_size(), app.env("NET_BUDGET"));
     let exec: &'static Exec = EXEC.get();
-    // Het zaad van de stack kiest ISN's en de eerste efemere poort: uit de
-    // DRBG van de app (het zaad van de kern plus jitter, `rand`; de eerste
-    // zegt waar het vandaan komt). De klok en het slot blijven erin, zoals
-    // in Go: een kern-flip moet niet hetzelfde tupel hergebruiken.
-    let seed = crate::rand::Rng::open(app).next_u32()
-        ^ (clock::now_ns() as u32)
-        ^ ((app.slot() as u32) << 16);
+    // Het geheim van de ISS (RFC 6528) en de eerste efemere poort: uit de
+    // DRBG van de app (het zaad van de kern plus jitter, `rand`). Elke
+    // levensduur een vers geheim, dus na een flip geen hergebruikt tupel.
+    let secret = crate::rand::Rng::open(app).array::<16>();
     let dns = app.env("DNS").or(app.env("HOP_DNS")).and_then(parse_ip4);
-    let fresh = Net::new(slot_config(app.slot(), budget), seed, exec, clock::now_ns)?.with_dns(dns);
+    let fresh =
+        Net::new(slot_config(app.slot(), budget), secret, exec, clock::now_ns)?.with_dns(dns);
     fresh.seed_neighbor(host_ip(), mac_of(0).0)?;
     let buf = frame_buf(fresh.frame_len())?;
     if NET.get().set(fresh).is_err() {
@@ -425,10 +423,15 @@ pub struct Drain {
 }
 
 impl Net {
-    /// Een stack met config `cfg` en zaad `seed`, met zijn timers op `exec`
-    /// en zijn tijd uit `now` (dezelfde klok als die van `exec`).
-    pub fn new(cfg: Config, seed: u32, exec: &'static Exec, now: fn() -> u64) -> Result<Self> {
-        let stack = Stack::new(cfg, seed)?;
+    /// Een stack met config `cfg` en ISS-geheim `secret`, met zijn timers op
+    /// `exec` en zijn tijd uit `now` (dezelfde klok als die van `exec`).
+    pub fn new(
+        cfg: Config,
+        secret: [u8; 16],
+        exec: &'static Exec,
+        now: fn() -> u64,
+    ) -> Result<Self> {
+        let stack = Stack::new(cfg, secret)?;
         let slots = open_slots_for(cfg.budget);
         let mut open = Vec::new();
         open.try_reserve_exact(slots)
@@ -779,12 +782,8 @@ impl Net {
         })
     }
 
-    /// Verbindt met `ip:port`; de stack geeft na 30 s zonder antwoord op.
-    pub async fn tcp_connect(&'static self, ip: [u8; 4], port: u16) -> Result<TcpStream> {
-        self.tcp_connect_until(ip, port, None).await
-    }
-
-    /// Verbindt met `ip:port` en geeft na `timeout` op.
+    /// Verbindt met `ip:port` en geeft na `timeout` op. Er is geen dial
+    /// zonder termijn: wie verbindt, zegt hoe lang hij wacht (de dial van lean heeft altijd een deadline).
     pub async fn tcp_connect_timeout(
         &'static self,
         ip: [u8; 4],
@@ -792,7 +791,7 @@ impl Net {
         timeout: Duration,
     ) -> Result<TcpStream> {
         let at = self.now().saturating_add(nanos(timeout));
-        self.tcp_connect_until(ip, port, Some(at)).await
+        self.tcp_connect_until(ip, port, at).await
     }
 
     /// Verbindt met `ip:port` vóór `deadline`. Het handvat zit vanaf de SYN
@@ -801,14 +800,14 @@ impl Net {
         &'static self,
         ip: [u8; 4],
         port: u16,
-        deadline: Option<u64>,
+        deadline: u64,
     ) -> Result<TcpStream> {
         self.admit()?;
         let now = self.now();
         let h = self.with(|st| st.tcp_connect(ip, port, deadline, now))??;
         let s = self.stream(h);
         self.wait(
-            deadline,
+            Some(deadline),
             |st, now| st.tcp_poll_connect(h, now),
             |st, w| st.tcp_register_write_waker(h, w),
         )
@@ -1151,7 +1150,7 @@ impl TcpListener {
             .net
             .wait(
                 None,
-                |st, now| st.tcp_accept(h, now),
+                |st, _| st.tcp_accept(h),
                 |st, w| st.listen_register_waker(h, w),
             )
             .await?;
@@ -1177,11 +1176,6 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
-    /// Verbindt met `ip:port` over de stack van deze app.
-    pub async fn connect(ip: [u8; 4], port: u16) -> Result<Self> {
-        net().ok_or(NetError::NotUp)?.tcp_connect(ip, port).await
-    }
-
     /// Verbindt met `ip:port` en geeft na `timeout` op.
     pub async fn connect_timeout(ip: [u8; 4], port: u16, timeout: Duration) -> Result<Self> {
         net()
@@ -1208,7 +1202,7 @@ impl TcpStream {
         self.net
             .wait(
                 self.deadline,
-                |st, now| st.tcp_read(h, buf, now),
+                |st, _| st.tcp_read(h, buf),
                 |st, w| st.tcp_register_read_waker(h, w),
             )
             .await
@@ -1250,7 +1244,7 @@ impl TcpStream {
         self.net
             .wait(
                 self.deadline,
-                |st, now| st.tcp_write(h, data, now),
+                |st, _| st.tcp_write(h, data),
                 |st, w| st.tcp_register_write_waker(h, w),
             )
             .await
@@ -1407,7 +1401,7 @@ impl UdpSocket {
         self.net
             .wait(
                 self.deadline,
-                |st, now| st.udp_recv_from(h, buf, now),
+                |st, _| st.udp_recv_from(h, buf),
                 |st, w| st.udp_register_read_waker(h, w),
             )
             .await
@@ -1487,7 +1481,7 @@ impl Udp6Socket {
         self.net
             .wait(
                 self.deadline,
-                |st, now| st.udp6_recv_from(h, buf, now),
+                |st, _| st.udp6_recv_from(h, buf),
                 |st, w| st.udp6_register_read_waker(h, w),
             )
             .await
@@ -1528,7 +1522,6 @@ fn conn_error(e: NetError) -> ConnError {
         NetError::Stack(StackError::Reset) => ConnError::Reset,
         NetError::Stack(
             StackError::Refused { .. }
-            | StackError::ConnectTimeout { .. }
             | StackError::Unreachable { .. }
             | StackError::NoRoute { .. }
             | StackError::DeadlineExceeded,

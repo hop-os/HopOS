@@ -51,7 +51,7 @@ impl TestIo {
             rings: vec![VecDeque::new(); SLOT_CAP + 1],
             sent: Vec::new(),
             logs: RefCell::new(Vec::new()),
-            stack: leannet::Stack::new(cfg, 1).unwrap(),
+            stack: leannet::Stack::new(cfg, [1; 16]).unwrap(),
         }
     }
     /// De host-taak: wat de node-stack wil zenden, de uplink op.

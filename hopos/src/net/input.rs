@@ -182,7 +182,7 @@ async fn write_all(exec: &'static Executor, h: TcpHandle, mut buf: &[u8]) -> Res
             poll_stack(
                 exec,
                 cx,
-                |st, now| st.tcp_write(h, buf, now),
+                |st, _| st.tcp_write(h, buf),
                 |st, w| st.tcp_register_write_waker(h, w),
             )
         })

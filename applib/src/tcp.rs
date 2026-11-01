@@ -195,7 +195,7 @@ impl Dial for Dialer {
             Ok(ip) => ip,
             Err(e) => {
                 self.last_error = Some(DialError::Resolve(e));
-                return Err(leanhttp::Error::Connect);
+                return Err(leanhttp::Error::Dial);
             }
         };
         let s = match TcpStream::connect_timeout(ip, t.port, self.connect).await {
@@ -206,7 +206,7 @@ impl Dial for Dialer {
                     port: t.port,
                     error,
                 });
-                return Err(leanhttp::Error::Connect);
+                return Err(leanhttp::Error::Dial);
             }
         };
         self.last_error = None;

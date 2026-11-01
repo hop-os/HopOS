@@ -774,11 +774,10 @@ impl Placer {
         Ok(g.region().base + src)
     }
 
-    /// Zoekt de plaatsingssymbolen zoals [`leanelf::File::lookup`], met
-    /// dezelfde fouten, maar in brokken uit de partitie in plaats van de
-    /// hele tabel op de heap: een riscv64-welcome draagt 42 000 lokale
-    /// symbolen, en op de LicheeRV was dat 03-10 "out of memory (1012680
-    /// bytes)" bij elke plaatsing.
+    /// Zoekt de plaatsingssymbolen, met de symtab-fouten van leanelf, in
+    /// brokken uit de partitie in plaats van de hele tabel op de heap: een
+    /// riscv64-welcome draagt 42 000 lokale symbolen, en op de LicheeRV was
+    /// dat 03-10 "out of memory (1012680 bytes)" bij elke plaatsing.
     fn symbols(
         &self,
         g: &ImageGrant,

@@ -26,6 +26,8 @@ fn leak<T>(v: T) -> &'static T {
 
 const CAP: u64 = NET_RING_DATA_CAP;
 const BUDGET: usize = 4 << 20;
+/// De termijn van een dial in de toetsen: ruim, want hij hoort nooit te verlopen.
+const DIAL: Duration = Duration::from_secs(5);
 /// Een poll-ronde van tien seconden: de tests lopen dan op de bel en op
 /// de wekken van de stack, en een gemiste wek is een test die tien
 /// (gesimuleerde) seconden duurt in plaats van een die toevallig slaagt.
@@ -80,8 +82,8 @@ fn pair_with(poll: RxPoll) -> Pair {
     exec.set_clock(now);
     let up = leak(Backing::new(CAP));
     let down = leak(Backing::new(CAP));
-    let kern = leak(Net::new(slot_config(0, BUDGET), 7, exec, now).unwrap());
-    let app = leak(Net::new(slot_config(1, BUDGET), 9, exec, now).unwrap());
+    let kern = leak(Net::new(slot_config(0, BUDGET), [7; 16], exec, now).unwrap());
+    let app = leak(Net::new(slot_config(1, BUDGET), [9; 16], exec, now).unwrap());
     app.seed_neighbor(host_ip(), mac_of(0).0).unwrap();
     let k = spawn_pump(exec, kern, nic(down, up, 0), up, poll);
     let a = spawn_pump(exec, app, nic(up, down, 1), down, poll);
@@ -192,7 +194,10 @@ fn an_explicit_connection_carries_the_first_call() {
     let app = p.app;
     p.exec
         .spawn(async move {
-            let c = app.tcp_connect(HOST, sys::ADDRESS.1).await.unwrap();
+            let c = app
+                .tcp_connect_timeout(HOST, sys::ADDRESS.1, DIAL)
+                .await
+                .unwrap();
             let local = c.local().unwrap();
             let mut client = app.system_client_over(c);
             let r = client.stat("/").await;
@@ -235,7 +240,10 @@ fn bulk_both_ways_then_close() {
     let app = p.app;
     p.exec
         .spawn(async move {
-            let mut c = app.tcp_connect([10, 100, 0, 1], 7).await.unwrap();
+            let mut c = app
+                .tcp_connect_timeout([10, 100, 0, 1], 7, DIAL)
+                .await
+                .unwrap();
             let mut back = vec![0u8; CHUNK];
             let mut ok = true;
             for r in 0..ROUNDS {
@@ -297,7 +305,10 @@ fn a_small_answer_carries_the_ack_in_the_same_frame() {
     let result = slot();
     p.exec
         .spawn(async move {
-            let mut c = app.tcp_connect([10, 100, 0, 1], 7).await.unwrap();
+            let mut c = app
+                .tcp_connect_timeout([10, 100, 0, 1], 7, DIAL)
+                .await
+                .unwrap();
             let mut msg = [0x5au8; LEN];
             let heads = || (up.head_pending().0, down.head_pending().0);
             // Eén rondreis warm: de handshake en zijn ACK's tellen niet.
@@ -335,7 +346,7 @@ fn a_closed_port_is_refused() {
     let app = p.app;
     p.exec
         .spawn(async move {
-            let r = app.tcp_connect(HOST, 9).await.map(|_| ());
+            let r = app.tcp_connect_timeout(HOST, 9, DIAL).await.map(|_| ());
             *got.borrow_mut() = Some(r);
         })
         .unwrap();
@@ -399,7 +410,7 @@ fn a_read_deadline_fires_and_the_stream_stays_usable() {
     let app = p.app;
     p.exec
         .spawn(async move {
-            let mut c = app.tcp_connect(HOST, 7).await.unwrap();
+            let mut c = app.tcp_connect_timeout(HOST, 7, DIAL).await.unwrap();
             app.exec.after(Duration::from_millis(100)).await;
             c.write_all(b"late").await.unwrap();
             app.exec.after(Duration::from_secs(1)).await;
@@ -623,7 +634,10 @@ fn a_line_written_just_before_shutdown_arrives() {
     let t0 = now();
     p.exec
         .spawn(async move {
-            let mut c = app.tcp_connect(HOST, sys::ADDRESS.1).await.unwrap();
+            let mut c = app
+                .tcp_connect_timeout(HOST, sys::ADDRESS.1, DIAL)
+                .await
+                .unwrap();
             let _udp = app.udp_bind(0).unwrap();
             let _l = app.tcp_listen(8080).unwrap();
             c.write_all(b"HOPOS_APPSPIKE_NETLOG last words")
@@ -634,7 +648,10 @@ fn a_line_written_just_before_shutdown_arrives() {
             // Op het moment van terugkeer (hierna zou de core parkeren) heeft
             // de stack van de kern elke byte al.
             let at_exit = kern.stats().unwrap().tcp_bytes_in;
-            let again = app.tcp_connect(HOST, sys::ADDRESS.1).await.map(|_| ());
+            let again = app
+                .tcp_connect_timeout(HOST, sys::ADDRESS.1, DIAL)
+                .await
+                .map(|_| ());
             let bind = app.udp_bind(0).map(|_| ());
             *done.borrow_mut() = Some((d, again, bind, now(), at_exit));
         })
@@ -691,7 +708,7 @@ fn flush_returns_once_the_peer_has_every_byte() {
     let flushed = slot();
     p.exec
         .spawn(async move {
-            let mut c = app.tcp_connect(HOST, 7).await.unwrap();
+            let mut c = app.tcp_connect_timeout(HOST, 7, DIAL).await.unwrap();
             let data: Vec<u8> = (0..N).map(|i| i as u8).collect();
             c.write_all(&data).await.unwrap();
             let r = c.flush().await;
@@ -707,7 +724,7 @@ fn flush_returns_once_the_peer_has_every_byte() {
     let kc = peer.borrow_mut().take().unwrap();
     let mut buf = vec![0u8; 2 * N];
     let mut have = 0;
-    while let Ok(Ok(n)) = p.kern.with(|st| st.tcp_read(kc.h, &mut buf[have..], now())) {
+    while let Ok(Ok(n)) = p.kern.with(|st| st.tcp_read(kc.h, &mut buf[have..])) {
         have += n;
     }
     assert_eq!(have, N);
@@ -730,7 +747,7 @@ fn flush_times_out_on_a_peer_that_does_not_read() {
     let got = slot();
     p.exec
         .spawn(async move {
-            let mut c = app.tcp_connect(HOST, 7).await.unwrap();
+            let mut c = app.tcp_connect_timeout(HOST, 7, DIAL).await.unwrap();
             // Schrijven tot ook de eigen zendring vol is.
             c.set_timeout(Some(Duration::from_millis(50)));
             let chunk = vec![0x5a; 64 << 10];

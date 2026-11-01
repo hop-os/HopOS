@@ -508,12 +508,12 @@ impl Node {
                 );
                 c
             }
-            None => (self.lease().await, exec.now()),
+            None => self.lease().await,
         };
         set_uplink(&lease, mac).await;
         let ip = u32::from(lease.ip);
 
-        let stack = match Stack::new(stack_config(&lease, mac), iss_seed(exec, mac)) {
+        let stack = match Stack::new(stack_config(&lease, mac), iss_secret()) {
             Ok(s) => s,
             Err(e) => {
                 println!("net: node stack: {e} HOPOS_NET_FAIL");
@@ -570,14 +570,15 @@ impl Node {
     }
 
     /// Haalt een lease, en blijft het proberen: een node zonder adres kan
-    /// niets, maar de rest van de kern draait door.
-    async fn lease(&mut self) -> Lease {
+    /// niets, maar de rest van de kern draait door. Met het moment van het
+    /// REQUEST (ns sinds boot), waar de termijnen van de lease van tellen.
+    async fn lease(&mut self) -> (Lease, u64) {
         let mut attempt: u32 = 0;
         loop {
             attempt = attempt.saturating_add(1);
             let t0 = self.exec.now();
             match self.dhcp().await {
-                Ok(l) => {
+                Ok((l, since)) => {
                     let ms = self.exec.now().saturating_sub(t0) / 1_000_000;
                     println!(
                         "dhcp: lease {} from {}, dns {}, {} s, attempt {attempt}, {ms} ms HOPOS_DHCP_BOUND",
@@ -586,7 +587,8 @@ impl Node {
                         l.dns,
                         l.lease_secs,
                     );
-                    return l;
+                    let since = u64::try_from(since.as_duration().as_nanos()).unwrap_or(u64::MAX);
+                    return (l, since);
                 }
                 Err(e) => {
                     // Go: de eerste poging en daarna elke tiende, niet elke 15 s.
@@ -603,7 +605,7 @@ impl Node {
     /// geeft de switch alles van de draad aan ons (`KIND_UPLINK`), en wat wij
     /// als `KIND_UPLINK` schrijven gaat de draad op. Dat is Go's
     /// `hopnet.Up`-volgorde: eerst de lease, dan de stack.
-    async fn dhcp(&mut self) -> leandhcp::Result<Lease> {
+    async fn dhcp(&mut self) -> leandhcp::Result<(Lease, Instant)> {
         let exec = self.exec;
         let now = || Instant::from_duration(Duration::from_nanos(exec.now()));
         let mut c = Client::new(self.mac, now(), DHCP_TIMEOUT);
@@ -622,7 +624,7 @@ impl Node {
             let step = match c.poll(now())? {
                 Action::Transmit(f) => Step::Sent(self.tx.write_notify(KIND_UPLINK, f).is_some()),
                 Action::Wait(until) => Step::Wait(until),
-                Action::Bound(l) => return Ok(l),
+                Action::Bound(l, since) => return Ok((l, since)),
             };
             match step {
                 Step::Sent(true) => DOOR.set(),
@@ -705,12 +707,15 @@ fn ws_shift_for(max: usize) -> u8 {
     shift
 }
 
-/// De ISS-seed: niet kryptografisch, wel per boot anders. Er is nog geen
-/// wandklok, dus de teller sinds boot plus de MAC (Go deed de boot-tijd).
-fn iss_seed(exec: &Executor, mac: [u8; 6]) -> u32 {
-    let m = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
-    // Afkappen is hier de bedoeling: alleen de lage bits variëren.
-    (exec.now() as u32) ^ m.rotate_left(13)
+/// Het geheim van de ISS (RFC 6528): 16 bytes uit de DRBG van de kern, die
+/// [`crate::seed::init`] vóór het net zaait. Een DRBG die niets geeft, is
+/// een kern zonder zijn basis.
+fn iss_secret() -> [u8; 16] {
+    let mut secret = [0u8; 16];
+    if let Err(e) = cpu::drbg::read(&mut secret) {
+        cpu::fatal!("net: no ISS secret from the DRBG: {e}");
+    }
+    secret
 }
 
 // ---------------------------------------------------------------------------
@@ -922,10 +927,9 @@ async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease, bound: 
             Keep::Wait(until) => {
                 let at = u64::try_from(until.as_duration().as_nanos()).unwrap_or(u64::MAX);
                 let _ = select(udp_readable(exec, h), exec.until(at)).await;
-                let t = exec.now();
-                while let Ok((n, _)) = io(|st| st.udp_recv_from(h, &mut inb, t)) {
+                while let Ok((n, _)) = io(|st| st.udp_recv_from(h, &mut inb)) {
                     if let Some(p) = inb.get(..n) {
-                        k.receive(p, now());
+                        k.receive(p);
                     }
                 }
             }
@@ -1093,7 +1097,7 @@ async fn console_listener(exec: &'static Executor, ip: Ipv4Addr) {
                 Ipv4Addr::from(remote),
                 kern::conport::MAX_READERS
             );
-            let _ = io(|st| st.tcp_write(h, kern::conport::FULL, exec.now()));
+            let _ = io(|st| st.tcp_write(h, kern::conport::FULL));
             close(exec, h);
             continue;
         };
@@ -1215,7 +1219,7 @@ pub(crate) async fn dial(
 ) -> leannet::Result {
     let now = exec.now();
     let deadline = now.saturating_add(u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX));
-    let h = io(|st| st.tcp_connect(ip.octets(), port, Some(deadline), now))?;
+    let h = io(|st| st.tcp_connect(ip.octets(), port, deadline, now))?;
     let connect = poll_fn(move |cx| {
         poll_stack(
             exec,
@@ -1245,7 +1249,7 @@ fn accept(
         poll_stack(
             exec,
             cx,
-            |st, now| st.tcp_accept(l, now),
+            |st, _| st.tcp_accept(l),
             |st, w| st.listen_register_waker(l, w),
         )
     })
@@ -1266,7 +1270,7 @@ impl Conn for TcpConn {
             poll_stack(
                 exec,
                 cx,
-                |st, now| st.tcp_read(h, buf, now),
+                |st, _| st.tcp_read(h, buf),
                 |st, w| st.tcp_register_read_waker(h, w),
             )
             .map(|r| r.map_err(|_| kern::Error::Conn))
@@ -1279,7 +1283,7 @@ impl Conn for TcpConn {
             poll_stack(
                 exec,
                 cx,
-                |st, now| st.tcp_write(h, buf, now),
+                |st, _| st.tcp_write(h, buf),
                 |st, w| st.tcp_register_write_waker(h, w),
             )
             .map(|r| r.map_err(|_| kern::Error::Conn))

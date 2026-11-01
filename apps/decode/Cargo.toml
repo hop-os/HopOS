@@ -19,7 +19,7 @@ applib = { path = "../../applib", features = ["media", "http"] }
 bounded = { path = "../../bounded" }
 # HTTP/1.1 zonder TLS (PORT.md §2.1), op een tag en nooit over een pad:
 # dezelfde tag als applib en Hop.
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.14" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc1" }
 
 [lints]
 workspace = true

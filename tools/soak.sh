@@ -24,8 +24,8 @@
 # Elke ronde is één regel `SOAK round=N ...`; het rapport aan het eind (of
 # bij Ctrl-C) telt rondes, plaatsingen, stops, flips, alarmen en de
 # spreiding van de metingen. De UART-capture ernaast is de zwarte doos:
-# HOPOS_IDLESTAT (met hopos.idlestat=10 in hopos.cfg), BURN-regels en
-# eventuele crashes staan daar.
+# HOPOS_TICK (met hopos.tick=1 in hopos.cfg), BURN-regels en eventuele
+# crashes staan daar.
 #
 #   ARTIFACT=http://LAPTOP:8000/bench.elf tools/soak.sh NODE [UREN]
 #   FLIP=1 FLIP_URL=http://LAPTOP:8000/hopos-o6n.flip FLIP_SHA=... tools/soak.sh NODE 8

@@ -171,9 +171,8 @@ case "${WDT:-}" in
 	exit 2
 	;;
 esac
-# FEATURES=hopcost (of een andere lijst) komt achter de board-feature,
-# zoals in uefi-run.sh: de meetlat van een hop op de OS-core
-# (cpu/src/hopcost.rs).
+# FEATURES=gui (of een andere lijst) komt achter de board-feature, zoals
+# in uefi-run.sh.
 FEATURES="$FEATURES${EXTRA_FEATURES:+,$EXTRA_FEATURES}"
 cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURES"
 KERNEL="$DIR/target/$TARGET/release/hopos"

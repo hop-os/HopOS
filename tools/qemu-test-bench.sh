@@ -5,10 +5,9 @@
 # termineert TCP op de host); wat deze toets bewijst is de KETEN, zodat
 # morgen op elk board hetzelfde commando dezelfde tabel geeft.
 #
-# Twee boots:
+# Eén boot, Hop + bench:
 #
-#   1. Hop + bench, met hopos.idlestat=1 in de bootargs.
-#      kern        HOPOS_BOOT, HOPOS_IDLESTAT_ON, HOPOS_NET_UP,
+#      kern        HOPOS_BOOT, HOPOS_NET_UP,
 #                  HOPOS_HOP_START slot=1, Hop's poorten, HOP_UP en HOP_LEADER;
 #      bench       POST /v1/jobs met "ports":{"http":80}: HOP_JOB_PLACED,
 #                  "slot 2: 1 port(s) published ... :80 HOPOS_SLOT_PUBLISH"
@@ -19,18 +18,16 @@
 #      in de node  twee jobs tegen de bench in slot 2, door de switch:
 #                  BENCH=pull (HOPOS_BENCH_PULL, bad=0) en BENCH=ping
 #                  (HOPOS_BENCH_RTT en HOPOS_BENCH_COLD); daarna weg;
+#      schijf      BENCH=disk: hopfs door de system-API (HOPOS_BENCH_DISK);
 #      last        BURN=1 met een ritme van 5 s werk / 5 s rust:
-#                  HOPOS_BENCH_BURN, met de idlestat-regels ernaast;
+#                  HOPOS_BENCH_BURN;
 #      multicast   de bench van poort 80 maakt plaats, MCAST=listen joint
 #                  224.0.0.251 (HOPOS_BENCH_UP role=mcast-listen), MCAST=send
-#                  zendt, de switch floodt: HOPOS_BENCH_MCAST recv=3;
-#      de meetlat  minstens drie HOPOS_IDLESTAT-regels.
-#   2. Zonder app, met hopos.nvmebench=1 op een verse schijf: de Go-tabel
-#      per commandomaat, sequentieel, willekeurig en hopfs
-#      (HOPOS_NVMEBENCH_SEQ, _RAND, "hopfs bench:" en HOPOS_NVMEBENCH_DONE),
-#      en daarna mount de opslag dezelfde schijf (HOPOS_FS_UP): de bench
-#      leent hem, `probe_disk` gebeurt één keer. HOPOS_DISK_FAIL of
-#      HOPOS_FS_FAIL is rood.
+#                  zendt, de switch floodt: HOPOS_BENCH_MCAST recv=3.
+#
+# De meetbanken in de kern (hopos.idlestat, hopos.nvmebench) zijn op 01-11
+# weg (docs/sequence-hopos.md §14.6): de tellers van de OS-core staan in
+# HOPOS_TICK, en de schijf meet BENCH=disk vanuit het hok.
 #
 # UDP meet netmeter wel, maar niet hier: de hostfwd van image/qemu-run.sh
 # is alleen TCP. Op ijzer: `netmeter NODE:PORT --phases udp`.
@@ -41,8 +38,7 @@
 #
 #   tools/qemu-test-bench.sh               TIMEOUT=90 standaard, in seconden
 #   BYTES=16777216 tools/qemu-test-bench.sh   bytes per doorvoerfase
-#   NVME=0 tools/qemu-test-bench.sh        zonder de tweede boot
-#   WIRE=1 NVME=0 TIMEOUT=180 CFG=c tools/qemu-test-bench.sh
+#   WIRE=1 TIMEOUT=180 CFG=c tools/qemu-test-bench.sh
 #                                          onder een trage draad met een paar
 #                                          ms RTT (image/qemu-run.sh WIRE=1,
 #                                          WIRE_BURST/WIRE_TIMER/WIRE_DELAY_US);
@@ -81,17 +77,13 @@ NETMETER="$DIR/target/release/netmeter"
 hop_elf
 serve
 
-# De bootargs: idlestat, en de OS-core als die gevraagd is (qemu-run.sh zet
-# hopos.oscore ervoor, in één -append).
-ARGS="hopos.idlestat=1"
-[ -n "${OSCORE:-}" ] && ARGS="hopos.oscore=$OSCORE $ARGS"
+echo "== boot: Hop + bench (tot ${TIMEOUT}s; leader :$LEADERPORT, artifacts :$ARTPORT, web :$WEBPORT -> gast :80)"
+hop_virt
 
-echo "== boot 1: Hop + bench (tot ${TIMEOUT}s; leader :$LEADERPORT, artifacts :$ARTPORT, web :$WEBPORT -> gast :80; $ARGS)"
-hop_virt BOOTARGS=hopos.idlestat=1
-
-BOOT_MARKS="HOPOS_BOOT|HOPOS_IDLESTAT_ON|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1 |slot 1: 2 port\\(s\\) published tcp\\+udp on the uplink: :8080 :9080 HOPOS_SLOT_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
+BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1 |slot 1: 2 port\\(s\\) published tcp\\+udp on the uplink: :8080 :9080 HOPOS_SLOT_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: 1 port\\(s\\) published tcp\\+udp on the uplink: :80 HOPOS_SLOT_PUBLISH|slot 2: .*HOPOS_BENCH_UP role=serve port=80"
 NODE_MARKS="HOPOS_BENCH_PULL|HOPOS_BENCH_RTT|HOPOS_BENCH_COLD"
+DISK_MARKS="HOPOS_BENCH_DISK"
 BURN_MARKS="HOPOS_BENCH_UP role=burn|HOPOS_BENCH_BURN_WORK|HOPOS_BENCH_BURN$"
 MCAST_MARKS="HOPOS_BENCH_UP role=mcast-listen|HOPOS_BENCH_MCAST recv=3"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_SLOT_PUBLISH_FAIL|HOPOS_BENCH_FAIL"
@@ -143,10 +135,11 @@ client() { # naam env-json markers
 if [ "$METER_RC" = 0 ] && [ -n "$PEER" ]; then
 	client pull '"BENCH":"pull","BENCH_PEER":"'"$PEER"'","BENCH_BYTES":"'"$BYTES"'"' "HOPOS_BENCH_PULL" &&
 		client ping '"BENCH":"ping","BENCH_PEER":"'"$PEER"'"' "HOPOS_BENCH_RTT|HOPOS_BENCH_COLD" &&
+		client disk '"BENCH":"disk"' "$DISK_MARKS" &&
 		NODE_OK=1
 fi
 
-# 4. Last: BURN met een kort ritme, en de idlestat-regels ernaast.
+# 4. Last: BURN met een kort ritme.
 if [ -n "$NODE_OK" ]; then
 	client burn '"BURN":"1","BURN_WORK":"5","BURN_REST":"5"' "$BURN_MARKS" && BURN_OK=1
 fi
@@ -163,7 +156,7 @@ sleep 1
 qemu_stop
 
 fail=0
-marks "$BOOT_MARKS" "$PLACE_MARKS" "$NODE_MARKS" "$BURN_MARKS" "$MCAST_MARKS"
+marks "$BOOT_MARKS" "$PLACE_MARKS" "$NODE_MARKS" "$DISK_MARKS" "$BURN_MARKS" "$MCAST_MARKS"
 case "$POSTED" in
 *"HTTP 2"*) echo "   ok  POST /v1/jobs bench: $POSTED" ;;
 *) echo "   ROOD POST /v1/jobs bench: ${POSTED:-nooit gedaan}"; fail=1 ;;
@@ -175,13 +168,6 @@ if [ "$METER_RC" != 0 ]; then
 	fail=1
 elif ! grep -q 'NETMETER phase=out .* lost=0' "$ART/netmeter.txt"; then
 	echo "   ROOD netmeter: out had foute of ontbrekende bytes"
-	fail=1
-fi
-IDLE_N="$(count 'HOPOS_IDLESTAT$')"
-if [ "$IDLE_N" -ge 3 ]; then
-	echo "   ok  $IDLE_N idlestat-regels"
-else
-	echo "   ROOD idlestat: $IDLE_N regels"
 	fail=1
 fi
 reds
@@ -207,47 +193,10 @@ PY
 	echo "   | in de node, app -> app (pull)      | $(tr -d '\r' <"$LOG" | grep -m1 -o 'MBps=[0-9.]* bad=[0-9]* HOPOS_BENCH_PULL' | cut -d' ' -f1) |"
 	echo "   | in de node, app -> app (rtt)       | $(tr -d '\r' <"$LOG" | grep -m1 -o 'p50=[0-9]*us p90=[0-9]*us p99=[0-9]*us' ) |"
 	echo "   | koud, na 1 s stilte                | $(tr -d '\r' <"$LOG" | grep -m1 -o 'BENCH_COLD.*HOPOS' | sed 's/ HOPOS//') |"
+	echo "   | hopfs vanuit het hok               | $(tr -d '\r' <"$LOG" | grep -m1 -o 'disk 16 MiB.*IOPS') |"
 fi
-echo "== idlestat (de laatste drie):"
-tr -d '\r' <"$LOG" | grep 'HOPOS_IDLESTAT$' | tail -3 | sed 's/^/   /'
 took
 [ -n "${KEEP_JSON:-}" ] && [ -s "$JSON" ] && cp "$JSON" "$KEEP_JSON"
 verdict qemu-bench
 
-# Boot 2: de schijf-bench, zonder app, op een verse schijf.
-if [ "${NVME:-1}" != 0 ]; then
-	echo "== boot 2: hopos.nvmebench=1 op een verse schijf (tot ${TIMEOUT}s)"
-	rm -f "$DISK"
-	LOG2="$(mktemp -t hopos-qemu-nvme.XXXXXX)"
-	LOG1="$LOG"
-	LOG="$LOG2"
-	hop_virt APP= OSCORE= BOOTARGS=hopos.nvmebench=1
-	NVME_MARKS="HOPOS_NVMEBENCH_START|HOPOS_NVMEBENCH_SEQ|HOPOS_NVMEBENCH_RAND|hopfs bench: .*HOPOS_NVMEBENCH|HOPOS_NVMEBENCH_DONE|HOPOS_DISK_UP|hopfs: mounted .*HOPOS_FS_UP"
-	started
-	while alive && ! all "$NVME_MARKS"; do step; done
-	qemu_stop
-	tr -d '\r' <"$LOG" | grep -E 'nvme bench:|hopfs bench:|HOPOS_DISK_UP|HOPOS_FS_UP' | sed 's/^/   /'
-	IFS='|'
-	for m in $NVME_MARKS; do
-		has "$m" || {
-			echo "   ROOD $m ontbreekt"
-			fail=1
-		}
-	done
-	IFS="$IFS_WAS"
-	if has "HOPOS_NVMEBENCH_FAIL|HOPOS_DISK_FAIL|HOPOS_FS_FAIL|HOPOS_PANIC|HOPOS_EXCEPTION"; then
-		echo "   ROOD $(first 'HOPOS_NVMEBENCH_FAIL|HOPOS_DISK_FAIL|HOPOS_FS_FAIL|HOPOS_PANIC|HOPOS_EXCEPTION')"
-		fail=1
-	fi
-	if [ "$fail" != 0 ]; then
-		KEEP="$(mktemp -t hopos-qemu-nvme-rood.XXXXXX)"
-		tr -d '\r' <"$LOG" >"$KEEP"
-		echo "== console bewaard in $KEEP"
-		cat "$KEEP"
-		rm -f "$LOG2"
-		exit 1
-	fi
-	rm -f "$LOG2"
-	LOG="$LOG1"
-fi
 echo "bench-keten groen"

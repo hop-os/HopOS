@@ -552,10 +552,8 @@ impl OsCore {
         arch::timer_arm(deadline);
         self.listen(true);
         let fp = fp_turn(id, fresh);
-        crate::hopcost::mark(crate::hopcost::ENTER);
         let t0 = arch::counter();
         let vec = arch::enter(self.flavor, ctx, self.hcr, fp);
-        crate::hopcost::mark(crate::hopcost::BACK);
         home(self.sched, arch::counter().wrapping_sub(t0));
         self.listen(false);
         let fired = arch::timer_disarm();
@@ -943,7 +941,6 @@ pub(crate) fn round(
     now: u64,
     turn: impl FnOnce(usize, u8, Pa, bool) -> Back,
 ) -> Turn {
-    crate::hopcost::mark(crate::hopcost::RUN);
     match next(sched, cage, now) {
         Next::Turn { i, id, ctx, fresh } => Turn::Ran(turn(i, id, ctx, fresh)),
         Next::Idle { wake } => {
@@ -954,10 +951,9 @@ pub(crate) fn round(
 }
 
 /// Het begin van de beurt van bewoner `id` op lijstplek `i`, op elke
-/// architectuur: de stempel van `hopcost` (de keuze), de cursor, wie er
-/// draait, een kick die nu vervalt, en zijn staat.
+/// architectuur: de cursor, wie er draait, een kick die nu vervalt, en zijn
+/// staat.
 pub(crate) fn begin(sched: Pa, i: usize, id: u8, ctx: Pa) {
-    crate::hopcost::pick(id);
     dev::write64(sched.add(SCHED_CURSOR), i as u64);
     dev::write64(sched.add(SCHED_CURRENT), u64::from(id));
     os_ctx_write(ctx, CTX_KICK_PENDING, 0);
@@ -974,10 +970,9 @@ pub(crate) fn home(sched: Pa, dt: u64) {
 }
 
 /// Het einde van de beurt van `id`, na zijn `settle`: de laatste beurt in
-/// de meetlat en de stempel van `hopcost` (de kern is terug).
+/// de meetlat.
 pub(crate) fn end(id: u8, back: Back) -> Back {
     STATS.last.store(u64::from(id) | back.code() << 8, Relaxed);
-    crate::hopcost::ran(id);
     back
 }
 
@@ -1468,9 +1463,6 @@ mod arch {
     .arch_extension nosimd
     .arch_extension nofp
 1:
-"#,
-            crate::hopcost::arm_in!(),
-            r#"
     ldp x4, x5, [x1, #({gprs} + 4 * 8)]
     ldp x6, x7, [x1, #({gprs} + 6 * 8)]
     ldp x8, x9, [x1, #({gprs} + 8 * 8)]
@@ -1496,9 +1488,6 @@ mod arch {
 \p\()_back:
     ldr x1, [sp, #(16 + 104)]
     stp x2, x3, [x1, #({gprs} + 2 * 8)]
-"#,
-            crate::hopcost::arm_out!(),
-            r#"
     stp x4, x5, [x1, #({gprs} + 4 * 8)]
     stp x6, x7, [x1, #({gprs} + 6 * 8)]
     stp x8, x9, [x1, #({gprs} + 8 * 8)]

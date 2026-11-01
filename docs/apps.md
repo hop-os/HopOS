@@ -205,20 +205,20 @@ Zonder cijfers is "de app slaapt" niet te onderscheiden van "de app dut".
 Elke app publiceert twee tellers op zijn control-page, zonder er iets voor te
 doen: `CTRL_IDLE` (de ticks van de architectuurteller die de slaper weg was,
 alle cores van de app bij elkaar) en `CTRL_WAKES` (hoe vaak de slaper is
-aangeroepen). De kern leest ze en zet voor elk levend slot om de dertig
-seconden één regel op de console:
+aangeroepen). De kern geeft ze in `SLOT_STATUS`, en Hop rekent: het
+cpu-percentage van een taak in zijn API (`cpu_percent` per taak,
+`kern_cpu_percent` en `hop_cpu_percent` per node in `GET /v1/agents`) is
+"100 min idle" over zijn eigen poll-interval. Dat is de enige meetlat; de
+consoleregel `HOPOS_SLOT_LOAD` van de kern rekende hetzelfde nog eens en is
+op 01-11 weg (sequence-hopos.md §14.6).
 
-```
-slot 3: idle=94% wakes=41/s cores=1 HOPOS_SLOT_LOAD
-```
+Lees de twee zo:
 
-Lees hem zo:
-
-- **idle** is de tijd die de app de core niet nodig had, over de laatste
-  dertig seconden. Op ijzer zit een stille app boven de 95%; een app die
-  werkt zakt, en dat hoort: de vraag is of hij weer stijgt als het werk
-  klaar is. De norm geldt alleen op ijzer: op QEMU-TCG is `WFE` een no-op en
-  meet een eigen core ~0%, dus een QEMU-run is op dit getal nooit rood.
+- **idle** is de tijd die de app de core niet nodig had. Op ijzer zit een
+  stille app boven de 95%; een app die werkt zakt, en dat hoort: de vraag
+  is of hij weer stijgt als het werk klaar is. De norm geldt alleen op
+  ijzer: op QEMU-TCG is `WFE` een no-op en meet een eigen core ~0%, dus een
+  QEMU-run is op dit getal nooit rood.
 - **wakes** is hoe vaak de app wakker werd. Een stille app met één hartslag
   van 50 ms (de `watch`-taak van applib) en een paar echte timers zit in de
   tientallen per seconde. Honderden per seconde zonder verkeer is dutten;
@@ -226,11 +226,6 @@ Lees hem zo:
 - Op QEMU-TCG zegt daarom alleen `wakes` iets, behalve op een gedeelde
   core: daar telt de yield wél als idle, ook onder QEMU
   (`tools/qemu-test-share.sh`).
-- Hop leest dezelfde twee tellers voor het cpu-percentage van een taak in
-  zijn API, over zijn eigen poll-interval: dat getal is "100 min idle" over
-  dát venster, de consoleregel is idle over dertig seconden. Ze komen uit
-  één bron en lopen alleen in ritme uiteen; leg ze niet tegen elkaar op de
-  seconde.
 - De kern zelf staat er als slot 0: `SLOT_STATUS` van slot 0 geeft hem als
   levende app op de OS-core met één core, met de slaaptijd van zijn executor
   (dezelfde als `busy_ms` van `HOPOS_TICK`) als idle, de heap in gebruik als
@@ -278,7 +273,7 @@ elke `.await` meteen `Ready` is (een volle inbox, een kanaal met werk) yieldt
 nooit vanzelf. De SDK van Stulp geeft na 32 beurten verplicht
 `yield_now()` (het coöperatieve budget), los van wat er nog ligt.
 
-**Meet per taak, niet per slot.** `HOPOS_SLOT_LOAD` zei "slot 3 is druk";
+**Meet per taak, niet per slot.** De idle van het slot zei "slot 3 is druk";
 pas een meting per plugintaak (`busy_ms` per taak en een regel voor elke
 poll boven 200 ms, met de naam van de taak) wees de Matter-plugin aan met
 polls van ~290 ms, honderden keren. Meet ook wat vóór het werk gebeurt: de
@@ -332,7 +327,7 @@ tot 600 ms), en elke melding, ook een beweging, liep zoveel achter.
 wachten, niet de rekentijd: wat elke werker per gebeurtenis kost, betaal je
 zo vaak als er werkers zijn. In Stulp startten
 acht werkers per rapport een taak die met een kopie van de staat begon, en
-zakte het slot van boven de 90% naar 11 tot 40% idle. Meet `HOPOS_SLOT_LOAD`
+zakte het slot van boven de 90% naar 11 tot 40% idle. Meet de idle van het slot
 opnieuw na elke stap naar meer gelijktijdigheid; doe kort werk direct en geef
 alleen lang, afbreekbaar werk een eigen taak.
 
@@ -369,7 +364,7 @@ van, en de UniFi-plugin viel elke keer om.
 
 **Kies de core met een meting.** Op de LicheeRV is de grote core die van de
 kern (`system`); de bundel met plugins daar had de helft over, verplaatst
-naar de kleine core zat hij op 100%. Kijk naar `HOPOS_SLOT_LOAD` vóór en na
+naar de kleine core zat hij op 100%. Kijk naar de idle van het slot vóór en na
 een verhuizing, niet naar wat de naam van een hart doet vermoeden.
 
 ## Checklist voor de review
@@ -380,8 +375,8 @@ een verhuizing, niet naar wat de naam van een hart doet vermoeden.
   `Signal::wait()`, niet via een niet-blokkerende poging plus een dutje.
 - Een synchrone stap die op het traagste board meer dan een milliseconde
   kost, heeft een `yield_now` of een `stacktask`.
-- De `HOPOS_SLOT_LOAD`-regel van de app op een stille node: idle boven de
-  95%, wakes in de tientallen. Zet die regel in het testlogboek van de app.
+- Het `cpu_percent` van de taak bij Hop op een stille node: onder de 5%.
+  Zet dat getal in het testlogboek van de app.
 - Op een gedeelde core: de 404 van de buurman blijft onder de 50 ms terwijl
   jouw app werkt.
 - Een gemiste hartslag sluit niets af; een herverbinding is duurder dan
@@ -399,7 +394,7 @@ een verhuizing, niet naar wat de naam van een hart doet vermoeden.
   per werker.
 - Gegevens gaan door zodra ze binnen zijn; een protocol-ACK wordt niet
   synchroon afgewacht.
-- Na meer gelijktijdigheid: `HOPOS_SLOT_LOAD` opnieuw gemeten.
+- Na meer gelijktijdigheid: het `cpu_percent` opnieuw gemeten.
 - Een keten met merkbare vertraging heeft een tijdregel per schakel.
 
 Zie ook: het Rust-handboek (`rustdoc/README.md`, §2 Taken en §4 De executor),

@@ -32,9 +32,9 @@ fn env_u64(app: &App, key: &str, default: u64) -> u64 {
 /// BURN: rekenen in een ritme van werk en rust (`BURN_WORK`, `BURN_REST`
 /// in seconden). Tijdens werk rekent de core in bursts met een yield
 /// ertussen (heartbeat en kill-vlag krijgen de core); tijdens rust slaapt
-/// hij. De meetlat: bursts per seconde in deze app, en aan de kant van de
-/// kern de idle-meetlat (`hopos.idlestat=1`), die tijdens werk hoort te
-/// dalen op de core van deze app.
+/// hij. De meetlat: bursts per seconde in deze app, en de idle van het
+/// slot (`CTRL_IDLE` via `SLOT_STATUS`, bij Hop), die tijdens werk hoort te
+/// dalen.
 pub(crate) async fn burn(app: &'static App) -> ! {
     let work = env_u64(app, "BURN_WORK", BURN_WORK).max(1);
     let rest = env_u64(app, "BURN_REST", BURN_REST);

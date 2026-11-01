@@ -465,10 +465,10 @@ In `net/` verder: `flows` (conntrack, 4096 flows, 512 per slot), `host`
 De binary (11k): `main.rs` (kmain, setup, tick), en de lijm die de traits
 van kern invult en de taken spawnt: `slots`, `kooi`, `cage`/`cage_riscv`,
 `glue`, `config`, `net`, `storage`, `flip`, `codec`, `optical`, `gui`,
-`conport`, `watchdog`, `telemetry`, `seed`, `clock`, `load`, `bench`,
-`mem`.
-Features buiten het board: `gui`, `media`, `vhe`, en de meetkernen
-`nvmebench`, `wdtest` en `hopcost`.
+`conport`, `watchdog`, `telemetry`, `seed`, `clock`, `mem`.
+Features buiten het board: `gui`, `media` en `vhe`. Meten gaat op één
+manier (sequence-hopos.md §14.6): tellers op de control-page,
+`SLOT_STATUS`, Hop rekent.
 
 ### 5.7 gui en media
 

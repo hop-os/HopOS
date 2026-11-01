@@ -318,7 +318,6 @@ impl Sleeper for ArmSleeper {
     /// `dev::notify` bij elke `Signal::set`. De eerstvolgende WFE valt er
     /// dan meteen doorheen.
     fn sleep(&mut self, now: u64, until: Option<u64>, ready: &dyn Fn() -> bool) {
-        crate::hopcost::mark(crate::hopcost::SLEEP);
         let daif = arch::mask();
         if ready() {
             arch::restore(daif);

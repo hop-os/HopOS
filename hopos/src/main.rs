@@ -12,7 +12,6 @@
 #![no_main]
 #![allow(clippy::expect_used)] // boot-code: vóór de agent draait is falen parkeren (handboek §12)
 
-mod bench; // de meetbanken achter hopos.nvmebench en hopos.idlestat (bench.rs)
 mod clock;
 mod codec; // het media-vlak (codec.rs); kaal een stub, feature `media`
 mod config;
@@ -21,7 +20,6 @@ mod flip; // FLIP: de kern-flip (flip.rs)
 mod glue; // `DevMem`, `KernConsole` en de outbox van een slot (glue.rs)
 mod gui; // het gui-vlak (gui.rs); kaal no-ops, feature `gui`
 mod kooi; // de kooi als beleid, voor elke architectuur (kooi.rs)
-mod load; // de meetlat per slot: idle en wekken op de console (load.rs)
 #[cfg(all(
     target_arch = "aarch64",
     target_os = "none",
@@ -107,8 +105,7 @@ extern crate board_uefi as vboard;
 /// traits); daarnaast alleen het plan in `vboard::slots`.
 type Machine = vboard::Machine;
 
-/// De schijf van het board (`Board::probe_disk`): de bench leent hem, de
-/// opslag neemt hem.
+/// De schijf van het board (`Board::probe_disk`): de opslag neemt hem.
 type Disk = <Machine as Board>::Disk;
 
 static BOARD: Machine = Machine::new();
@@ -361,11 +358,8 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         );
     }
     // De opslag vóór de system-API: die krijgt de hopfs-actor alleen als
-    // er een schijf is (anders weigert elke bestandscall luid). De schijf
-    // wordt één keer geprobed; de meetbanken (bench.rs, alleen met
-    // hopos.nvmebench of hopos.idlestat) lenen hem vóór de opslag hem mount.
-    let disk = bench::start(exec, storage::probe());
-    let disk = storage::start(exec, disk);
+    // er een schijf is (anders weigert elke bestandscall luid).
+    let disk = storage::start(exec, storage::probe());
     // MEDIA: de codec-dienst ná de opslag, want de firmware-blobs staan op
     // het volume (codec.rs); zonder VPU meldt hij luid dat er geen is.
     codec::up(exec);
@@ -374,7 +368,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // De IRQ-dispatch spawnt als eerste: hij is de pomp van alle lijnen.
     // Faalt de controller, dan draait de node door op de vangrail van de
     // slaap (interrupts zijn een verbetering, geen voorwaarde).
-    // De schijf kwam ervóór op (de bench en de mount pollen); zijn lijn
+    // De schijf kwam ervóór op (de mount pollt); zijn lijn
     // komt nu.
     match board.start_interrupts() {
         Ok(bell) => {
@@ -386,13 +380,10 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         Err(e) => println!("irq: {e}, running on the sleep failsafe HOPOS_IRQ_FAIL"),
     }
     exec.spawn(tick(exec)).expect("spawn tick");
-    #[cfg(feature = "hopcost")]
-    exec.spawn(hopcost(exec)).expect("spawn hopcost");
     // De node-watchdog (op een flip-boot meteen met de boot-guard) en de
     // telemetrie: thermiek en klokbeleid.
     watchdog::start(exec, hop_here);
     telemetry::start(exec);
-    load::start(exec); // de meetlat per slot (docs/apps.md)
     gui::start_screen_status(exec); // de meetregels naast de bunny
 
     // De config van de node: het bestand en de bootargs van het board
@@ -772,22 +763,6 @@ static TICK_LOG: AtomicBool = AtomicBool::new(false);
 static OS_ASID: AtomicBool = AtomicBool::new(true);
 /// Het tiknummer: de hartslag van slot 0, de kern (SLOT_STATUS).
 static TICKS: AtomicU64 = AtomicU64::new(0);
-
-/// De meetlat van een hop tussen twee bewoners van de OS-core (feature
-/// `hopcost`, cpu/src/hopcost.rs): de rondreizen op de console zodra het
-/// 200 ms stil is, zodat de UART niet in de meting valt.
-#[cfg(feature = "hopcost")]
-async fn hopcost(exec: &'static Executor) {
-    let mut seen = 0;
-    loop {
-        exec.after(core::time::Duration::from_millis(200)).await;
-        let n = cpu::hopcost::recorded();
-        if n == seen {
-            cpu::hopcost::drain(&mut |a| println!("{a}"));
-        }
-        seen = n;
-    }
-}
 
 async fn tick(exec: &'static Executor) {
     let start = exec.now();

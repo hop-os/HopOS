@@ -435,15 +435,20 @@ fn the_queue_is_bounded_ordered_and_gives_back_what_a_dead_hop_held() {
         queue.check(i1, t1, late, true, |_| true, &mut out),
         Some(Outcome::NoService)
     );
-    // Hop valt weg met ticket 0 in handen: terug in de rij.
+    // Hop valt weg met ticket 0 in handen: een fout voor de app (O5 van
+    // 01-11), niet terug in de rij, en de plaats vrij.
     let (i0, t0) = tickets[0];
-    assert_eq!(queue.check(i0, t0, 10, true, |_| false, &mut out), None);
+    assert_eq!(
+        queue.check(i0, t0, 10, true, |_| false, &mut out),
+        Some(Outcome::HopGone)
+    );
+    let (i2, t2) = tickets[2];
     let n = queue.take(&svc, hop1, &mut out).unwrap();
-    assert_eq!(StoreTask::decode(&out[..n]).unwrap().ticket, t0);
+    assert_eq!(StoreTask::decode(&out[..n]).unwrap().ticket, t2);
     // Een lijst van meer dan 8 KiB: een fout, niet afgekapt.
     let big = vec![b'x'; MAX_STORE_LIST + 1];
-    queue.finish(t0, STATUS_OK, 1, &big).ok().unwrap();
-    match queue.check(i0, t0, 20, true, |_| true, &mut out) {
+    queue.finish(t2, STATUS_OK, 1, &big).ok().unwrap();
+    match queue.check(i2, t2, 20, true, |_| true, &mut out) {
         Some(Outcome::Done { status, len, .. }) => {
             assert_eq!(status, STATUS_ERROR);
             assert!(
@@ -456,9 +461,9 @@ fn the_queue_is_bounded_ordered_and_gives_back_what_a_dead_hop_held() {
     }
     // Een app die weg is, krijgt Evicted en geeft haar plaats vrij.
     stop(&mut a, 2).unwrap();
-    let (i2, t2) = tickets[2];
+    let (i3, t3) = tickets[3];
     assert_eq!(
-        queue.check(i2, t2, 30, false, |_| true, &mut out),
+        queue.check(i3, t3, 30, false, |_| true, &mut out),
         Some(Outcome::Evicted)
     );
     // En een opdracht van een dode app gaat niet meer naar Hop.

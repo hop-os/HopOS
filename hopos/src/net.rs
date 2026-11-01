@@ -100,7 +100,7 @@ static PUBLISHED: Published<RingRx> = Published::new();
 /// ligt, zodat de kick van een app (SEV of HVC 6) de switch ook echt wekt
 /// in plaats van zijn failsafe (`net::switch::Doorbell`, de les van 30-09).
 pub(crate) fn doorbell<S: Sleeper>(inner: S) -> Doorbell<'static, RingRx, S> {
-    Doorbell::new(inner, &PUBLISHED, &DOOR)
+    Doorbell::new(inner, &PUBLISHED, &DOOR, crate::glue::ring_outboxes)
 }
 /// Pomp naar switch.
 static INGRESS: Ingress = Ingress::new();

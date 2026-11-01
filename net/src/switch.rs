@@ -359,15 +359,25 @@ pub struct Doorbell<'a, R, S> {
     inner: S,
     published: &'a Published<R>,
     door: &'a Signal,
+    /// De andere deur van het interne LAN: de outboxen van de slots (de
+    /// kern luidt hun servicers; `true` = er werd gebeld).
+    outboxes: fn() -> bool,
 }
 
 impl<'a, R: Reader, S: Sleeper> Doorbell<'a, R, S> {
-    /// De slaper `inner` met de deur over `published` naar `door`.
-    pub const fn new(inner: S, published: &'a Published<R>, door: &'a Signal) -> Self {
+    /// De slaper `inner` met de deur over `published` naar `door`, en de
+    /// deur van de outboxen.
+    pub const fn new(
+        inner: S,
+        published: &'a Published<R>,
+        door: &'a Signal,
+        outboxes: fn() -> bool,
+    ) -> Self {
         Self {
             inner,
             published,
             door,
+            outboxes,
         }
     }
 }
@@ -377,13 +387,16 @@ impl<R: Reader, S: Sleeper> Sleeper for Doorbell<'_, R, S> {
         // Werk dat er al lag, ziet de slaper zelf: zijn eerste `ready()`
         // (met de maskers dicht) belt dan en hij keert meteen terug. Een
         // eigen blik hier ervoor was dezelfde blik twee keer (03-10).
-        let (published, door) = (self.published, self.door);
-        self.inner
-            .sleep(now, until, &|| ready() || published.ring(door));
-        // Terug uit een beurt van een bewoner van de OS-core (of een wek):
-        // wat hij schreef, meteen naar de switch, zonder eerst een lege
-        // ronde van de executor en een tweede slaapvraag (03-10).
+        let (published, door, outboxes) = (self.published, self.door, self.outboxes);
+        self.inner.sleep(now, until, &|| {
+            ready() || published.ring(door) || outboxes()
+        });
+        // Terug uit een beurt van een bewoner van de OS-core (of een wek, de
+        // kick van een app-core): wat hij schreef, meteen naar de switch en
+        // de servicers, zonder eerst een lege ronde van de executor en een
+        // tweede slaapvraag (03-10).
         published.ring(door);
+        outboxes();
     }
 }
 

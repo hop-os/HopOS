@@ -840,7 +840,7 @@ fn deur_belt_de_switch_als_er_al_werk_ligt() {
     let mut app = h.attach(2);
     assert!(app.tx.push(KIND_FRAME, &[0u8; 64]));
     let (s, slept, _) = spy(|| {});
-    let mut d = Doorbell::new(s, h.published, h.door);
+    let mut d = Doorbell::new(s, h.published, h.door, || false);
     d.sleep(0, None, &|| false);
     assert_eq!(slept.get(), 0, "de OS-core sliep met werk in een TX-ring");
     assert!(
@@ -858,7 +858,7 @@ fn deur_hoort_een_publicatie_tijdens_de_slaap() {
     let (s, slept, ready_at_end) = spy(move || {
         assert!(app.borrow_mut().tx.push(KIND_FRAME, &[1u8; 64]));
     });
-    let mut d = Doorbell::new(s, h.published, h.door);
+    let mut d = Doorbell::new(s, h.published, h.door, || false);
     d.sleep(0, None, &|| false);
     assert_eq!(slept.get(), 1);
     assert_eq!(
@@ -876,7 +876,7 @@ fn deur_slaapt_als_er_niets_ligt() {
     let mut h = harness();
     let _app = h.attach(4);
     let (s, slept, ready_at_end) = spy(|| {});
-    let mut d = Doorbell::new(s, h.published, h.door);
+    let mut d = Doorbell::new(s, h.published, h.door, || false);
     d.sleep(0, None, &|| false);
     assert_eq!(slept.get(), 1);
     assert_eq!(ready_at_end.get(), Some(false));

@@ -78,7 +78,7 @@ impl<'w> Printk<'w> {
                 // De kern leest de outbox op een bel: leeg naar niet-leeg
                 // is precies het moment om te bellen, en niet vaker.
                 if was_empty {
-                    dev::notify();
+                    crate::net::outbox_kick();
                 }
             }
             Some(Err(_)) | None => {

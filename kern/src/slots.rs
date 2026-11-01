@@ -80,19 +80,9 @@ pub const RECLAIM_WAIT: Duration = Duration::from_secs(2);
 /// De start-gratie van een servicer: bij de start is de ctx heel even nog
 /// leeg. Zonder gratie stierf de servicer meteen en verdronk niemand meer de
 /// logs van de echte app (gemeten 30-07: de stervensreden van welcome bleef
-/// in de ring staan).
+/// in de ring staan). Eén termijn, geen tik: daarna wacht hij alleen op zijn
+/// bel ([`Servicers::ring`]) en zijn stop.
 pub const IDLE_GRACE: Duration = Duration::from_secs(2);
-/// De tik van een servicer zonder werk. Uitstelbaar (`Timer::sleep_deferrable`):
-/// hij kijkt elke 2 ms zolang de core toch wakker is, maar wekt hem er niet
-/// voor. Als gewone timer was hij tot 500 wekken per seconde per slot van
-/// een stille OS-core (QEMU 30-09, Hop plus bench: ~450 naar ~250).
-pub const SERVICER_TICK: Duration = Duration::from_millis(2);
-/// De vangrail van een servicer op een stille core: hooguit zo lang ligt
-/// een logregel, een SMP-verzoek of een dode context ongezien. Op een raster
-/// (een veelvoud van 10 ms sinds boot), zodat de servicers van alle slots
-/// samen één wek per 10 ms kosten in plaats van één elk (Linux:
-/// `round_jiffies`).
-pub const SERVICER_GUARD: Duration = Duration::from_millis(10);
 /// Hoeveel records de servicer achter elkaar leest voordat hij de executor
 /// een ronde geeft. Les van 30-09 (de soak): een app die zijn outbox volschrijft,
 /// hield de servicer in één poll tot de ring leeg was, en daarmee de hele
@@ -532,6 +522,13 @@ struct Life {
 /// een stop zo, en hoeft niet rond te kijken.
 pub struct Servicers {
     ctl: [ServicerCtl; SLOT_CAP + 1],
+    /// Per slot de bel van zijn servicer: werk in de outbox, een
+    /// SMP-verzoek of een gevallen context, gezien bij de kick van de
+    /// app-core of na een beurt op de OS-core ([`Servicers::ring`],
+    /// docs/sequence-hopos.md §13.3). Naast `ctl`, niet erin: één tabel
+    /// van 129 controls met de bel erbij is te groot voor de stack van een
+    /// `const`.
+    bells: [Signal; SLOT_CAP + 1],
     table: LocalCell<[Option<Life>; SLOT_CAP + 1]>,
     mounts: LocalCell<[Option<Vec<Mount>>; SLOT_CAP + 1]>,
     jobs: LocalCell<[Option<Vec<u8>>; SLOT_CAP + 1]>,
@@ -544,10 +541,21 @@ impl Servicers {
     pub const fn new() -> Servicers {
         Servicers {
             ctl: [const { ServicerCtl::new() }; SLOT_CAP + 1],
+            bells: [const { Signal::new() }; SLOT_CAP + 1],
             table: LocalCell::cell([None; SLOT_CAP + 1]),
             mounts: LocalCell::cell([const { None }; SLOT_CAP + 1]),
             jobs: LocalCell::cell([const { None }; SLOT_CAP + 1]),
             changed: Signal::new(),
+        }
+    }
+
+    /// Luidt de servicer van `slot`: zijn outbox heeft werk, er staat een
+    /// SMP-verzoek, of zijn context viel. De kern luidt hem bij de kick van
+    /// een app-core en na een beurt op de OS-core; de servicer zelf pollt
+    /// niet (O10).
+    pub fn ring(&self, slot: Slot) {
+        if let Some(b) = self.bells.get(slot.get()) {
+            b.set();
         }
     }
 
@@ -687,20 +695,24 @@ pub async fn servicer_task<'a, O, T, L, const N: usize>(
     T: Timer,
     L: Console,
 {
-    let Some(ctl) = svc.ctl(slot) else { return };
+    let (Some(ctl), Some(bell)) = (svc.ctl(slot), svc.bells.get(slot.get())) else {
+        return;
+    };
     loop {
         ctl.start.wait().await;
         let part = Region::new(ctl.base.load(Acquire), ctl.size.load(Acquire));
-        serve(slot, ctl, &mut open(part), timer, log, inbox, buf).await;
+        serve(slot, (ctl, bell), &mut open(part), timer, log, inbox, buf).await;
         ctl.gone.set();
     }
 }
 
 /// Eén levensduur: outbox lezen, logs doorzetten, SMP-verzoeken melden.
-/// Stopt bij evict, een corrupte ring of een weggevallen context.
+/// Stopt bij evict, een corrupte ring of een weggevallen context. Wacht op
+/// zijn bel of zijn stop; alleen vóór de context de eerste keer leeft, met
+/// de termijn van [`IDLE_GRACE`] erbij.
 async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
     slot: Slot,
-    ctl: &ServicerCtl,
+    (ctl, bell): (&ServicerCtl, &Signal),
     out: &mut O,
     timer: &T,
     log: &L,
@@ -751,20 +763,25 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
             ));
             return;
         }
-        if out.live() {
+        let wake = select(ctl.stop.wait(), bell.wait());
+        let woke = if out.live() {
             saw_live = true;
+            wake.await
         } else if saw_live {
             return;
         } else {
+            let grace = IDLE_GRACE.as_nanos() as u64;
             let since = *idle_since.get_or_insert(timer.now());
-            if timer.now().saturating_sub(since) > IDLE_GRACE.as_nanos() as u64 {
+            let left = grace.saturating_sub(timer.now().saturating_sub(since));
+            if left == 0 {
                 return;
             }
-        }
-        let grid = SERVICER_GUARD.as_nanos() as u64;
-        let guard = Duration::from_nanos(grid - timer.now() % grid);
-        let tick = select(timer.sleep_deferrable(SERVICER_TICK), timer.sleep(guard));
-        if let Either::Left(()) = select(ctl.stop.wait(), tick).await {
+            match select(wake, timer.sleep(Duration::from_nanos(left))).await {
+                Either::Left(w) => w,
+                Either::Right(()) => Either::Right(()),
+            }
+        };
+        if let Either::Left(()) = woke {
             stopping = true;
         }
     }
@@ -2549,6 +2566,75 @@ pub(crate) mod tests {
         fn smp_pending(&self) -> bool {
             false
         }
+    }
+
+    /// Een outbox die de test na de start nog vult.
+    struct SharedOutbox<'c> {
+        lines: &'c RefCell<Vec<Vec<u8>>>,
+        live: &'c Cell<bool>,
+    }
+
+    impl Outbox for SharedOutbox<'_> {
+        fn read_into(&mut self, buf: &mut [u8]) -> Option<(u8, usize)> {
+            let l = self.lines.borrow_mut().pop()?;
+            buf[..l.len()].copy_from_slice(&l);
+            Some((RING_LOG, l.len()))
+        }
+        fn corrupt(&self) -> bool {
+            false
+        }
+        fn live(&self) -> bool {
+            self.live.get()
+        }
+        fn smp_pending(&self) -> bool {
+            false
+        }
+    }
+
+    // O10: de servicer pollt niet. Een regel die zonder bel in de outbox
+    // komt, blijft liggen; de bel (de kick van de app-core) laat hem lezen,
+    // en na de val van de context gaat hij op de volgende bel weg.
+    #[test]
+    fn the_servicer_waits_on_its_bell_not_on_a_tick() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let live = Cell::new(true);
+        let lines = RefCell::new(Vec::new());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        start_live(&mut a, 1, 8, 1).unwrap();
+        let inbox: Mailbox<Envelope<'_>, 4> = Mailbox::new();
+        let timer = FakeTimer::default();
+        let conr = &con;
+        let mut buf = [0u8; 64];
+        let servicer = servicer_task(
+            s(1),
+            &svc,
+            |_| SharedOutbox {
+                lines: &lines,
+                live: &live,
+            },
+            &timer,
+            &conr,
+            &inbox,
+            &mut buf,
+        );
+        let mut servicer = core::pin::pin!(servicer);
+        let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+        let ctl = svc.ctl(s(1)).unwrap();
+        assert!(servicer.as_mut().poll(&mut cx).is_pending());
+        lines.borrow_mut().push(b"hi".to_vec());
+        for _ in 0..4 {
+            assert!(servicer.as_mut().poll(&mut cx).is_pending());
+        }
+        assert!(con.app.borrow().is_empty(), "no bell, no read");
+        svc.ring(s(1));
+        assert!(servicer.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(con.app.borrow().as_slice(), &[(1, b"hi".to_vec())]);
+        live.set(false);
+        assert!(servicer.as_mut().poll(&mut cx).is_pending());
+        assert!(!ctl.gone.is_set(), "the fall is seen on the bell");
+        svc.ring(s(1));
+        assert!(servicer.as_mut().poll(&mut cx).is_pending());
+        assert!(ctl.gone.is_set(), "the servicer left after the fall");
     }
 
     // De stop (de evict) komt vóór de servicer zijn beurt had: de laatste

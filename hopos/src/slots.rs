@@ -639,7 +639,7 @@ async fn servicer(exec: &'static Executor, slot: Slot, ctx: dev::Pa) {
     servicer_task(
         slot,
         SERVICERS,
-        |part| SlotOutbox::open(part, ctx),
+        |part| SlotOutbox::open(slot, part, ctx),
         &timer,
         &LogTee::new(KernConsole, &LOGS),
         INBOX,

@@ -71,6 +71,18 @@ fn kick() {
     TX_KICKS.fetch_add(1, Relaxed);
 }
 
+/// De bel naar de kern na een leeg-naar-niet-leeg op de outbox: dezelfde
+/// kick als op de TX-ring, want de kern leest de outbox alleen op een kick
+/// of na een beurt (O10, docs/sequence-hopos.md §13.3). Op het hart van de
+/// kern de schuld ([`TX_OWED`]), zoals de [`Nic`] daar.
+pub(crate) fn outbox_kick() {
+    if crate::rt::app().is_some_and(|a| a.ctrl().on_kern_hart()) {
+        TX_OWED.store(true, Relaxed);
+    } else {
+        kick();
+    }
+}
+
 /// Betaalt een uitgestelde kick (zie [`TX_OWED`]): de app blijft bezig, of
 /// slaapt zonder yield. `true` als er een kick was.
 pub fn kick_owed() -> bool {

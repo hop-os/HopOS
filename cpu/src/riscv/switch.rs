@@ -678,6 +678,15 @@ __hopos_mentry:
     HOPOS_RV_CIPA t1
     HOPOS_RV_SYNC
     sd zero, {current}(sp)
+    // De kick zegt het de kern, zoals a7 = 2: zijn servicer leest de laatste
+    // woorden en ziet de dode context zonder te pollen
+    // (docs/sequence-hopos.md §13.3).
+    ld t0, {osbell}(sp)
+    beqz t0, 44f
+    fence iorw, iorw
+    li t2, 1
+    sw t2, 0(t0)
+44:
 
     // --- rotate ---------------------------------------------------------
     // s1 = lijstlengte, s2 = index, s3 = pogingen, s4 = vroegste wektijd,

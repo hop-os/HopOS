@@ -133,6 +133,12 @@
 #   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/ECHOPORT  de host-poorten
 #                                           (standaard vrije van het OS)
 #   HOP_DIR=pad                             de hop-repo (standaard ../hop/hop)
+#   GUI=1 BOARD=uefi tools/qemu-test-flip.sh  dezelfde flip met het glas
+#                                           (`-device ramfb`, kern A en B met
+#                                           gui): wat de kern aan zijn map
+#                                           wijzigt, overleeft de flip in de
+#                                           tabellen van de stub, niet in de
+#                                           heap (board::Board::remap)
 #   FEATURES=vhe CPU=neoverse-n1 BOARD=uefi ...  de flip met de kern onder
 #                                           E2H = 1 (image/uefi-run.sh en
 #                                           image/flip-bundle.sh nemen FEATURES
@@ -148,6 +154,19 @@ uefi) TIMEOUT="${TIMEOUT:-180}" ;;
 rpi4) ;;
 *)
 	echo "BOARD=$BOARD: virt, uefi of rpi4" >&2
+	exit 64
+	;;
+esac
+QGUI=""
+case "$BOARD:${GUI:-0}" in
+*:0) ;;
+uefi:1)
+	QGUI="-device ramfb"
+	FEATURES="${FEATURES:+$FEATURES,}gui"
+	export FEATURES
+	;;
+*)
+	echo "GUI=1: alleen met BOARD=uefi" >&2
 	exit 64
 	;;
 esac
@@ -286,7 +305,7 @@ if [ "$BOARD" = uefi ]; then
 	printf 'hopos.insecure=1\n' >"$ART/hopos.cfg"
 	[ -n "${OSCORE:-}" ] && printf 'hopos.oscore=%s\n' "$OSCORE" >>"$ART/hopos.cfg"
 	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_ELF" CFG="$ART/hopos.cfg" \
-		FEATURES="${FEATURES:+$FEATURES,}board-uefi/efi-rng" \
+		FEATURES="${FEATURES:+$FEATURES,}board-uefi/efi-rng" GUI=0 \
 		sh "$DIR/image/uefi-run.sh" 2>&1 | sed 's/^/   /'
 	[ -e "$ESP/EFI/BOOT/BOOTAA64.EFI" ] || {
 		echo "ROOD: geen BOOTAA64.EFI"
@@ -395,7 +414,7 @@ if [ "$BOARD" = uefi ]; then
 	# (dat script zet alleen de system-API door).
 	dd if=/dev/zero of="$ART/vars.fd" bs=1048576 count=64 2>/dev/null
 	dd if=/dev/zero of="$DISK" bs=1048576 count=0 seek=64 2>/dev/null
-	qemu_edk2 "${CPU:-cortex-a57}" "$ART/vars.fd" "$ESP" \
+	qemu_edk2 "${CPU:-cortex-a57}" "$ART/vars.fd" "$ESP" $QGUI \
 		-device virtio-net-pci,netdev=n0,romfile= \
 		-netdev "user,id=n0,$QFWD" \
 		-drive "if=none,format=raw,file=$DISK,id=disk0" \
@@ -697,6 +716,15 @@ if [ "$MODE" != mismatch ]; then
 		echo "   ok  de lease: $CARRIED van kern A overgenomen, geen DHCP op kern B"
 	else
 		echo "   ROOD de lease: niet overgenomen ('${CARRIED:-geen HOPOS_DHCP_CARRIED}')"
+		fail=1
+	fi
+fi
+if [ -n "$QGUI" ]; then
+	# Het glas op beide kernen, en geen Normal-NC buiten de map van de stub.
+	if [ "$(count HOPOS_FB_CONSOLE)" = 2 ] && ! has "fb: left as the board mapped it"; then
+		echo "   ok  het glas: kern A en kern B tekenen op de GOP"
+	else
+		echo "   ROOD het glas: HOPOS_FB_CONSOLE $(count HOPOS_FB_CONSOLE)x (verwacht 2x), $(count 'fb: left as')x 'left as the board mapped it'"
 		fail=1
 	fi
 fi

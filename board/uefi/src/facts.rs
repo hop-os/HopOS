@@ -93,6 +93,9 @@ pub(crate) static CFG: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 pub(crate) static STAGE: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// Het EL waarop de firmware ons aanriep.
 pub(crate) static BOOT_EL: AtomicU8 = AtomicU8::new(0);
+/// De GOP (`crate::gop`, alleen in de gui-smaak): basis, hoogte<<32 |
+/// breedte, formaat<<32 | scanlijn. Basis 0 = geen bruikbaar beeld.
+pub(crate) static GOP: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 /// Het aantal tabellen van de identity map.
 pub(crate) static MMU_TABLES: AtomicU64 = AtomicU64::new(0);
 

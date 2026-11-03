@@ -21,6 +21,7 @@
 //! zonder die volgorde is de eerste lees een SError die geen handler
 //! opvangt, en weet je alleen dát de node weg is.
 
+use board::Board as _;
 use board_uefi::map_device;
 use cpu::println;
 use dev::Pa;
@@ -309,7 +310,11 @@ pub fn power_vpu(arena: u64, size: u64) -> Result<VpuWindows, PowerError> {
             return Err(PowerError::Map { pa });
         }
     }
-    cpu::memattr::normal_nc(arena, size).map_err(|_| PowerError::Uncached)?;
+    // Via het board, niet `cpu::memattr`: de map van de stub overleeft een
+    // flip, een tabel uit de heap niet (`board::Board::remap`).
+    board_uefi::Uefi::new()
+        .remap(arena, size, cpu::memattr::Attr::NormalNc)
+        .map_err(|_| PowerError::Uncached)?;
     let mut ch = tfa().ok_or(PowerError::Map { pa: TFA_SCMI_SHMEM })?;
     power_on(&mut ch)?;
     if !map_device(PM_SCMI_SHMEM, 0x1000) {

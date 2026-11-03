@@ -47,6 +47,7 @@ flip-mismatch MISMATCH=1 sh tools/qemu-test-flip.sh
 flip-oscore   OSCORE=1 sh tools/qemu-test-flip.sh
 flip-rpi4     BOARD=rpi4 sh tools/qemu-test-flip.sh
 flip-uefi     BOARD=uefi sh tools/qemu-test-flip.sh
+flip-uefi-gui GUI=1 BOARD=uefi sh tools/qemu-test-flip.sh
 uefi          sh tools/qemu-uefi-test.sh
 uefi-gui      GUI=1 sh tools/qemu-uefi-test.sh
 uefi-vhe      FEATURES=vhe CPU=neoverse-n1 sh tools/qemu-uefi-test.sh

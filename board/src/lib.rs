@@ -58,6 +58,7 @@ pub use driver_fb as fb;
 use abi::ring::Coherence;
 use core::fmt;
 use cpu::el2::Flavor;
+use cpu::memattr::Attr;
 use dev::Pa;
 use executor::Executor;
 use sync::Signal;
@@ -557,14 +558,27 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
         if !matches!(Self::SLOT_RINGS, Coherence::Hardware) {
             return Ok(());
         }
-        let r = if device {
+        if device {
             // Eerst de regels van de vorige huurder (een partitie) weg.
             dev::pull(Pa(pa), usize::try_from(size).unwrap_or(0));
-            cpu::memattr::device(pa, size)
+            self.remap(pa, size, Attr::Device)
         } else {
-            cpu::memattr::normal_wb(pa, size)
-        };
-        r.map_err(TailError::Attr)
+            self.remap(pa, size, Attr::NormalWb)
+        }
+    }
+
+    /// Zet `[pa, pa + size)` in de kernmap op `attr` (`cpu::memattr`: op
+    /// 2 MB-grenzen). Elke wijziging van de kern aan zijn eigen map gaat
+    /// hierlangs. UEFI schrijft in de tabellen van de stub: daar overleeft
+    /// de map een flip, en een tabel uit de heap van kern A zou door de
+    /// heap van kern B overschreven worden.
+    fn remap(&self, pa: u64, size: u64, attr: Attr) -> Result<(), TailError> {
+        match attr {
+            Attr::NormalWb => cpu::memattr::normal_wb(pa, size),
+            Attr::NormalNc => cpu::memattr::normal_nc(pa, size),
+            Attr::Device => cpu::memattr::device(pa, size),
+        }
+        .map_err(TailError::Attr)
     }
 
     /// Draagt `hopos.cfg` van het bootmedium mee in het nieuwe image van

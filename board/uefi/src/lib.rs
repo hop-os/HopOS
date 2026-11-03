@@ -851,20 +851,18 @@ impl Board for Uefi {
         }
     }
 
+    /// De levende map met de tabellen van de stub, niet die van
+    /// `cpu::memattr` uit de heap (`slots::remap`).
+    fn remap(&self, pa: u64, size: u64, attr: cpu::memattr::Attr) -> Result<(), board::TailError> {
+        slots::remap(pa, size, attr)
+            .then_some(())
+            .ok_or(board::TailError::Refused("uefi: no table for the remap"))
+    }
+
     /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
     /// Komt hij niet pending (GICR_ISPENDR0, of ICC_HPPIR1 zegt hem), dan
     /// één luide regel met het woord, het doel en wat de redistributor zei:
     /// de zelftest ziet daarna alleen nog `Timer` en weet niet waarom.
-    /// Het kooi-geheugen in de levende map met de tabellen van de stub,
-    /// niet die van `cpu::memattr` uit de heap (`slots::map_cage`).
-    fn map_cage(&self, pa: u64, size: u64, device: bool) -> Result<(), board::TailError> {
-        slots::map_cage(pa, size, device)
-            .then_some(())
-            .ok_or(board::TailError::Refused(
-                "uefi: no table for the cage chunk",
-            ))
-    }
-
     fn kick_self(&self) {
         let mpidr = cpu::mpidr();
         let word = driver_gicv3::sgi1r(mpidr, KICK_SGI);

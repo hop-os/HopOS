@@ -60,7 +60,7 @@ pub(crate) fn init_framebuffer_console(board: &'static crate::Machine) {
         println!("fb: no framebuffer on this board, console on the UART only HOPOS_FB_NONE");
         return;
     };
-    normal_nc(&d);
+    normal_nc(board, &d);
     let r = GLASS.try_borrow_mut().map(|mut c| {
         c.init(d).map(|()| {
             bunny_header(&mut c);
@@ -87,12 +87,12 @@ pub(crate) fn init_framebuffer_console(board: &'static crate::Machine) {
 
 /// Het vlak is DRAM, geen registerblok: laat het fabric de pixelstores
 /// gatheren in plaats van ze als losse Device-transacties te sturen
-/// (`cpu::memattr`). Weigert de map (een venster dat niet op 2 MB
+/// (`Board::remap`). Weigert de map (een venster dat niet op 2 MB
 /// valt), dan tekenen we zoals het board hem mapte; stil in Go, hier
 /// één regel, want het is een optimalisatie en geen voorwaarde.
-fn normal_nc(d: &Desc) {
+fn normal_nc(board: &crate::Machine, d: &Desc) {
     let Some(size) = d.size() else { return };
-    if let Err(e) = cpu::memattr::normal_nc(d.base.0, size) {
+    if let Err(e) = board.remap(d.base.0, size, cpu::memattr::Attr::NormalNc) {
         println!("fb: left as the board mapped it ({e})");
     }
 }

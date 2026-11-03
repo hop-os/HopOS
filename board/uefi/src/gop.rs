@@ -19,8 +19,9 @@
 //! of MMIO), en de scanout loopt door.
 
 use crate::efi::Efi;
+use crate::facts::GOP;
 use crate::mmu::{self, Mmu};
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::Ordering::Relaxed;
 use dev::Pa;
 use driver_fb::Desc;
 
@@ -49,11 +50,6 @@ mod off {
 const FORMAT_RGB: u32 = 0;
 /// PixelBlueGreenRedReserved8BitPerColor: de gangbare BGR.
 const FORMAT_BGR: u32 = 1;
-
-/// Wat de stub vond: basis, hoogte<<32 | breedte, formaat<<32 | scanlijn.
-/// Eén schrijver (de stub, vóór `kmain`), daarna alleen lezers: de
-/// gepubliceerde tabel van `facts`. Basis 0 = geen bruikbaar beeld.
-static GOP: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 /// Leest de GOP vóór de exit. Geen GOP, of een formaat zonder lineaire
 /// buffer (BitMask, BltOnly): geen beeld, en één regel die dat zegt.

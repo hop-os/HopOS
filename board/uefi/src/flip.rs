@@ -15,7 +15,7 @@
 //! De feiten worden nooit meer herschreven: de firmware-feiten veranderen
 //! niet door een flip. Eén uitzondering staat erachter: het zaad van
 //! [`carry_seed`], dat elke vertrekkende kern vers neerlegt en elke
-//! landende leest en wist. Wat wél verandert, is het aantal tabellen van de
+//! landende leest en wist. De GOP (het glas) staat er als laatste achter. Wat wél verandert, is het aantal tabellen van de
 //! identity map (`map_device` voegt er tijdens het leven van een kern aan
 //! toe); dat telt de nieuwe kern opnieuw door de levende map af te lopen,
 //! want met de telling van de koude boot zou hij een tabel die in gebruik
@@ -54,7 +54,14 @@ const SEED_WORDS: u64 = 8;
 /// "HOPSEED1" little-endian.
 const SEED_MAGIC: u64 = 0x3144_4545_5350_4F48;
 
-const _: () = assert!((W_SEED + 1 + SEED_WORDS) * 8 <= FLIP_FACTS_LEN);
+/// De GOP van de stub ([`facts::GOP`]): een magic en drie woorden, achter
+/// het zaad. Een pagina van een stub van vóór 3.2.0 heeft ze niet, en dan
+/// komt de geflipte kern zonder glas op tot de koude boot.
+const W_GOP: u64 = W_SEED + 1 + SEED_WORDS;
+/// "HOPGOP01" little-endian.
+const GOP_MAGIC: u64 = 0x3130_504F_4750_4F48;
+
+const _: () = assert!((W_GOP + 1 + 3) * 8 <= FLIP_FACTS_LEN);
 const _: () = assert!(SEED_WORDS as usize == facts::EFI_SEED.len());
 
 fn at(w: u64) -> Pa {
@@ -124,8 +131,12 @@ pub(crate) fn publish(ttbr0: u64, tcr: u64, el: u8, cnthctl: u64) {
     }
     // Geen zaad van een flip die nooit landde.
     dev::write64(at(W_SEED), 0);
+    for (i, g) in facts::GOP.iter().enumerate() {
+        dev::write64(at(W_GOP + 1 + i as u64), g.load(Relaxed));
+    }
+    dev::write64(at(W_GOP), GOP_MAGIC);
     dev::write64(at(W_MAGIC), FACTS_MAGIC);
-    dev::push(Pa(FLIP_FACTS_PA), ((W_SEED + 1) * 8) as usize);
+    dev::push(Pa(FLIP_FACTS_PA), ((W_GOP + 1 + 3) * 8) as usize);
 }
 
 /// De vertrekkende kern, vlak vóór de sprong: 64 verse bytes uit zijn DRBG
@@ -225,6 +236,11 @@ extern "C" fn hopos_efi_flip_facts() {
     let root = dev::read64(at(W_TTBR0)) & ADDR;
     let used = tables_in_use(root, 0).max(w(26));
     facts::MMU_TABLES.store(used, Relaxed);
+    if dev::read64(at(W_GOP)) == GOP_MAGIC {
+        for (i, g) in facts::GOP.iter().enumerate() {
+            g.store(dev::read64(at(W_GOP + 1 + i as u64)), Relaxed);
+        }
+    }
     take_seed();
 }
 

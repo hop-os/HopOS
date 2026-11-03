@@ -99,8 +99,13 @@ De USB-invoer per board (`Board::usb_hosts`, `board/<x>/src/usb.rs`):
 - **O6N (GOP).** Wat de firmware in de GOP zet, meestal de resolutie van
   het BIOS-scherm. Regels: `uefi: GOP WxH stride S format F @ ...
   HOPOS_UEFI_GOP` vóór de exit, `HOPOS_FB_CONSOLE` erna. De buffer gaat
-  Normal-NC in de identity map (`gop::map`, op 4 KB precies). Nooit op
-  ijzer gezien; de O6N-console na de exit is zelf nog open (docs/boards.md).
+  Normal-NC in de identity map (`gop::map`, op 4 KB precies). De GOP gaat
+  in de feitenpagina mee over een warme flip (`board/uefi/src/flip.rs`),
+  zodat kern B weer op het glas tekent; elke wijziging van de kern aan die
+  map gaat via `Board::remap` in de tabellen van de stub, nooit uit de
+  heap (de map overleeft de flip, de heap niet). Op QEMU getoetst met
+  `GUI=1 BOARD=uefi tools/qemu-test-flip.sh`. Nooit op ijzer gezien; de
+  O6N-console na de exit is zelf nog open (docs/boards.md).
 
 ## De grant
 

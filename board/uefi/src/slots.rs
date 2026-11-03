@@ -19,7 +19,6 @@ use abi::Region;
 use abi::layout::{POOL_MAX, Plan, PlanSpec, Pool, pool_of};
 use board::stage;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use dev::Pa;
 
 /// De control-pages van de eigen cores van de kern: het begin van het
 /// kooi-venster.
@@ -135,31 +134,30 @@ pub(crate) fn map_device(pa: u64, size: u64) -> bool {
     }
     let lo = pa & !((1 << 30) - 1);
     let hi = pa.saturating_add(size).next_multiple_of(1 << 30);
-    remap(lo, hi.saturating_sub(lo), cpu::boot::ATTR_DEVICE)
+    map(lo, hi.saturating_sub(lo), cpu::boot::ATTR_DEVICE)
 }
 
-/// Zet een chunk van het kooi-geheugen (2 MB uit de pool) op Device, of
-/// terug op Normal (`board::Board::map_cage`), in de levende map met de
+/// Zet `[pa, pa + size)` op `attr` (`board::Board::remap`: het
+/// kooi-geheugen, het glas, de arena van de codec) in de levende map met de
 /// tabellen uit `crate::TABLES`. Niet via `cpu::memattr`: die neemt een
 /// tabel voor een gesplitst blok uit de heap van de kern, en die heap
 /// overschrijft de volgende kern bij een flip terwijl de map blijft (QEMU
 /// UEFI 01-11: de 1 GB met de kern zelf werd gesplitst, en kern B hing na
 /// de landing).
-pub(crate) fn map_cage(pa: u64, size: u64, device: bool) -> bool {
-    if device {
-        // Eerst de regels van de vorige huurder (een partitie) weg.
-        dev::pull(Pa(pa), usize::try_from(size).unwrap_or(0));
-    }
-    let attr = if device {
-        cpu::boot::ATTR_DEVICE
-    } else {
-        cpu::boot::ATTR_NORMAL
+pub(crate) fn remap(pa: u64, size: u64, attr: cpu::memattr::Attr) -> bool {
+    let idx = match attr {
+        cpu::memattr::Attr::NormalWb => cpu::boot::ATTR_NORMAL,
+        cpu::memattr::Attr::NormalNc => cpu::boot::ATTR_NORMAL_NC,
+        cpu::memattr::Attr::Device => cpu::boot::ATTR_DEVICE,
     };
-    remap(pa, size, attr)
+    // Op hele pagina's, zoals `gop::map`: de firmware deelt per pagina uit.
+    let lo = pa & !0xFFF;
+    let hi = pa.saturating_add(size).next_multiple_of(0x1000);
+    map(lo, hi - lo, idx)
 }
 
 /// Mapt `[lo, lo + size)` met MAIR-index `attr` in de levende map.
-fn remap(lo: u64, size: u64, attr: u64) -> bool {
+fn map(lo: u64, size: u64, attr: u64) -> bool {
     let used = facts::MMU_TABLES.load(Relaxed);
     // SAFETY: de tabelpool is `crate::TABLES` en de eerste `used` tabellen
     // zijn de levende map (de stub bouwde hem daar); alleen de kern-core

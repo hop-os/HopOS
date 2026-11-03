@@ -222,8 +222,8 @@ impl<P: Platform> Board for On<P> {
         self.uefi.kick_self();
     }
 
-    fn map_cage(&self, pa: u64, size: u64, device: bool) -> Result<(), board::TailError> {
-        self.uefi.map_cage(pa, size, device)
+    fn remap(&self, pa: u64, size: u64, attr: cpu::memattr::Attr) -> Result<(), board::TailError> {
+        self.uefi.remap(pa, size, attr)
     }
 
     fn config(&self) -> &'static str {

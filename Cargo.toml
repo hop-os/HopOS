@@ -177,7 +177,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "3.2.0-rc1"
+version = "3.2.0-rc2"
 edition = "2024"
 rust-version = "1.93"
 publish = false

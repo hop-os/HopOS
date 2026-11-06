@@ -54,11 +54,14 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::task::Wake;
 use alloc::vec::Vec;
 use core::cell::Cell;
 use core::future::{Future, poll_fn};
 use core::pin::{Pin, pin};
-use core::task::Poll;
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 
 use applib::appnet::TcpListener;
@@ -121,6 +124,49 @@ struct Parked {
     peer: Peer,
     /// Tot wanneer ze stil mag zijn, in de klok van de executor.
     until: u64,
+    /// De bel van déze verbinding: de stack wekt haar, en de acceptor pollt
+    /// alleen verbindingen waarvan de bel ging.
+    bell: Arc<Bell>,
+    waker: Waker,
+}
+
+impl Parked {
+    /// Een verbinding voor het park; de bel staat aan, zodat de eerste ronde
+    /// haar één keer pollt en zo de waker bij de stack legt.
+    fn new(conn: Waiting, peer: Peer, until: u64, task: &Waker) -> Self {
+        let bell = Arc::new(Bell {
+            rang: AtomicBool::new(true),
+            task: task.clone(),
+        });
+        let waker = Waker::from(bell.clone());
+        Self {
+            conn,
+            peer,
+            until,
+            bell,
+            waker,
+        }
+    }
+}
+
+/// Een waker per geparkeerde verbinding: hij zet haar vlag en wekt de
+/// acceptor. Zonder hem pollde de acceptor bij elke wek álle geparkeerde
+/// verbindingen; met 176 in het park en ~100k wekken per seconde viel de
+/// doorvoer van 124k terug naar 91k req/s (M4, 06-11-2026).
+struct Bell {
+    rang: AtomicBool,
+    task: Waker,
+}
+
+impl Wake for Bell {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.rang.store(true, Ordering::Release);
+        self.task.wake_by_ref();
+    }
 }
 
 /// Een verbinding in het park: vers (nog geen verzoek) of tussen twee
@@ -380,11 +426,7 @@ impl<const W: usize, const P: usize> Http<W, P> {
                     self.park(
                         &mut park,
                         &mut gone,
-                        Parked {
-                            conn: Waiting::Kept(kept),
-                            peer,
-                            until,
-                        },
+                        Parked::new(Waiting::Kept(kept), peer, until, cx.waker()),
                     );
                 }
                 // Nieuwe verbindingen.
@@ -407,11 +449,7 @@ impl<const W: usize, const P: usize> Http<W, P> {
                             self.park(
                                 &mut park,
                                 &mut gone,
-                                Parked {
-                                    conn: Waiting::Fresh(conn),
-                                    peer,
-                                    until,
-                                },
+                                Parked::new(Waiting::Fresh(conn), peer, until, cx.waker()),
                             );
                         }
                         Poll::Ready(Err(_)) => {
@@ -424,17 +462,22 @@ impl<const W: usize, const P: usize> Http<W, P> {
                     }
                 }
                 // Het park: leesbaar gaat naar een werker, te lang stil gaat
-                // dicht. Een `readable` die wegvalt, kost niets; de stack
-                // houdt de waker van deze taak.
+                // dicht. Alleen een verbinding waarvan de bel ging, wordt
+                // gepolld, met haar eigen waker; een `readable` die wegvalt,
+                // kost niets, de stack houdt die waker.
                 let now = exec.now();
                 let mut i = 0;
                 while i < park.len() {
                     let ready = match park.get_mut(i) {
                         Some(p) if p.until <= now => Some(false),
-                        Some(p) => pin!(p.conn.conn_mut().readable())
-                            .poll(cx)
-                            .is_ready()
-                            .then_some(true),
+                        Some(p) if p.bell.rang.swap(false, Ordering::AcqRel) => {
+                            let mut own = Context::from_waker(&p.waker);
+                            pin!(p.conn.conn_mut().readable())
+                                .poll(&mut own)
+                                .is_ready()
+                                .then_some(true)
+                        }
+                        Some(_) => None,
                         None => None,
                     };
                     match ready {
@@ -479,9 +522,22 @@ impl<const W: usize, const P: usize> Http<W, P> {
                 conn.close().await;
             }
             // Alle werkers bezet: wachten op de eerste die vrijkomt (een bel,
-            // geen klok). Het park en de listener wachten zolang in de stack.
+            // geen klok). Het park en de listener wachten zolang in de stack,
+            // maar wat werkers intussen teruggeven, gaat meteen het park in:
+            // anders loopt de rij van `W` vol en sluit een werker een goede
+            // verbinding (M4, 06-11-2026: tientallen per fase bij 192
+            // verbindingen).
             for job in due.drain(..) {
-                self.doors.place(job).await;
+                let mut placing = pin!(self.doors.place(job));
+                poll_fn(|cx| {
+                    while let Poll::Ready((kept, peer)) = pin!(self.back.recv()).poll(cx) {
+                        let until = exec.now().saturating_add(nanos(self.idle));
+                        let p = Parked::new(Waiting::Kept(kept), peer, until, cx.waker());
+                        self.park(&mut park, &mut gone, p);
+                    }
+                    placing.as_mut().poll(cx)
+                })
+                .await;
             }
             if failed {
                 exec.after(ACCEPT_BACKOFF).await;

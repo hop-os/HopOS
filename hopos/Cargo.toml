@@ -134,8 +134,8 @@ board = { path = "../board" }
 fw = { path = "../fw" }
 # De node-stack en de DHCP-client (PORT.md §2.1), op een tag en nooit over
 # een pad: lean is een eigen repo met een eigen versie.
-leannet = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc1" }
-leandhcp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc1" }
+leannet = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc2" }
+leandhcp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc2" }
 board-qemuvirt = { path = "../board/qemuvirt", optional = true }
 board-rpi4 = { path = "../board/rpi4", optional = true }
 board-rpi5 = { path = "../board/rpi5", optional = true }

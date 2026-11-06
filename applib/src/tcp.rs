@@ -44,6 +44,12 @@ pub trait Stream {
 
     /// Sluit de stroom: FIN na de gebufferde data.
     fn close(self) -> Result<(), NetError>;
+
+    /// Wacht tot een read niet zou blokkeren (bytes of EOF), zonder iets te
+    /// verbruiken. De standaard is "nu al": genoeg voor een nep-stroom.
+    fn readable(&mut self) -> impl Future<Output = Result<(), NetError>> {
+        core::future::ready(Ok(()))
+    }
 }
 
 impl Stream for TcpStream {
@@ -57,6 +63,10 @@ impl Stream for TcpStream {
 
     fn close(self) -> Result<(), NetError> {
         TcpStream::close(self)
+    }
+
+    fn readable(&mut self) -> impl Future<Output = Result<(), NetError>> {
+        TcpStream::readable(self)
     }
 }
 
@@ -131,6 +141,22 @@ impl<S: Stream> TcpConn<S> {
     pub fn with_read_cap(mut self, cap: Duration) -> Self {
         self.cap = Some(cap);
         self
+    }
+
+    /// Wacht tot de verbinding leesbaar is (bytes of EOF), zonder iets te
+    /// verbruiken en zonder termijn: zo wacht een eigenaar met één taak op
+    /// veel geparkeerde keep-alive-verbindingen (`leanhttp::Kept`), en kost
+    /// een stille verbinding geen taak en geen timer. Een gesloten verbinding
+    /// is meteen "leesbaar"; de volgende read zegt wat er is.
+    ///
+    /// # Errors
+    ///
+    /// De fout van de stack als het handvat weg is.
+    pub async fn readable(&mut self) -> Result<(), IoError> {
+        match self.stream.as_mut() {
+            Some(s) => s.readable().await.map_err(io_error),
+            None => Ok(()),
+        }
     }
 }
 

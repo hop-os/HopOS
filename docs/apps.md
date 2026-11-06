@@ -176,10 +176,21 @@ board waar de app voor bedoeld is. Wat langer duurt, is werk voor een
 
 Het aantal taken staat vast bij de compiler (het handboek, §2). Een werker
 wacht achter zijn deur; een acceptor deelt uit (`sync::Doors`, zoals in
-welcome, bench en vitals). Een pool die vol is, laat de verbinding wachten
-in de accept-wachtrij, en de acceptor wacht op de eerste werker die zich
-vrij meldt (`Doors::place`); hij gaat niet rondkijken of er al een werker
-vrij is.
+bench). Een pool die vol is, laat de verbinding wachten in de
+accept-wachtrij, en de acceptor wacht op de eerste werker die zich vrij
+meldt (`Doors::place`); hij gaat niet rondkijken of er al een werker vrij
+is.
+
+Voor HTTP is dat `applibhttp` (opt-in, zoals in welcome en vitals): één
+acceptor met een park voor stille keep-alive-verbindingen, en `W` werkers
+die elk één verzoek bedienen (`leanhttp::serve` geeft de verbinding dan
+terug als `Outcome::Kept`). Een werker hoort bij een verzoek, nooit bij een
+stille verbinding; het park wacht op `TcpConn::readable` met één timer voor
+de vroegste stilte, geen taak of timer per verbinding. GEMETEN 06-11-2026
+op de M4 (16 werkers, apps/httpprobe): de oude pool (de werker houdt zijn
+keep-alive-verbinding, leeskap 5 s) tegen het park: c=256 2,4k req/s met
+6,8k verbindingsfouten tegen 31,6k req/s zonder fouten; 16 stille
+verbindingen plus één verzoek 4,9 s tegen 8 ms.
 
 ### Veel kleine lezingen: bundelen
 

@@ -21,11 +21,11 @@
 //! GET  /health         "ok"
 //! ```
 //!
-//! De vorm is die van welcome (handboek §2): één taak accepteert en geeft
-//! elke verbinding als waarde aan een vrije werker uit een vaste pool van
-//! [`WORKERS`]. Een test draait als eigen taak ([`run::start`]), één
-//! tegelijk; de rekentests over meer cores zetten hun werk met
-//! `smp::spawn_on` op de andere cores van de app.
+//! De vorm is die van welcome (handboek §2): `applibhttp`, één acceptor met
+//! een park voor stille keep-alive-verbindingen en een vaste pool van
+//! [`WORKERS`] werkers, elk voor één verzoek tegelijk. Een test draait als
+//! eigen taak ([`run::start`]), één tegelijk; de rekentests over meer cores
+//! zetten hun werk met `smp::spawn_on` op de andere cores van de app.
 //!
 //! Markers: `HOPOS_VITALS_UP port=<n>` als de listener staat, en per test
 //! `HOPOS_VITALS_<TEST>` met de meetwaarden als `key=value` (docs/measurements.md,
@@ -53,15 +53,16 @@ mod page;
 mod report;
 mod run;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use applib::app::port_of;
-use applib::appnet::{self, Net, TcpListener, TcpStream};
+use applib::appnet::{self, Net, TcpListener};
 use applib::rt::Exec;
 use applib::tcp::TcpConn;
 use applib::{App, EXEC, clock, log};
-use core::time::Duration;
+use applibhttp::Http;
 use leanhttp::{Exchange, Found, Mux};
-use sync::{Doors, select};
+use sync::{Either, select};
 
 applib::main!(vitals);
 
@@ -73,13 +74,20 @@ fn main() {}
 /// De poort zonder `ER_PORT_HTTP`, zoals de Go-vitals.
 const DEFAULT_PORT: u16 = 8080;
 
-/// De werkers. Vier voor een browser, en ruimte voor de storm-test, die
-/// zijn eigen poort vanuit hetzelfde slot bestormt (client én server hier).
+/// De werkers: zoveel verzoeken tegelijk. Vier voor een browser, en ruimte
+/// voor de storm-test, die zijn eigen poort vanuit hetzelfde slot bestormt
+/// (client én server hier). Een stille keep-alive-verbinding telt hier
+/// niet mee: die wacht in het park.
 const WORKERS: usize = 8;
 
-/// De langste stilte op een keep-alive-verbinding: met een vaste pool houdt
-/// een stille browser anders een werker een minuut vast.
-const READ_CAP: Duration = Duration::from_secs(5);
+/// Hoeveel stille keep-alive-verbindingen het park hoogstens houdt (elk
+/// hoogstens [`applibhttp::IDLE`]). Een verbinding kost minstens 20 KiB
+/// netbudget; een vitals van 128 MB heeft het grootste budget (16 MiB,
+/// [`appnet::BUDGET_MAX`]), ruim 800 verbindingen. 512 laat daarvan ruimte
+/// voor de clients van de tests (storm, rx) en verse verbindingen; op een
+/// kleiner budget is de stack de grens, niet het park. Het park groeit pas
+/// als er verbindingen zijn.
+const PARK: usize = 512;
 
 /// De maat van het patroonblok dat `/blob` en de disk-test herhalen.
 const BLOB: usize = 256 << 10;
@@ -94,14 +102,14 @@ const ARCH: &str = if cfg!(target_arch = "riscv64") {
     "arm64"
 };
 
-/// De deuren van de werkers (zie welcome): met alle werkers bezet wacht
-/// de acceptor op de eerste die vrijkomt.
-static DOORS: Doors<TcpStream, WORKERS> = Doors::new();
+/// De server (zie welcome): met alle werkers bezet wacht het volgende
+/// verzoek in de acceptor op de eerste die vrijkomt.
+static HTTP: Http<WORKERS, PARK> = Http::new();
 
 /// De paden van deze server.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Route {
-    /// `GET /`.
+    /// `GET /{$}`: precies `/`.
     Page,
     /// `GET /health`.
     Health,
@@ -119,7 +127,7 @@ enum Route {
 
 /// De routetabel.
 const ROUTES: [(&str, Route); 9] = [
-    ("GET /", Route::Page),
+    ("GET /{$}", Route::Page),
     ("GET /health", Route::Health),
     ("GET /api/state", Route::State),
     ("GET /api/run", Route::Run),
@@ -166,7 +174,8 @@ impl Shared {
 
 #[expect(
     clippy::expect_used,
-    reason = "de start van de bin: zonder netstack, poort of patroonblok is er niets te meten, en een luide paniek met reden is het goede einde"
+    clippy::panic,
+    reason = "de start van de bin: zonder netstack, poort, patroonblok of werker is er niets te meten, en een luide paniek met reden is het goede einde"
 )]
 async fn vitals(app: &'static App) {
     let exec: &'static Exec = EXEC.get();
@@ -187,7 +196,7 @@ async fn vitals(app: &'static App) {
     fill_pattern(&mut blob);
     // Eén keer bij de start, voor de levensduur van de app: de werkers en
     // de tests lenen het, niemand schrijft het nog.
-    let shared: &'static Shared = alloc::boxed::Box::leak(alloc::boxed::Box::new(Shared {
+    let shared: &'static Shared = Box::leak(Box::new(Shared {
         exec,
         app,
         net,
@@ -200,14 +209,19 @@ async fn vitals(app: &'static App) {
             .unwrap_or(net::DEFAULT_RX_URL),
         storm: app.env("VITALS_STORM_ADDR").filter(|a| !a.is_empty()),
         started_ns: clock::now_ns(),
-        blob: alloc::boxed::Box::leak(blob.into_boxed_slice()),
+        blob: Box::leak(blob.into_boxed_slice()),
         mux,
     }));
     exec.spawn(idle::sample(app))
         .expect("vitals: spawn idle sampler");
-    for i in 0..WORKERS {
-        exec.spawn(worker(i, shared)).expect("vitals: spawn worker");
-    }
+    // De werkers lenen de handler voor de levensduur van de app. Een
+    // verbinding die eindigt met een termijn of een reset is een client die
+    // wegging; applibhttp sluit haar zonder logregel.
+    let handler: &'static _ = Box::leak(Box::new(
+        async move |ex: &mut Exchange<'_, TcpConn>| -> leanhttp::Result {
+            handle(ex, shared).await
+        },
+    ));
     let [a, b, c, d] = shared.ip;
     log!(
         "vitals {VERSION}: serving http on {a}.{b}.{c}.{d}:{port} for node {node}, slot {}, {ARCH}, {} core(s) HOPOS_VITALS_UP port={port}",
@@ -215,8 +229,11 @@ async fn vitals(app: &'static App) {
         app.cores()
     );
     // Tot de kern vraagt te stoppen; de main-schil doet dan het
-    // net-afscheid (elke verbinding dicht) en de exit.
-    select(app.stopped(), accept(listener, exec)).await;
+    // net-afscheid (elke verbinding dicht) en de exit. `run` keert alleen
+    // terug als er geen enkele werker kwam (de takenlijst vol).
+    if let Either::Right(_) = select(app.stopped(), HTTP.run(exec, listener, handler)).await {
+        panic!("vitals: spawn worker");
+    }
 }
 
 /// Vult `buf` met een xorshift-patroon: de inhoud doet er niet toe (niemand
@@ -231,39 +248,10 @@ fn fill_pattern(buf: &mut [u8]) {
     }
 }
 
-/// De acceptor: elke verbinding naar de eerste vrije werker.
-async fn accept(listener: TcpListener, exec: &'static Exec) {
-    loop {
-        match listener.accept().await {
-            Ok(stream) => DOORS.place(stream).await,
-            Err(e) => {
-                log!("vitals: accept: {e} HOPOS_VITALS_ACCEPT");
-                exec.after(Duration::from_millis(100)).await;
-            }
-        }
-    }
-}
-
-/// Eén werker: wacht op een verbinding, bedient hem met leanhttp tot hij
-/// sluit, en meldt zich weer vrij.
-async fn worker(i: usize, shared: &'static Shared) {
-    loop {
-        let stream = DOORS.take(i).await;
-        let conn = TcpConn::new(stream, shared.exec).with_read_cap(READ_CAP);
-        // Een verbinding die eindigt met een termijn of een reset is een
-        // client die wegging; dat is geen logregel waard.
-        let _ = leanhttp::serve(conn, async |ex: &mut Exchange<'_, TcpConn>| {
-            handle(ex, shared).await
-        })
-        .await;
-        DOORS.free(i);
-    }
-}
-
 /// Eén verzoek.
 async fn handle(ex: &mut Exchange<'_, TcpConn>, shared: &'static Shared) -> leanhttp::Result {
     match shared.mux.find(&mut ex.req)? {
-        Found::Route(Route::Page) if ex.req.path == "/" => {
+        Found::Route(Route::Page) => {
             ex.header_mut()
                 .set("Content-Type", "text/html; charset=utf-8")?;
             ex.header_mut().set("Cache-Control", "no-store")?;
@@ -286,7 +274,7 @@ async fn handle(ex: &mut Exchange<'_, TcpConn>, shared: &'static Shared) -> lean
             )
             .await
         }
-        Found::Route(Route::Page) | Found::NotFound => ex.error(404, "not found").await,
+        Found::NotFound => ex.error(404, "not found").await,
         Found::MethodNotAllowed(allow) => {
             ex.header_mut().set("Allow", &allow)?;
             ex.error(405, "method not allowed").await
@@ -369,6 +357,21 @@ mod tests {
             mux.find(&mut req).unwrap(),
             Found::MethodNotAllowed(_)
         ));
+        let mut req = leanhttp::Request::new("POST", "/").unwrap();
+        assert_eq!(
+            mux.find(&mut req).unwrap(),
+            Found::MethodNotAllowed("GET, HEAD".into())
+        );
+        // `{$}` is precies `/`: een onbekend pad is 404, ook met een andere
+        // methode (tot 06-11-2026 was `/` een subtree en dat een 405).
+        for (method, path) in [("GET", "/nope"), ("POST", "/foo"), ("GET", "/ping/")] {
+            let mut req = leanhttp::Request::new(method, path).unwrap();
+            assert_eq!(
+                mux.find(&mut req).unwrap(),
+                Found::NotFound,
+                "{method} {path}"
+            );
+        }
     }
 
     #[test]

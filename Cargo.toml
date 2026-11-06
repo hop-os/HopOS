@@ -72,6 +72,8 @@ members = [
     "driver/smc",
     "board/apple",
     "applib",
+    # De HTTP-server van een app, opt-in (een park plus een vaste pool).
+    "applibhttp",
     "appspike",
     "apps/welcome",
     # De meetbank in het slot (de server-kant van tools/netmeter).
@@ -83,6 +85,8 @@ members = [
     "apps/syncprobe",
     # De board-dokter: de prestatietests van een node (apps/vitals/README.md).
     "apps/vitals",
+    # Meetapp voor applibhttp tegen de pool (06-11-2026).
+    "apps/httpprobe",
     # De kaartbouwer op de host (de port van Go's mkcard): std, dus net als
     # netmeter geen default-member; tools/gate.sh toetst hem apart.
     "tools/mkcard",
@@ -161,6 +165,7 @@ default-members = [
     "driver/smc",
     "board/apple",
     "applib",
+    "applibhttp",
     # welcome draagt zijn paginatoetsen op de host; het image zelf bouwt
     # alleen voor een target (tools/gate.sh).
     "apps/welcome",
@@ -177,7 +182,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "3.2.0-rc2"
+version = "3.2.0-rc3"
 edition = "2024"
 rust-version = "1.93"
 publish = false

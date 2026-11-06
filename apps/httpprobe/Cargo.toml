@@ -1,0 +1,22 @@
+[package]
+name = "httpprobe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Meetapp: dezelfde HTTP-routes met de pool van welcome/Meet (MODE=pool) of met applibhttp (MODE=park)."
+build = "build.rs"
+
+[[bin]]
+name = "httpprobe"
+path = "src/main.rs"
+bench = false
+
+[dependencies]
+applib = { path = "../../applib", features = ["http"] }
+applibhttp = { path = "../../applibhttp" }
+sync = { path = "../../sync" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc2" }
+
+[lints]
+workspace = true

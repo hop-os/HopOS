@@ -1,0 +1,16 @@
+[package]
+name = "applibhttp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "De HTTP-server van een app, opt-in: een acceptor met een park voor stille keep-alive-verbindingen en een vaste pool werkers rond leanhttp::serve."
+
+[dependencies]
+applib = { path = "../applib", features = ["http"] }
+sync = { path = "../sync" }
+# Dezelfde tag als applib, zodat één `leanhttp::Conn` bestaat.
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc2" }
+
+[lints]
+workspace = true

@@ -863,6 +863,8 @@ Nagelopen op 04-10; wat hieronder als gedaan staat, wacht nu op een bel.
   deur met een bel, en een bel voor de acceptor die een werker luidt als
   hij vrijkomt). Met alle werkers bezet wacht `Doors::place` op die bel,
   niet op de klok; de kern weigert nog steeds meteen (`Doors::hand`).
+  Welcome en vitals serveren sinds 06-11 via `applibhttp`, dat dezelfde
+  `Doors` gebruikt plus een park voor stille keep-alive-verbindingen.
 - **decode** vraagt de codec met een wachtende poll: `OP_CODEC_POLL` met
   `n` = de wacht in ms (de kern klemt op een seconde). De kern houdt het
   antwoord tot het eerste event en pompt de engine zelf elke milliseconde;

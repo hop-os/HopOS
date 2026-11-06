@@ -16,11 +16,14 @@ bench = false
 # De TcpConn-brug naar leanhttp (feature `http`): de server, en de client
 # voor de rx- en storm-tests.
 applib = { path = "../../applib", features = ["http"] }
+# De server: een acceptor met een park voor stille keep-alive-verbindingen
+# en een vaste pool werkers (applibhttp/src/lib.rs).
+applibhttp = { path = "../../applibhttp" }
 bounded = { path = "../../bounded" }
 sync = { path = "../../sync" }
 # HTTP/1.1 zonder TLS (PORT.md §2.1), op een tag en nooit over een pad:
 # lean is een eigen repo met een eigen poort. Dezelfde tag als applib en Hop.
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc1" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc2" }
 
 [lints]
 workspace = true

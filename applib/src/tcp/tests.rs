@@ -233,14 +233,18 @@ fn leanhttp_serves_a_request_over_the_bridge() {
         ..Wire::default()
     });
     let mut paths = Vec::new();
-    let out = block_on(leanhttp::serve(
-        c,
-        async |ex: &mut leanhttp::Exchange<'_, TcpConn<Fake>>| {
-            paths.push(ex.req.path.clone());
-            ex.write_header(200)?;
-            ex.write(b"ok").await.map(|_| ())
-        },
-    ));
+    let mut handler = async |ex: &mut leanhttp::Exchange<'_, TcpConn<Fake>>| {
+        paths.push(ex.req.path.clone());
+        ex.write_header(200)?;
+        ex.write(b"ok").await.map(|_| ())
+    };
+    // Eén verzoek per aanroep: de verbinding komt terug (keep-alive), en de
+    // volgende aanroep ziet de EOF en sluit.
+    let out = block_on(leanhttp::serve(c, &mut handler));
+    let Ok(leanhttp::Outcome::Kept(kept)) = out else {
+        panic!("keep-alive mag: de verbinding hoort terug te komen")
+    };
+    let out = block_on(kept.serve(&mut handler));
     assert!(matches!(out, Ok(leanhttp::Outcome::Closed)));
     assert_eq!(paths, ["/health"]);
     let text = String::from_utf8(w.borrow().out.clone()).unwrap();

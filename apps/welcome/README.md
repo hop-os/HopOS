@@ -86,9 +86,12 @@ pagina staat daarna op `http://127.0.0.1:8081/`.
 
 ## Vorm
 
-- `src/main.rs`: de start, de acceptor en een vaste pool van vier werkers
-  (handboek §2: geen taak per verbinding), de routes via `leanhttp::Mux`.
+- `src/main.rs`: de start, de server (`applibhttp`: één acceptor met een
+  park voor stille keep-alive-verbindingen en een vaste pool van vier
+  werkers, elk voor één verzoek; handboek §2: geen taak per verbinding) en
+  de routes via `leanhttp::Mux`.
 - `src/page.rs`: de pagina, puur en op de host getoetst; schrijft in een
   vooraf gereserveerde buffer en groeit nooit.
-- `src/conn.rs`: `appnet::TcpStream` als leanhttp-verbinding, met de
-  termijnen op het timerwiel (dezelfde vorm als `hop-http` in de hop-repo).
+- De verbinding zelf is `applib::tcp::TcpConn` (feature `http` van
+  applib): `appnet::TcpStream` als leanhttp-verbinding, met de termijnen op
+  het timerwiel.

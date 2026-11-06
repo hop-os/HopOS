@@ -193,8 +193,9 @@ keten, geen plafond.
 
 ## Vorm
 
-- `src/main.rs`: de start, de acceptor, een vaste pool van acht werkers en
-  de routes (dezelfde vorm als welcome).
+- `src/main.rs`: de start, de server (`applibhttp`: een acceptor met een
+  park voor stille keep-alive-verbindingen en een vaste pool van acht
+  werkers) en de routes (dezelfde vorm als welcome).
 - `src/run.rs`: de tests, de claim van één tegelijk, de tabel en de
   state-JSON.
 - `src/report.rs`: een rapport, puur: meetwaarden, regels in een vooraf

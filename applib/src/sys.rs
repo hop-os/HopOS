@@ -541,7 +541,12 @@ impl<D: Dial, T: Timer> Client<D, T> {
             return Err(Attempt::from(ConnError::Refused));
         };
         let r = match select(timer.sleep(timeout), exchange(c, req, sink)).await {
-            Either::Left(()) => Err(Attempt::fatal(Error::Timeout)),
+            // Een stil dode peer (een kern-flip onder een lange wacht) ziet
+            // TCP alleen zo: één nieuwe poging op een verse verbinding.
+            Either::Left(()) => Err(Attempt {
+                err: Error::Timeout,
+                retry: true,
+            }),
             Either::Right(r) => r,
         };
         if let Err(a) = &r {
@@ -557,7 +562,7 @@ impl<D: Dial, T: Timer> Client<D, T> {
     }
 
     /// Doet één call en herhaalt hem precies één keer als het transport
-    /// wegviel. `dst` krijgt de data van de response.
+    /// wegviel of zweeg tot de termijn. `dst` krijgt de data van de response.
     pub async fn call(
         &mut self,
         req: Req<'_>,
@@ -1045,14 +1050,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_timeout_is_not_retried() {
+    fn a_timeout_is_retried_once_on_a_fresh_connection() {
         let s = Rc::new(RefCell::new(Script {
-            conns: vec![Some(Vec::new()), Some(resp(2, STATUS_OK, 0, b""))].into(),
+            conns: vec![Some(Vec::new()), Some(Vec::new()), Some(Vec::new())].into(),
             ..Script::default()
         }));
         let mut c = Client::new(MockDial(s.clone()), Now);
         assert_eq!(block_on(c.stat("/x")), Err(Error::Timeout));
-        assert_eq!(s.borrow().dials, 1);
+        assert_eq!(s.borrow().dials, 2);
         assert!(!c.is_connected());
     }
 

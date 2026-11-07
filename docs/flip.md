@@ -45,7 +45,9 @@ uplink is er gaat verloren, en dat mag.
 **Wat een flip niet overleeft:** de conntrack (een verbinding door de
 masquerade breekt; de app krijgt een RST van zijn peer, gemeten op QEMU:
 `connection reset by peer`, en verbindt opnieuw), de open verbindingen van
-de node-stack (de system-API: de ene retry van applib, O9), de
+de node-stack (de system-API: de ene retry van applib, O9; ook na een
+time-out, want een lange wacht die over de sprong liep hoort nooit meer
+iets: de Pi 5, 07-11), de
 next-hops, de staat van Hop in de kern (`STATE_PUT`) en een image van
 `HOP_RESTART`. Een DNAT naar een gepubliceerde poort is stateloos: een
 verbinding naar Hop loopt door zodra zijn poort weer open staat.

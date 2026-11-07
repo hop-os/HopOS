@@ -9,7 +9,9 @@
 //! de switch-code naar de plan-regio met descriptor en som, de thunks en
 //! sched-blokken, [`dispatch`], [`kick`], [`revoke`], [`prepare_smp`],
 //! [`adopt`] en de lezers van het ctx-blok; de bewonerslijst van elke core
-//! ([`roster`], één implementatie voor beide architecturen); en de OS-core (`oscore.rs`,
+//! ([`roster`], één implementatie voor beide architecturen); de registers
+//! van een bewoner naar en uit zijn ctx-blok als asm-fragment voor beide
+//! overgangen (`regs.rs`); en de OS-core (`oscore.rs`,
 //! PORT.md beslissing 2): de kern op EL2 als eerste bewoner van zijn eigen
 //! core, die zijn idle aan de andere bewoners geeft ([`OsCore`], [`host`])
 //! en ze terugneemt op elke interrupt, kick of deadline.
@@ -23,6 +25,10 @@
 pub mod chain;
 mod dispatch;
 mod layout;
+// Vóór `oscore` en `switch`: hun overgangen delen deze fragmenten.
+#[cfg(all(target_os = "none", target_arch = "aarch64"))]
+#[macro_use]
+mod regs;
 pub(crate) mod oscore;
 pub mod roster;
 pub mod stage2;

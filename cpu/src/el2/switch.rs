@@ -30,10 +30,10 @@ use super::dispatch::{
 };
 use super::layout::{
     CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_GPRS, CTX_KICK_PENDING, CTX_KICK_TARGET,
-    CTX_NEXT_PA, CTX_REGIME, CTX_REGIME_ARM_WORDS, CTX_RESUME, CTX_RING_HEAD_PA, CTX_SLEEPS,
-    CTX_SP, CTX_STATE, CTX_VTTBR, CTX_WAKE, CTX_WAKE_NO_PEEK, CTX_WAKES, CtxState, PARK_CODE_OFF,
-    PARK_MBOX_OFF, PARK_PARKED, ROSTER_CAP, ROSTER_ENTRIES, SCHED_COUNT, SCHED_CURRENT,
-    SCHED_CURSOR, SCHED_LIST_PA, SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_S2_PA, SCHED_SCRATCH,
+    CTX_NEXT_PA, CTX_REGIME, CTX_RESUME, CTX_RING_HEAD_PA, CTX_SLEEPS, CTX_SP, CTX_STATE,
+    CTX_VTTBR, CTX_WAKE, CTX_WAKE_NO_PEEK, CTX_WAKES, CtxState, PARK_CODE_OFF, PARK_MBOX_OFF,
+    PARK_PARKED, ROSTER_CAP, ROSTER_ENTRIES, SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR,
+    SCHED_LIST_PA, SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_S2_PA, SCHED_SCRATCH,
 };
 use super::oscore::{
     SCHED_OS_KICK, SCHED_OS_KICK_PA, SCTLR_EL1_CLEAN, SPSR_EL1H_MASKED, apple_kick_target,
@@ -120,8 +120,6 @@ const _: () = assert!(WAKE_NO_PEEK_BIT == 63 && RX_ARMED_BIT == 63);
 
 // De exit-HVC wordt met een `cbz` herkend.
 const _: () = assert!(HVC_EXIT == 0);
-// De regime-save hieronder schrijft precies negentien woorden.
-const _: () = assert!(CTX_REGIME_ARM_WORDS == 19);
 
 // ---------------------------------------------------------------------------
 // De assembly.
@@ -331,20 +329,9 @@ global_asm!(
 // (QEMU + M4, 03-09).
 .L\p\()_yield:
     ldr x1, [sp, #{sp_current}]
-    stp x4, x5, [x1, #({gprs} + 4 * 8)]
-    stp x6, x7, [x1, #({gprs} + 6 * 8)]
-    stp x8, x9, [x1, #({gprs} + 8 * 8)]
-    stp x10, x11, [x1, #({gprs} + 10 * 8)]
-    stp x12, x13, [x1, #({gprs} + 12 * 8)]
-    stp x14, x15, [x1, #({gprs} + 14 * 8)]
-    stp x16, x17, [x1, #({gprs} + 16 * 8)]
-    stp x18, x19, [x1, #({gprs} + 18 * 8)]
-    stp x20, x21, [x1, #({gprs} + 20 * 8)]
-    stp x22, x23, [x1, #({gprs} + 22 * 8)]
-    stp x24, x25, [x1, #({gprs} + 24 * 8)]
-    stp x26, x27, [x1, #({gprs} + 26 * 8)]
-    stp x28, x29, [x1, #({gprs} + 28 * 8)]
-    str x30, [x1, #({gprs} + 30 * 8)]
+"#,
+    save_gprs!(),
+    r#"
     ldp x2, x3, [sp]
     stp x2, x3, [x1, #{gprs}]
     // x1 van de bewoner is de WEKTIJD: vóór deze CNTVCT-stand hoeft de
@@ -367,45 +354,11 @@ global_asm!(
     mrs x2, mpidr_el1
     and x2, x2, #{mpidr_aff}
     str x2, [x1, #{kick_target}]
-    // Hervat-PC = ELR_EL2 (wijst bij een HVC al voorbij de hvc), SPSR ernaast.
-    mrs x2, elr_el2
-    mrs x3, spsr_el2
-    stp x2, x3, [x1, #{resume}]
-    mrs x2, sp_el0
-    mrs x3, sp_el1
-    stp x2, x3, [x1, #{ctx_sp}]
-    // Het EL1-regime dat de volgende bewoner NIET mag erven. Onder VHE zijn
-    // de EL1-encoderingen op EL2 omgeleid naar EL2's eigen registers; de
-    // echte heten dan _EL12 (op1 = 5). Niet omgeleid: TPIDR*, PAR, CSSELR.
-    mrs x2, s3_\op1\()_c1_c0_0
-    mrs x3, s3_\op1\()_c2_c0_2
-    stp x2, x3, [x1, #({regime} + 0 * 8)]
-    mrs x2, s3_\op1\()_c2_c0_0
-    mrs x3, s3_\op1\()_c2_c0_1
-    stp x2, x3, [x1, #({regime} + 2 * 8)]
-    mrs x2, s3_\op1\()_c10_c2_0
-    mrs x3, s3_\op1\()_c10_c3_0
-    stp x2, x3, [x1, #({regime} + 4 * 8)]
-    mrs x2, s3_\op1\()_c12_c0_0
-    mrs x3, tpidr_el0
-    stp x2, x3, [x1, #({regime} + 6 * 8)]
-    mrs x2, tpidrro_el0
-    mrs x3, tpidr_el1
-    stp x2, x3, [x1, #({regime} + 8 * 8)]
-    mrs x2, s3_\op1\()_c13_c0_1
-    mrs x3, s3_\op1\()_c1_c0_2
-    stp x2, x3, [x1, #({regime} + 10 * 8)]
-    mrs x2, s3_\op1\()_c14_c1_0
-    mrs x3, csselr_el1
-    stp x2, x3, [x1, #({regime} + 12 * 8)]
-    mrs x2, par_el1
-    mrs x3, s3_\op1\()_c4_c0_1
-    stp x2, x3, [x1, #({regime} + 14 * 8)]
-    mrs x2, s3_\op1\()_c4_c0_0
-    mrs x3, s3_\op1\()_c5_c2_0
-    stp x2, x3, [x1, #({regime} + 16 * 8)]
-    mrs x2, s3_\op1\()_c6_c0_0
-    str x2, [x1, #({regime} + 18 * 8)]
+    // Hervat-PC (ELR_EL2 wijst bij een HVC al voorbij de hvc), de SP's en
+    // het EL1-regime dat de volgende bewoner NIET mag erven (regs.rs).
+"#,
+    save_el1!(),
+    r#"
     // GEEN FP: EL2 draait met de MMU uit, dus alles is Device-nGnRnE, en een
     // SIMD-store naar Device is op ijzer een alignment-fault (QEMU verhult
     // het). De yield-aanroeper bewaart zijn eigen callee-saved FP-staat.
@@ -597,62 +550,14 @@ global_asm!(
     dsb sy
     ldr x2, [x1, #{vttbr}]
     msr vttbr_el2, x2
-    // Het EL1-regime terug, spiegel van de save; de ERET synchroniseert.
-    ldp x2, x3, [x1, #({regime} + 0 * 8)]
-    msr s3_\op1\()_c1_c0_0, x2
-    msr s3_\op1\()_c2_c0_2, x3
-    ldp x2, x3, [x1, #({regime} + 2 * 8)]
-    msr s3_\op1\()_c2_c0_0, x2
-    msr s3_\op1\()_c2_c0_1, x3
-    ldp x2, x3, [x1, #({regime} + 4 * 8)]
-    msr s3_\op1\()_c10_c2_0, x2
-    msr s3_\op1\()_c10_c3_0, x3
-    ldp x2, x3, [x1, #({regime} + 6 * 8)]
-    msr s3_\op1\()_c12_c0_0, x2
-    msr tpidr_el0, x3
-    ldp x2, x3, [x1, #({regime} + 8 * 8)]
-    msr tpidrro_el0, x2
-    msr tpidr_el1, x3
-    ldp x2, x3, [x1, #({regime} + 10 * 8)]
-    msr s3_\op1\()_c13_c0_1, x2
-    msr s3_\op1\()_c1_c0_2, x3
-    ldp x2, x3, [x1, #({regime} + 12 * 8)]
-    msr s3_\op1\()_c14_c1_0, x2
-    msr csselr_el1, x3
-    ldp x2, x3, [x1, #({regime} + 14 * 8)]
-    msr par_el1, x2
-    msr s3_\op1\()_c4_c0_1, x3
-    ldp x2, x3, [x1, #({regime} + 16 * 8)]
-    msr s3_\op1\()_c4_c0_0, x2
-    msr s3_\op1\()_c5_c2_0, x3
-    ldr x2, [x1, #({regime} + 18 * 8)]
-    msr s3_\op1\()_c6_c0_0, x2
-    ldp x2, x3, [x1, #{ctx_sp}]
-    msr sp_el0, x2
-    msr sp_el1, x3
-    ldp x2, x3, [x1, #{resume}]
-    msr elr_el2, x2
-    msr spsr_el2, x3
-    // GPR's als laatste, x1 (de ctx-pointer zelf) helemaal aan het eind.
-    ldp x4, x5, [x1, #({gprs} + 4 * 8)]
-    ldp x6, x7, [x1, #({gprs} + 6 * 8)]
-    ldp x8, x9, [x1, #({gprs} + 8 * 8)]
-    ldp x10, x11, [x1, #({gprs} + 10 * 8)]
-    ldp x12, x13, [x1, #({gprs} + 12 * 8)]
-    ldp x14, x15, [x1, #({gprs} + 14 * 8)]
-    ldp x16, x17, [x1, #({gprs} + 16 * 8)]
-    ldp x18, x19, [x1, #({gprs} + 18 * 8)]
-    ldp x20, x21, [x1, #({gprs} + 20 * 8)]
-    ldp x22, x23, [x1, #({gprs} + 22 * 8)]
-    ldp x24, x25, [x1, #({gprs} + 24 * 8)]
-    ldp x26, x27, [x1, #({gprs} + 26 * 8)]
-    ldp x28, x29, [x1, #({gprs} + 28 * 8)]
-    ldr x30, [x1, #({gprs} + 30 * 8)]
-    ldp x2, x3, [x1, #({gprs} + 2 * 8)]
-    ldr x0, [x1, #{gprs}]
-    ldr x1, [x1, #({gprs} + 1 * 8)]
-    isb
-    eret
+    // Het EL1-regime terug, spiegel van de save (regs.rs).
+"#,
+    restore_el1!(),
+    r#"
+    // GPR's als laatste, dan de bewoner in.
+"#,
+    restore_gprs_eret!(),
+    r#"
 
 // park: niemand meer te draaien. De parkeerlus (kooi-basis + PARK_CODE_OFF)
 // meldt zich via TPIDR_EL2 als geparkeerd en wacht op de mailbox.

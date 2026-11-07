@@ -73,7 +73,14 @@ fn reset_waits_for_the_dma_stop_confirmation() {
     assert_eq!(dev::read32(b.add(0x814)), 1536);
     assert_eq!(dev::read32(b.add(0x300)) & 2, 2, "ALIGN_2B");
     assert_eq!(dev::read32(b.add(0x210)), u32::MAX, "interrupts masked");
-    assert_eq!(dev::read32(b.add(0x808)), 0, "SW_RESET cleared again");
+    assert_eq!(
+        dev::read32(b.add(0x808)),
+        (1 << 13) | (1 << 15),
+        "the MAC stays in soft reset with local loopback until the link"
+    );
+    // De link haalt hem uit de reset en de loopback, zender en ontvanger aan.
+    n.adjust_link(LINK_1G);
+    assert_eq!(dev::read32(b.add(0x808)), (2 << 2) | 3);
 }
 
 #[test]

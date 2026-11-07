@@ -1,0 +1,20 @@
+[package]
+name = "httpload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Meetapp: HTTP-belasting over keep-alive-verbindingen naar een doel op het LAN, met latency per fase."
+build = "build.rs"
+
+[[bin]]
+name = "httpload"
+path = "src/main.rs"
+bench = false
+
+[dependencies]
+applib = { path = "../../applib" }
+sync = { path = "../../sync" }
+
+[lints]
+workspace = true

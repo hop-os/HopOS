@@ -17,7 +17,7 @@ netdev = { path = "../netdev" }
 [dev-dependencies]
 # De NAT-toetsen lopen tegen de echte neighbour-tabel van de node-stack: lean
 # op een tag, nooit over een pad, dezelfde als hopos.
-leannet = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc2" }
+leannet = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc3" }
 
 [lints]
 workspace = true

@@ -220,6 +220,16 @@ pub struct Stats {
     /// Aanroepen van `leanhttp::serve`: een verzoek, of een verbinding die
     /// sloot toen het volgende verzoek moest komen.
     pub calls: u64,
+    /// Verbindingen die `serve` sloot: de client vroeg erom, of EOF.
+    pub closed: u64,
+    /// Verbindingen die na een fout van `serve` dichtgingen.
+    pub errors: u64,
+    /// De laatste van die fouten.
+    pub last_error: Option<leanhttp::Error>,
+    /// Verbindingen die dichtgingen omdat de terugweg naar het park vol was.
+    pub back_full: u64,
+    /// Overgenomen verbindingen (hier gesloten).
+    pub hijacked: u64,
 }
 
 /// De server van een app: `W` werkers, hoogstens `P` verbindingen in het
@@ -256,6 +266,11 @@ impl<const W: usize, const P: usize> Http<W, P> {
                 workers: 0,
                 accept_failed: 0,
                 calls: 0,
+                closed: 0,
+                errors: 0,
+                last_error: None,
+                back_full: 0,
+                hijacked: 0,
             })),
             read_cap: None,
             idle: IDLE,
@@ -364,16 +379,28 @@ impl<const W: usize, const P: usize> Http<W, P> {
                     Ok(Outcome::Kept(k)) if k.has_buffered() => out = k.serve(&h).await,
                     Ok(Outcome::Kept(k)) => {
                         if let Err(full) = self.back.try_send((k, peer)) {
+                            self.count(|s| s.back_full += 1);
                             full.0.0.close().await;
                         }
                         break;
                     }
                     Ok(Outcome::Hijacked(h)) => {
+                        self.count(|s| s.hijacked += 1);
                         let mut conn = h.conn;
                         let _ = leanhttp::close(&mut conn).await;
                         break;
                     }
-                    Ok(Outcome::Closed) | Err(_) => break,
+                    Ok(Outcome::Closed) => {
+                        self.count(|s| s.closed += 1);
+                        break;
+                    }
+                    Err(e) => {
+                        self.count(|s| {
+                            s.errors += 1;
+                            s.last_error = Some(e);
+                        });
+                        break;
+                    }
                 }
             }
             self.doors.free(i);

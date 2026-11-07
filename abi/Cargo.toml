@@ -10,7 +10,7 @@ description = "Het contract tussen kern en app: layout, ringen, control-page, sy
 dev = { path = "../dev" }
 bounded = { path = "../bounded" }
 # SHA-256 voor DRBG, hopfs en flip (src/sha256.rs): de ene van Lean.
-leancrypto = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc2" }
+leancrypto = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc3" }
 
 [lints]
 workspace = true

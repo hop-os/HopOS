@@ -149,17 +149,42 @@ where
 }
 
 async fn report(exec: &'static Exec, pool: bool) {
+    let (mut calls0, mut out0, mut in0) = (0u64, 0usize, 0usize);
     loop {
         exec.after(Duration::from_secs(10)).await;
         let s = HTTP.stats();
+        let st = appnet::net()
+            .and_then(|n| n.stats().ok())
+            .unwrap_or_default();
+        let calls = s.calls.saturating_sub(calls0).max(1);
+        let out = st.tcp_segs_out.saturating_sub(out0);
+        let inn = st.tcp_segs_in.saturating_sub(in0);
+        (calls0, out0, in0) = (s.calls, st.tcp_segs_out, st.tcp_segs_in);
         log!(
-            "httpprobe: HTTPPROBE_STATS mode={} parked={} idle_closed={} park_full={} calls={} timer_overflows={}",
+            "httpprobe: HTTPPROBE_STATS mode={} parked={} idle_closed={} park_full={} closed={} errors={} last_error={:?} back_full={} hijacked={} calls={} timer_overflows={} segs_out_per_call_x100={} segs_in_per_call_x100={} pump_bell={} pump_timer={} tx_waits={} tx_drops={} kicks={} retrans={} fast_retrans={} zero_win={} drop_reply_full={} refused_no_budget={}",
             if pool { "pool" } else { "park" },
             s.parked,
             s.idle_closed,
             s.park_full,
+            s.closed,
+            s.errors,
+            s.last_error,
+            s.back_full,
+            s.hijacked,
             s.calls,
-            exec.stats.timer_overflows.load(Relaxed)
+            exec.stats.timer_overflows.load(Relaxed),
+            u64::try_from(out).unwrap_or(0) * 100 / calls,
+            u64::try_from(inn).unwrap_or(0) * 100 / calls,
+            applib::net::PUMP_EARLY.load(Relaxed),
+            applib::net::PUMP_TIMER.load(Relaxed),
+            applib::net::TX_WAITS.load(Relaxed),
+            applib::net::TX_DROPS.load(Relaxed),
+            applib::net::TX_KICKS.load(Relaxed),
+            st.tcp_retransmits,
+            st.tcp_fast_retransmits,
+            st.tcp_zero_windows,
+            st.drop_reply_full,
+            st.refused_no_budget
         );
     }
 }

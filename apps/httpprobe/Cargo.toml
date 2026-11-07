@@ -16,7 +16,7 @@ bench = false
 applib = { path = "../../applib", features = ["http"] }
 applibhttp = { path = "../../applibhttp" }
 sync = { path = "../../sync" }
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc2" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc3" }
 
 [lints]
 workspace = true

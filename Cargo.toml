@@ -87,6 +87,7 @@ members = [
     "apps/vitals",
     # Meetapp voor applibhttp tegen de pool (06-11-2026).
     "apps/httpprobe",
+    "apps/httpload",
     # De kaartbouwer op de host (de port van Go's mkcard): std, dus net als
     # netmeter geen default-member; tools/gate.sh toetst hem apart.
     "tools/mkcard",
@@ -182,7 +183,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "3.2.0-rc4"
+version = "3.2.0-rc5"
 edition = "2024"
 rust-version = "1.93"
 publish = false
@@ -233,3 +234,4 @@ overflow-checks = true
 lto = true
 codegen-units = 1
 debug = true
+

@@ -192,6 +192,25 @@ keep-alive-verbinding, leeskap 5 s) tegen het park: c=256 2,4k req/s met
 6,8k verbindingsfouten tegen 31,6k req/s zonder fouten; 16 stille
 verbindingen plus één verzoek 4,9 s tegen 8 ms.
 
+Het plafond over de kabel ligt bij de OS-core, niet bij de app. GEMETEN
+06/07-11-2026 op de M4 (3.0.20, generators op de O6N en een laptop,
+antwoorden van 90 bytes): ~165–180k req/s, ongeacht het aantal
+server-apps; lokaal op de node halen twee apps samen 266k. Een meetkern
+met tellers per fase in `net::pump` en `net::switch` gaf ~5,2 µs kerntijd
+per verzoek. Per frame:
+
+| fase | per frame |
+| --- | --- |
+| tg3 RX | 1,57 µs |
+| tg3 TX | 0,93 µs |
+| `Frame` van 1,5 KiB uit en in de rijen | 0,40 en 0,55 µs |
+| NAT en de app-ring samen | 0,14 µs |
+
+tg3 leest elke descriptor en de status ongecached, met een `dsb` per frame.
+Bewust zo gelaten: burst-lezen in tg3 en frames op hun plek in de rijen
+zouden naar schatting ~20% schelen, maar ze voegen toestand toe voor
+capaciteit die niemand gebruikt.
+
 ### Veel kleine lezingen: bundelen
 
 Elke call naar de kern is een rondreis door de OS-core en houdt één

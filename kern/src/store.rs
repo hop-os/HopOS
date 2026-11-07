@@ -36,9 +36,9 @@
 //! toegang is één synchrone lening, nooit over een `.await`. De verbinding
 //! die een opdracht indiende is de eigenaar van haar plaats: alleen zij
 //! geeft hem vrij, bij het antwoord of bij het einde van haar levensduur.
-//! Een evict of stop annuleert zo vanzelf: de wachtende verbinding ziet op
-//! haar tik ([`crate::system::LIFE_TICK`]) dat de generatie weg is en geeft
-//! de plaats vrij; Hop's lopende `STORE_READ`/`STORE_WRITE` krijgt dan
+//! Een evict of stop annuleert zo vanzelf: de wachtende verbinding hoort de
+//! stopbel van haar levensduur ([`ServicerCtl::ended`]) en geeft de plaats
+//! vrij; Hop's lopende `STORE_READ`/`STORE_WRITE` krijgt dan
 //! `NO_ENT` (en de hopfs-actor weigert een oude generatie toch al), en zijn
 //! `STORE_DONE` ook: hij gooit de opdracht weg. Valt Hop zelf weg met een
 //! opdracht in handen (een herstart: gevraagd en zeldzaam), dan krijgt de
@@ -47,8 +47,8 @@
 
 use crate::cage::{Console, Timer};
 use crate::rpc::{self, FsCall, FsInbox, PathBuf, clean_abs};
-use crate::slots::{Reply, Servicers};
-use crate::system::{LIFE_TICK, MAX_IO_CHUNK, Privilege};
+use crate::slots::{Reply, ServicerCtl, Servicers};
+use crate::system::{MAX_IO_CHUNK, Privilege};
 use crate::{Error, Slot};
 use abi::hopabi::{
     HDR_LEN, OP_READ, OP_STAT, OP_STORE_DROP, OP_STORE_LIST, OP_STORE_PULL, OP_STORE_PUSH,
@@ -59,6 +59,7 @@ use abi::systemapi::store::{
     DoneHead, LOG_NEWS, MAX_STORE_JOB, MAX_STORE_LIST, MAX_STORE_PATH, MAX_WAIT_MS,
     NEXT_STORE_LOGS, StoreTask, decode_read_len,
 };
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::ops::Range;
@@ -321,11 +322,12 @@ impl StoreQueue {
     /// of `None` als er niets klaarstaat.
     fn take(&self, svc: &Servicers, hop: Option<u32>, out: &mut [u8]) -> Option<usize> {
         let mut t = self.t.borrow_mut();
-        let e =
+        let (i, e) =
             t.e.iter_mut()
-                .filter(|e| matches!(e.state, State::Queued { .. }))
-                .filter(|e| svc.current(e.slot) == Some(e.generation))
-                .min_by_key(|e| e.ticket)?;
+                .enumerate()
+                .filter(|(_, e)| matches!(e.state, State::Queued { .. }))
+                .filter(|(_, e)| svc.current(e.slot) == Some(e.generation))
+                .min_by_key(|(_, e)| e.ticket)?;
         let task = StoreTask {
             ticket: e.ticket,
             slot: u32::try_from(e.slot.get()).unwrap_or(u32::MAX),
@@ -336,7 +338,28 @@ impl StoreQueue {
         };
         let n = task.encode(out).ok()?;
         e.state = State::Taken { hop };
+        // De wachtende verbinding wacht vanaf nu ook op de stop van deze Hop.
+        if let Some(b) = self.done.get(i) {
+            b.set();
+        }
         Some(n)
+    }
+
+    /// Waar de wachtende verbinding op plaats `i` op wacht naast haar bel:
+    /// het eerste tijdstip waarop [`StoreQueue::check`] een termijn ziet
+    /// aflopen (de ophaaltijd zolang hij in de rij staat, en de termijn van
+    /// de call), en de generatie van de Hop die hem heeft.
+    fn due(&self, i: usize, ticket: u64) -> (u64, Option<u32>) {
+        let t = self.t.borrow();
+        let Some(e) = t.e.get(i).filter(|e| e.is(ticket)) else {
+            return (0, None);
+        };
+        let end = e.submitted.saturating_add(nanos(DEADLINE));
+        match e.state {
+            State::Queued { since } => (end.min(since.saturating_add(nanos(PICKUP))), None),
+            State::Taken { hop } => (end, hop),
+            State::Free | State::Done => (end, None),
+        }
     }
 
     /// De opdracht achter `ticket` voor een lees of schrijf van Hop: het slot
@@ -530,8 +553,9 @@ pub struct Ctx<'a, 'r, T, C> {
     pub svc: &'a Servicers,
     /// Het slot van de peer.
     pub slot: Slot,
-    /// De levensduur waarvoor de verbinding toegelaten werd.
-    pub generation: u32,
+    /// De levensduur waarvoor de verbinding toegelaten werd: haar generatie
+    /// en haar stopbel.
+    pub life: Rc<ServicerCtl>,
     /// Het bewijs, alleen als de peer het slot van Hop is.
     pub hop: Option<&'a Privilege>,
     /// Het slot van Hop (als er een is): een opdracht in handen van een Hop
@@ -539,7 +563,7 @@ pub struct Ctx<'a, 'r, T, C> {
     pub hop_slot: Option<Slot>,
     /// De antwoordplek van de verbinding bij de hopfs-actor.
     pub reply: &'r Reply,
-    /// De tik van het wachten.
+    /// De klok van de termijnen.
     pub timer: &'a T,
     /// De console.
     pub log: &'a C,
@@ -583,9 +607,9 @@ async fn app_call<T: Timer, C: Console>(
         Ok(v) => v,
         Err(e) => return fail(out, h, &e),
     };
-    let Some((i, ticket)) = cx
-        .queue
-        .submit(cx.timer.now(), (cx.slot, cx.generation), h.op, &v)
+    let Some((i, ticket)) =
+        cx.queue
+            .submit(cx.timer.now(), (cx.slot, cx.life.generation()), h.op, &v)
     else {
         let n = cx.queue.full.fetch_add(1, Relaxed).wrapping_add(1);
         if n <= LOUD {
@@ -646,8 +670,9 @@ async fn app_call<T: Timer, C: Console>(
     }
 }
 
-/// Wacht op de uitkomst van de opdracht op plaats `i`: op de bel, en elke
-/// [`LIFE_TICK`] de toets van levensduur, ophaaltijd en termijn.
+/// Wacht op de uitkomst van de opdracht op plaats `i`: op de bel, de stop
+/// van de eigen levensduur, de stop van de Hop die hem heeft, en de
+/// eerstvolgende termijn; na elke wek de toets.
 async fn wait<T: Timer, C: Console>(
     cx: &Ctx<'_, '_, T, C>,
     i: usize,
@@ -658,15 +683,35 @@ async fn wait<T: Timer, C: Console>(
         return Outcome::Evicted;
     };
     loop {
-        let _ = select(bell.wait(), cx.timer.sleep(LIFE_TICK)).await;
-        let alive = cx.svc.current(cx.slot) == Some(cx.generation);
+        let now = cx.timer.now();
+        let alive = !cx.life.is_ended();
         let hop = |taken: Option<u32>| match cx.hop_slot {
             Some(s) => taken.is_some() && cx.svc.current(s) == taken,
             None => true,
         };
-        if let Some(o) = cx.queue.check(i, ticket, cx.timer.now(), alive, hop, out) {
+        if let Some(o) = cx.queue.check(i, ticket, now, alive, hop, out) {
             return o;
         }
+        let (due, taken) = cx.queue.due(i, ticket);
+        let holder = taken.and_then(|g| {
+            cx.hop_slot
+                .and_then(|s| cx.svc.ctl(s))
+                .filter(|c| c.generation() == g)
+        });
+        let left = Duration::from_nanos(due.saturating_sub(now));
+        let _ = select(
+            select(bell.wait(), cx.life.ended()),
+            select(ended(holder.as_deref()), cx.timer.sleep(left)),
+        )
+        .await;
+    }
+}
+
+/// Wacht op het einde van levensduur `life`; zonder levensduur nooit.
+async fn ended(life: Option<&ServicerCtl>) {
+    match life {
+        Some(l) => l.ended().await,
+        None => core::future::pending().await,
     }
 }
 
@@ -775,19 +820,18 @@ async fn next<T: Timer, C: Console>(
         // van zijn drie plaatsen vast ([`crate::system::MAX_HOP_CONNS`]), en
         // de nieuwe Hop kreeg er tot 22-10 tot 5 s lang maar twee (zijn
         // init-jobs en zijn klok "connection closed", HOPOS_SYSTEM_REFUSED).
-        // Dezelfde tik als het toezicht op elke verbinding
-        // ([`crate::system::LIFE_TICK`]).
-        if cx.hop_slot.and_then(|s| cx.svc.current(s)) != hop {
+        // Zijn stopbel wekt deze wacht, zoals elke verbinding.
+        if cx.life.is_ended() {
             return Ok((0, 0));
         }
         let now = cx.timer.now();
         if now >= until {
             return Ok((0, 0));
         }
-        let left = Duration::from_nanos(until - now).min(LIFE_TICK);
+        let left = Duration::from_nanos(until - now);
         let woke = select(
             select(cx.queue.work.wait(), rung(news)),
-            cx.timer.sleep(left),
+            select(cx.life.ended(), cx.timer.sleep(left)),
         )
         .await;
         heard = matches!(woke, Either::Left(Either::Right(())));

@@ -12,7 +12,7 @@ use crate::ctrl::{Ctrl, Env};
 use crate::log;
 use crate::ring::Writer;
 use crate::tail::{Tail, TailError, tail_of};
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use core::fmt;
 use core::time::Duration;
 use sync::Stop;
@@ -80,8 +80,6 @@ pub struct App {
     /// leent; de lening duurt één bericht en loopt nooit over een `.await`.
     outbox: RefCell<Writer>,
     env: Env,
-    /// De netstack draait (zie [`App::network_ready`]).
-    net_ready: Cell<bool>,
     /// De stopbel: luidt als de kern vraagt te stoppen (zie [`App::stop`]).
     stop: Stop<STOP_WAITERS>,
 }
@@ -103,7 +101,6 @@ impl App {
             ctrl,
             outbox: RefCell::new(outbox),
             env,
-            net_ready: Cell::new(false),
             stop: Stop::new(),
         })
     }
@@ -153,20 +150,6 @@ impl App {
     #[must_use]
     pub fn env(&self, key: &str) -> Option<&str> {
         self.env.get(key)
-    }
-
-    /// Meldt dat de eigen netstack en zijn pomp draaien: vanaf nu is er een
-    /// weg naar de system-API. [`crate::appnet::up`] roept dit precies één
-    /// keer aan, als laatste stap; zo ziet niemand "klaar" bij een stack
-    /// zonder pomp (Go's `NetworkReady`).
-    pub fn network_ready(&self) {
-        self.net_ready.set(true);
-    }
-
-    /// Draait de netstack al? Zonder stack is er geen system-transport.
-    #[must_use]
-    pub fn is_network_ready(&self) -> bool {
-        self.net_ready.get()
     }
 
     /// Meldt READY: de runtime draait. Wie op READY wacht, ziet dan ook de

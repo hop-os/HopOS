@@ -159,14 +159,6 @@ impl Nic {
         }
     }
 
-    /// Kickt de kern niet bij elke burst maar laat de kick wachten op de
-    /// idle-yield ([`TX_OWED`]), zoals [`Nic::open`] op het hart van de kern.
-    #[must_use]
-    pub fn deferring(mut self, yes: bool) -> Self {
-        self.defer = yes;
-        self
-    }
-
     /// Hangt de deurbel aan: de idle van de app-core wapent vanaf nu
     /// `CtrlRXDoor` en belt `bell` zodra er RX ligt. Alleen wie de RX-ring
     /// leegleest mag dit (zie [`crate::sleep`]).

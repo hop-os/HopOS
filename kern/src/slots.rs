@@ -61,7 +61,8 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 use core::time::Duration;
 use sync::mpsc::Mailbox;
-use sync::{Either, LocalCell, Oneshot, Signal, oneshot, select, yield_now};
+use sync::stop::StopWait;
+use sync::{Either, LocalCell, Oneshot, Signal, Stop, oneshot, select, yield_now};
 
 /// De brokmaat van de scrub. Een ononderbroken veeg over een partitie
 /// verhongert de netstack (96 MB x 127 loaders is ongeveer 12 s, gemeten in
@@ -89,6 +90,14 @@ pub const IDLE_GRACE: Duration = Duration::from_secs(2);
 /// OS-core (de tik, Hop, de switch). Zestien logregels is een burst; meer
 /// wacht een ronde.
 pub const SERVICER_BATCH: usize = 16;
+/// Zoveel wachters krijgt de stopbel van een levensduur een eigen plaats
+/// ([`ServicerCtl::ended`]): de servicer, de system-verbindingen van Hop
+/// (hij heeft er de meeste, [`crate::system::MAX_HOP_CONNS`]), en elke
+/// store-call die Hop in handen heeft ([`crate::store::STORE_DEPTH`]). Meer
+/// blijft correct (de wachter wekt zichzelf elke ronde) en telt in
+/// [`Stop::overflows`].
+pub const STOP_WAITERS: usize =
+    1 + crate::system::MAX_HOP_CONNS as usize + crate::store::STORE_DEPTH;
 /// De ringsoort van een logregel (`ring.TypeLog`, [`abi::ring::Kind::LOG`]);
 /// niet de framesoort van de system-API ([`abi::systemapi::Kind::Log`], 3).
 pub const RING_LOG: u8 = 1;
@@ -419,10 +428,13 @@ pub async fn call<'a, const N: usize>(
 /// servicer, een open system-verbinding). Geen tabel van een vast aantal:
 /// een slot bestaat van de plaatsing tot de stop.
 ///
-/// `stop` is een [`Signal`]: de servicer is de enige wachter.
+/// `stop` is een [`Stop`] met plaats voor [`STOP_WAITERS`]: de servicer, elke
+/// system-verbinding van de levensduur, en bij Hop de store-calls die op
+/// hem wachten ([`crate::store`]). Hij luidt één keer, bij
+/// [`Servicers::close`], en blijft gezet.
 pub struct ServicerCtl {
     life: Life,
-    stop: Signal,
+    stop: Stop<STOP_WAITERS>,
     gone: Signal,
     /// De bel van de servicer: werk in de outbox, een SMP-verzoek of een
     /// gevallen context, gezien bij de kick van de app-core of na een beurt
@@ -471,6 +483,19 @@ impl ServicerCtl {
     #[must_use]
     pub fn generation(&self) -> u32 {
         self.life.generation
+    }
+
+    /// Wacht tot deze levensduur eindigt (de stop van de actor). Een
+    /// verbinding wacht hierop naast haar lees of schrijf, zoals Go op
+    /// `<-s.stop`, in plaats van rond te kijken.
+    pub fn ended(&self) -> StopWait<'_, STOP_WAITERS> {
+        self.stop.wait()
+    }
+
+    /// Is deze levensduur voorbij?
+    #[must_use]
+    pub fn is_ended(&self) -> bool {
+        self.stop.is_set()
     }
 
     /// Meldt dat de servicer weg is (de servicer zelf; een toets die geen
@@ -609,7 +634,7 @@ impl Servicers {
         // een kern die luid valt.
         let ctl = Rc::new(ServicerCtl {
             life,
-            stop: Signal::new(),
+            stop: Stop::new(),
             gone: Signal::new(),
             bell: Signal::new(),
             conns: Cell::new(0),
@@ -622,9 +647,11 @@ impl Servicers {
         Ok(ctl)
     }
 
-    /// Haalt de levensduur van `slot` uit de tabel en geeft zijn besturing.
+    /// Haalt de levensduur van `slot` uit de tabel, luidt zijn stop en geeft
+    /// zijn besturing.
     fn close(&self, slot: Slot) -> Option<Rc<ServicerCtl>> {
         let old = self.table.borrow_mut().remove(slot)?;
+        old.stop.set();
         *self.stopped.borrow_mut() = Some(slot);
         self.changed.set();
         Some(old)
@@ -693,7 +720,7 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
         // afscheid van de app staat erin vlak vóór hij parkeert, en de
         // evict komt binnen 10 ms daarna, vaak vóór deze tik (QEMU, 05-10:
         // HOPOS_APP_STOP en HOPOS_APP_SHUTDOWN haalden de console niet).
-        stopping |= ctl.stop.take();
+        stopping |= ctl.stop.is_set();
         // De app kan geparkeerde cores niet zelf starten (de mailboxen liggen
         // buiten elke stage-2-map); de actor dispatcht namens hem.
         if out.smp_pending() {
@@ -1309,7 +1336,6 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
     /// Stopt de servicer van `slot` en wacht tot hij weg is.
     async fn evict(&mut self, slot: Slot) {
         if let Some(ctl) = self.svc.close(slot) {
-            ctl.stop.set();
             ctl.gone.wait().await;
         }
     }

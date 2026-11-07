@@ -411,28 +411,6 @@ impl<D: BlockIo> Fs<D> {
         Ok((node.size, node.dir))
     }
 
-    /// De namen in een directory, gesorteerd; dirs krijgen een `/`. Meer dan
-    /// `max` namen: `Ok(None)`, zonder een gedeeltelijke lijst te bouwen.
-    pub fn list_n(&mut self, path: &[u8], max: usize) -> Result<Option<Vec<Vec<u8>>>> {
-        let n = self.walk(&split(path)?, false)?;
-        let node = self.node(n)?;
-        if !node.dir {
-            return Err(Error::Kind);
-        }
-        if node.children.len() > max {
-            return Ok(None);
-        }
-        let mut out = Vec::new();
-        for (name, c) in &node.children {
-            let mut v = try_vec(name)?;
-            if self.node(*c)?.dir {
-                try_push(&mut v, b'/')?;
-            }
-            try_push(&mut out, v)?;
-        }
-        Ok(Some(out))
-    }
-
     /// De namen in een directory, gesorteerd en `\n`-gescheiden in `dst`
     /// (dirs krijgen een `/`), zonder allocatie: het antwoord van de
     /// system-API gaat zo rechtstreeks in de antwoordbuffer van de
@@ -1512,28 +1490,22 @@ mod tests {
     }
 
     #[test]
-    fn list_n_sorteert_binnen_limiet() {
+    fn list_into_sorteert_binnen_limiet() {
         let d = RamDisk::new(4096, 1 << 20);
         let f = vol(&d);
         for n in [&b"b"[..], b"a", b"c"] {
             write(&f, &[b"/d/", n].concat(), 0, b"x").unwrap();
         }
         f.borrow_mut().mkdir_all(b"/d/sub").unwrap();
-        let names = f.borrow_mut().list_n(b"/d", 4).unwrap().unwrap();
+        let mut buf = [0xaau8; 11];
+        assert_eq!(f.borrow_mut().list_into(b"/d", &mut buf[..10]), Ok((4, 10)));
+        assert_eq!(&buf[..], b"a\nb\nc\nsub/\xaa");
+        let mut buf = [0xaau8; 9];
         assert_eq!(
-            names,
-            vec![
-                b"a".to_vec(),
-                b"b".to_vec(),
-                b"c".to_vec(),
-                b"sub/".to_vec()
-            ]
+            f.borrow_mut().list_into(b"/d", &mut buf),
+            Err(Error::TooLarge { len: 10, max: 9 })
         );
-        assert_eq!(
-            f.borrow_mut().list_n(b"/d", 3).unwrap(),
-            None,
-            "partial listing built"
-        );
+        assert_eq!(buf, [0xaa; 9], "partial listing written");
     }
 
     #[test]

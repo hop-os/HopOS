@@ -277,18 +277,14 @@ impl Nat {
         } else {
             0
         };
-        let mut removed = false;
         for id in 0..crate::flows::MAX_FLOWS as Id {
             let hit = self
                 .flows
                 .get(id)
                 .is_some_and(|f| usize::from(f.slot) == i || (target != 0 && f.dst_ip == target));
             if hit {
-                removed |= self.flows.remove(id);
+                self.flows.remove(id);
             }
-        }
-        if removed {
-            self.flows.maybe_compact();
         }
     }
 
@@ -383,7 +379,7 @@ impl Nat {
             return false;
         };
         if self.expired(id, now) {
-            self.remove_flow(id, true);
+            self.flows.remove(id);
             return false; // eventueel dezelfde node-poort als publicatie: DNAT mag
         }
         self.note_tcp_flags(id, byte(f, l4 + 13), true);
@@ -537,7 +533,7 @@ impl Nat {
         Self::snat_src(u, f, ip.l4, proto, slot_ip, sport, np);
         Self::tx_uplink(io, u, f, next_hop);
         if reap {
-            self.remove_flow(id, true);
+            self.flows.remove(id);
         }
         true
     }
@@ -586,7 +582,7 @@ impl Nat {
         Self::snat_src(u, f, l4, proto, slot_ip, sport, np);
         Self::dnat_to_slot(io, srv, f, l4, proto, u.ip, srv_ip, dport, m.slot_port);
         if reap {
-            self.remove_flow(id, true);
+            self.flows.remove(id);
         }
         true
     }
@@ -611,7 +607,7 @@ impl Nat {
             return true;
         };
         if self.expired(id, now) {
-            self.remove_flow(id, true);
+            self.flows.remove(id);
             return true;
         }
         self.note_tcp_flags(id, byte(f, l4 + 13), true);
@@ -737,7 +733,7 @@ impl Nat {
     fn lookup_flow(&mut self, k: &FKey, now: u64) -> Option<Id> {
         let id = self.flows.by_fwd(k)?;
         if self.expired(id, now) {
-            self.remove_flow(id, true);
+            self.flows.remove(id);
             return None;
         }
         self.touch(id, now)?;
@@ -764,15 +760,6 @@ impl Nat {
             .filter(|(_, fl)| fl.slot == slot && fl.fin_fwd && fl.fin_rev)
             .min_by_key(|(_, fl)| fl.seen)
             .map(|(id, _)| id)
-    }
-
-    /// Het enige verwijderpad voor de conntrack.
-    fn remove_flow(&mut self, id: Id, compact: bool) -> bool {
-        let removed = self.flows.remove(id);
-        if compact {
-            self.flows.maybe_compact();
-        }
-        removed
     }
 
     /// Kiest een vrije node-poort: rollend door het masquerade-bereik, niet
@@ -831,14 +818,10 @@ impl Nat {
 
     /// Verwijdert alle verlopen flows.
     pub(crate) fn sweep_expired(&mut self, now: u64) {
-        let mut removed = false;
         for id in 0..crate::flows::MAX_FLOWS as Id {
             if self.expired(id, now) {
-                removed |= self.flows.remove(id);
+                self.flows.remove(id);
             }
-        }
-        if removed {
-            self.flows.maybe_compact();
         }
     }
 
@@ -855,12 +838,6 @@ impl Nat {
             return;
         }
         self.sweep(now);
-    }
-
-    /// Het aantal levende flows.
-    #[must_use]
-    pub fn flow_count(&self) -> usize {
-        self.flows.len()
     }
 }
 

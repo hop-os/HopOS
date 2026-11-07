@@ -108,12 +108,6 @@ impl Ctrl {
         self.get(CTRL_RAM_SIZE)
     }
 
-    /// De wek-drempel van de deurbel zoals hij nu staat.
-    #[must_use]
-    pub fn rx_door(&self) -> u64 {
-        self.get(CTRL_RX_DOOR)
-    }
-
     /// De geslapen tikken zoals de idle ze publiceerde.
     #[must_use]
     pub fn idle_ticks(&self) -> u64 {
@@ -238,19 +232,6 @@ impl Env {
             dev::pull(src, dst.len());
             dev::copy_out(dst, src);
             env.len = dst.len();
-        }
-        env
-    }
-
-    /// Een env uit bytes, voor tests en voor een app die hem zelf bouwt.
-    /// Wat niet past, valt weg.
-    #[must_use]
-    pub fn from_bytes(b: &[u8]) -> Self {
-        let mut env = Self::empty();
-        let n = b.len().min(env.buf.len());
-        if let (Some(dst), Some(src)) = (env.buf.get_mut(..n), b.get(..n)) {
-            dst.copy_from_slice(src);
-            env.len = n;
         }
         env
     }

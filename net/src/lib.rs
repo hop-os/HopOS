@@ -147,8 +147,6 @@ pub struct Stats {
     pub nic_tx_full: AtomicU64,
     /// Idem: doorbells naar de NIC.
     pub nic_doorbells: AtomicU64,
-    /// Frames van de node-stack die niet in de host-TX-ring pasten.
-    pub host_tx_drops: AtomicU64,
     /// Frames op de host-naad gedropt: een fysiek LAN-frame met een intern
     /// bronadres (spoof), of een intern frame dat de gateway-vertaling
     /// weigerde.
@@ -182,7 +180,6 @@ impl Stats {
             nic_rx_bad: AtomicU64::new(0),
             nic_tx_full: AtomicU64::new(0),
             nic_doorbells: AtomicU64::new(0),
-            host_tx_drops: AtomicU64::new(0),
             host_rx_drops: AtomicU64::new(0),
             slot_src_drops: AtomicU64::new(0),
         }

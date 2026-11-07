@@ -91,7 +91,8 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
         }
     }
 
-    /// De stack, voor wie hem van buiten de lus aanraakt (dezelfde taak).
+    /// De stack, voor een toets die hem van buiten de lus aanraakt.
+    #[cfg(test)]
     pub fn stack(&mut self) -> &mut S {
         &mut self.stack
     }

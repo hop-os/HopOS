@@ -204,6 +204,7 @@ impl<D: AsyncBlockDevice, P: Pace> Queue<D, P> {
     }
 
     /// Hoeveel tickets er nu uitstaan.
+    #[cfg(test)]
     pub fn in_flight(&self) -> usize {
         self.st.borrow().out.count_ones() as usize
     }

@@ -295,8 +295,9 @@ Wat opvalt in deze volgorde:
      kijkt eerst hier.
 4. `flow_expiry`: elke 30 s een veeg.
 5. De host-taak `Node::run`, in deze volgorde:
-   1. **De DHCP-lease**, rauw over de host-ringen, eindeloos met 5 s
-      tussen de pogingen.
+   1. **De DHCP-lease**, rauw over de host-ringen: één leandhcp-client
+      zonder termijn, die in vaste rondes van 3 s opnieuw vraagt tot er een
+      lease is; het einde is de boot-guard (N4).
    2. **`SetUplink` met ack.**
    3. **`Stack::new`.**
    4. `UPLINK_IP` (het seintje voor `wait_uplink`).
@@ -805,7 +806,7 @@ Te wegen:
      listener tot 29-09 voor altijd vast.
 3. **`System::serve` → `frames`**, per frame:
    1. De kop en de payload.
-   2. **`alive()`:** de generatie opnieuw toetsen.
+   2. **`alive()`:** heeft de stopbel van de levensduur geluid?
    3. Dispatch:
       - `Kind::Log` (Go-apps);
       - fs- of device-op;
@@ -813,10 +814,10 @@ Te wegen:
       - codec-op;
       - anders `call` met `PrivOp`, alleen als `privilege.slot == slot`.
    4. Antwoord.
-4. **De bewaking:** elke wachtende read of write tikt per 100 ms
-   (`LIFE_TICK`). Is de generatie weg, dan `Evicted`. Na 300 s stilte
-   `Idle`.
-   - **Waarom pollen:** de stopbel van de servicer heeft één wachter [S10].
+4. **De bewaking:** elke wachtende read of write wacht ook op de stopbel
+   van haar levensduur (`ServicerCtl::ended`, een `sync::Stop` met plaats
+   voor de servicer, de verbindingen en de store-calls) en op het einde van
+   de stilte. Luidt de stop, dan `Evicted`; na 300 s stilte `Idle` (O1).
 5. **De werker:** eerst `close`, dan `drop(job)`, dan `DOORS.free`.
    - **Verplicht:** een nieuwe verbinding van het slot vindt de oude nooit
      half open.

@@ -1,7 +1,9 @@
 """Regels Rust-code zonder commentaar en lege regels, apart: code en toetsen.
 
-Toetsen: bestanden tests*.rs / test.rs / onder tests/ of benches/, en blokken
-na #[cfg(test)]. Strings (ook r#"..."#) en char-literals worden overgeslagen
+Toetsen: bestanden tests*.rs / test.rs / *_tests.rs / testutil.rs / onder
+tests/ of benches/, en blokken na #[cfg(test)]. *_tests.rs en testutil.rs
+staan in de boom alleen achter een #[cfg(test)] mod; tools/loc ziet dat
+vanzelf (ze staan in geen dep-info van een gewone build). Strings (ook r#"..."#) en char-literals worden overgeslagen
 zodat "https://" geen commentaar wordt.
 """
 import os
@@ -102,7 +104,8 @@ def count(path):
     lines = strip(src)
     base = os.path.basename(path)
     parts = path.split(os.sep)
-    whole_test = base.startswith('tests') or base == 'test.rs' or 'tests' in parts or 'benches' in parts
+    whole_test = (base.startswith('tests') or base.endswith('_tests.rs') or base in ('test.rs', 'testutil.rs')
+                  or 'tests' in parts or 'benches' in parts)
     code = test = 0
     in_test = 0  # brace depth of cfg(test) block, 0 = not
     pending = False

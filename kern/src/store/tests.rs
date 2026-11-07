@@ -7,7 +7,7 @@ use crate::rpc::{FsActor, tests::disk};
 use crate::slots::Mount;
 use crate::slots::tests::{FakeConsole, Obey, actor, s, start_job, stop};
 use crate::system::{Conn, End, FlipBundle, Hooks, HopImage, System};
-use crate::testutil::FakeTimer;
+use crate::testutil::{FakeTimer, SlowTimer};
 use abi::hopabi::{OP_READ as READ, OP_WRITE as WRITE, Req};
 use abi::layout::port_ip4;
 use abi::systemapi::store::{DoneHead, LOG_NEWS, NEXT_STORE_LOGS, StoreTask, read_len};
@@ -56,23 +56,6 @@ impl Conn for Pipe {
     }
     fn remote_ip4(&self) -> u32 {
         self.ip
-    }
-}
-
-/// Een klok die per slaap hoogstens een milliseconde opschuift: een lange
-/// wacht van Hop (NEXT_STORE) blijft zo echt wachten terwijl de app in de
-/// andere taak verder gaat, in plaats van in één sprong af te lopen.
-#[derive(Default)]
-struct SlowTimer(core::cell::Cell<u64>);
-
-impl crate::cage::Timer for SlowTimer {
-    fn now(&self) -> u64 {
-        self.0.get()
-    }
-    fn sleep(&self, d: core::time::Duration) -> impl Future<Output = ()> {
-        let step = d.min(core::time::Duration::from_millis(1));
-        self.0.set(self.0.get() + step.as_nanos() as u64);
-        sync::yield_now()
     }
 }
 
@@ -287,7 +270,7 @@ fn a_stop_cancels_the_waiting_call_and_hop_drops_it() {
     let queue = StoreQueue::new();
     let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1)))).with_store(&queue);
     let mut app = Pipe::new(port_ip4(2), &[call(OP_STORE_PUSH, 1, 0, 0, b"x", b"")]);
-    let timer = FakeTimer::default();
+    let timer = SlowTimer::default();
     let who = sys.admit(app.ip).unwrap();
     let (mut m, mut b, mut o) = (SparseMem::default(), vec![0u8; 4096], vec![0u8; 4096]);
     let mut cx = Context::from_waker(Waker::noop());
@@ -334,7 +317,7 @@ fn cx_for<'a>(
         fs: None,
         svc,
         slot: s(slot),
-        generation: svc.current(s(slot)).unwrap(),
+        life: svc.ctl(s(slot)).unwrap(),
         hop: None,
         hop_slot: Some(s(1)),
         reply,

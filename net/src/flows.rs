@@ -141,9 +141,6 @@ pub(crate) struct FlowTable {
     /// ruimte is bij boot gereserveerd. Een tabel per slotnummer zou een
     /// grens op het aantal slots zijn; die is er niet.
     by_slot: Vec<(u16, u16)>,
-    /// Het hoogste aantal flows sinds de laatste compactie: de meetlat van
-    /// Go's `flowMapHighWater`.
-    pub(crate) high_water: usize,
 }
 
 impl FlowTable {
@@ -166,10 +163,10 @@ impl FlowTable {
                     .map_err(|_| Error::OutOfMemory(MAX_FLOWS * 4))?;
                 v
             },
-            high_water: 0,
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
@@ -272,7 +269,6 @@ impl FlowTable {
         *self.rev.get_mut(rp)? = id;
         self.len += 1;
         self.tally(fl.slot, true);
-        self.high_water = self.high_water.max(self.len);
         Some(id)
     }
 
@@ -343,24 +339,6 @@ impl FlowTable {
             .enumerate()
             .filter(|(_, f)| f.is_some())
             .map(|(i, _)| i as Id)
-    }
-
-    /// De compactie-meetlat na een piek (Go: `maybeCompactFlowMapsLocked`).
-    /// Onze indexen krimpen niet en hoeven dat niet (ze zijn vast en hebben
-    /// geen grafstenen); wat blijft is de high-water-teller, zodat de meting
-    /// hetzelfde zegt als op de Go-kern.
-    pub(crate) fn maybe_compact(&mut self) {
-        let n = self.len;
-        if self.high_water < 64 {
-            if n == 0 {
-                self.high_water = 0;
-            }
-            return;
-        }
-        if n * 4 > self.high_water {
-            return;
-        }
-        self.high_water = n;
     }
 }
 

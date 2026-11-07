@@ -86,6 +86,7 @@ impl<'a, D: Device> Pump<'a, D> {
     }
 
     /// Houdt de pomp een frame vast dat de NIC nog niet nam?
+    #[cfg(test)]
     #[must_use]
     pub fn is_holding(&self) -> bool {
         self.held.is_some()

@@ -11,6 +11,7 @@
 //! Elk record heeft een vaste lengte, little-endian, zonder varint of
 //! optionele velden: de kern leest ze op de rand van zijn vertrouwensgrens.
 
+use super::le16;
 use crate::{Error, Result};
 
 /// De lengte van [`OpenArgs`] op de draad.
@@ -64,10 +65,6 @@ fn short(b: &[u8], need: usize) -> Result {
         return Err(Error::Short { len: b.len(), need });
     }
     Ok(())
-}
-
-fn le16(b: &[u8], i: usize) -> u16 {
-    super::le16(b, i)
 }
 
 /// Opent een sessie. Codec, richting en pixel zijn de nummering van

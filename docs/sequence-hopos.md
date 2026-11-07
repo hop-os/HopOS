@@ -1956,9 +1956,9 @@ board-lijm en de supervisor van Hop `slots.rs` 944, `kooi.rs` 717,
 (switcher 875, OS-core 617). Doel: een app in een hok, op een core die
 gedeeld mag worden; hard stoppen; geen maximum aantal slots.
 
-| # | Besluit (Derek, 07-11: ja op alle drie) |
+| # | Besluit (Derek, 07-11: K2 en K3 ja; K1 vervallen) |
 | --- | --- |
-| K1 | De OS-core-rotatie op riscv64 weg (`cpu/src/riscv/oscore.rs` en de riscv-tak in de lijm). Geen riscv-board gebruikt hem: de LicheeRV zet Hop op het app-hart (`sharegroup=hop`). De QEMU-ring `riscv-hop` zet Hop dan ook op het app-hart. |
+| K1 | Vervallen (Derek, 07-11). Het voorstel was de OS-core-rotatie op riscv64 weg, "geen riscv-board gebruikt hem"; dat klopte niet: op de LicheeRV draait Hop op de C906L, maar de apps draaien via de rotatie op de grote C906B van de kern (`system`, `docs/apps.md`, `docs/boards-riscv.md` punt 11). Zonder rotatie delen alle apps de kleine core met Hop. De rotatie blijft. |
 | K2 | Het herstel van de registers één keer in de arm-assembly (`oscore.rs` en `switch.rs` deelden blokken van 35 en 19 gelijke regels): één fragment, offsets uit `abi::layout`. |
 | K3 | `cage_riscv.rs` rekent met `abi::checksum::Fnv64` in plaats van een eigen FNV. |
 
@@ -1966,8 +1966,8 @@ Gehouden: de OS-core-rotatie op arm (Pi 4, Pi 5, Radxa: Hop naast de kern
 houdt 3 van 4 cores vrij), het kooi-geheugen en de VMID bij de plaatsing
 (de prijs van geen maximum), de supervisor van Hop (een vallende Hop is
 al fataal; hij doet alleen `HOP_RESTART`), de grants (gui). Toetsen in
-rc6: de riscv-ringen (K1), de arm- en VHE-ringen (K2), op ijzer de Pi
-(Hop op de OS-core) en de LicheeRV.
+rc6: de arm- en VHE-ringen (K2: de `.text` van de kern is byte voor byte
+gelijk), op ijzer de Pi (Hop op de OS-core) en de LicheeRV.
 
 ### 15.3 Het netwerk
 
@@ -2013,7 +2013,7 @@ overleeft. Geen besluiten.
 
 | # | Besluit (Derek, 07-11: ja) |
 | --- | --- |
-| M1 | `waker(rounds seen kicks)` uit `HOPOS_TICK` en `WakerStats`: zonder schrijver, altijd 0. `rx` (de RX-kick op de M4) blijft. |
+| M1 | `WakerStats` en `waker(rounds seen kicks rx)` uit `HOPOS_TICK` weg. Eerst stond hier "zonder schrijver"; dat klopte niet (de wekker van de M4 schrijft ze, `hopos/src/cage.rs`). Opnieuw beslist (Derek, 07-11): de wekker werkt op ijzer (rc5, ~170k req/s op de M4), en een wekker die faalt, zie je aan de cpu van de app via `SLOT_STATUS` (§14.6). |
 | M2 | `tools/loc.py` telt `testutil.rs` en `*_tests.rs` als toetsen (717 regels stonden bij productie); beide tellers blijven (de bronboom, en `tools/loc` per gelinkte smaak). |
 
 Gehouden: `HOPOS_TICK` als de ene diagnoseregel van de kern (opt-in,

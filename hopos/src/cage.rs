@@ -23,7 +23,6 @@ use abi::layout::{
 };
 use board::Board;
 use core::cell::OnceCell;
-use core::sync::atomic::Ordering::Relaxed;
 use core::time::Duration;
 use cpu::el2::{self, CoreState, Flavor, Installed, Join, Start, roster};
 use cpu::println;
@@ -478,8 +477,6 @@ async fn waker(exec: &'static Executor) {
 /// één fast IPI. De switcher wordt wakker, ackt hem en hervat wie due is;
 /// een kick te veel is een geackte FIQ op EL2.
 fn wake_sleeping(plan: &Plan, now: u64) {
-    let w = &super::WAKER;
-    w.rounds.fetch_add(1, Relaxed);
     for c in (1..=plan.app_cores()).filter_map(layout::Core::new) {
         if !matches!(el2::core_state(plan, c), Ok(CoreState::Running(_))) {
             continue;
@@ -487,13 +484,11 @@ fn wake_sleeping(plan: &Plan, now: u64) {
         let mut due = false;
         let _ = roster::residents(plan, c, |x| {
             if el2::ctx_state(x) == Some(CtxState::Saved) {
-                w.seen.fetch_add(1, Relaxed);
                 due |= el2::due(x, now).is_none();
             }
         });
         if due {
             el2::kick(FLAVOR, mpidr(plan.phys_core(c)));
-            w.kicks.fetch_add(1, Relaxed);
         }
     }
 }
@@ -558,6 +553,5 @@ fn kick_ctx(ctx: Pa) {
     let target = el2::ctx_read(ctx, CTX_KICK_TARGET);
     if target != CTX_KICK_NONE {
         el2::kick(FLAVOR, target);
-        super::WAKER.rx.fetch_add(1, Relaxed);
     }
 }

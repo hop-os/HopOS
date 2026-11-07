@@ -199,7 +199,7 @@ use alloc::vec::Vec;
 use board::Board;
 use cage::SlotCores;
 use core::cell::Cell;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::el2::{self, CoreState};
 use cpu::println;
@@ -502,26 +502,6 @@ fn set_resident(slot: usize, on: bool) {
 pub(crate) fn wake(slot: usize) {
     arch::wake(slot);
 }
-
-/// De meetlat van de wekker van de app-cores (`waker.go` `WakerStats`),
-/// cumulatief, op de tikregel: rondes, geyielde bewoners gezien, kicks van
-/// de wekker en gerichte RX-kicks. Zonder deze vier is "de app slaapt en
-/// wordt nooit gewekt" niet te onderscheiden van "de app spint". Alleen
-/// Apple telt; elders blijven ze 0.
-pub(crate) struct WakerStats {
-    pub(crate) rounds: AtomicU64,
-    pub(crate) seen: AtomicU64,
-    pub(crate) kicks: AtomicU64,
-    pub(crate) rx: AtomicU64,
-}
-
-/// De tellers van de wekker.
-pub(crate) static WAKER: WakerStats = WakerStats {
-    rounds: AtomicU64::new(0),
-    seen: AtomicU64::new(0),
-    kicks: AtomicU64::new(0),
-    rx: AtomicU64::new(0),
-};
 
 /// Spawnt de servicer-taak van één levensduur van `slot` (`Cage::serve`
 /// van de kooi), met zijn eigen recordbuffer: bij de plaatsing gemaakt, weg

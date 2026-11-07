@@ -161,9 +161,10 @@ ok`). Op de M4 zelf heeft het nog niet gedraaid: dat is de checklist.
     elke draaiende app-core met een geyielde bewoner die due is (wektijd,
     kick of RX); een RX-schrijf van de switch kickt de core van het slot
     zelf (en de geyielde secundairen), niet meer mpidr 0. Marker
-    `HOPOS_WAKER_UP`; met `hopos.tick=1` staan de tellers op de tik
-    (`waker(rounds= seen= kicks= rx=)`). Go 02-09: een app-core van 74 %
-    cpu en 1,3 M rondes/s naar 0 % en 47 wekken/s.
+    `HOPOS_WAKER_UP`. Go 02-09: een app-core van 74 % cpu en 1,3 M
+    rondes/s naar 0 % en 47 wekken/s. Eigen tellers heeft de wekker sinds
+    07-11 niet meer (§15.6 M1): een wekker die faalt, zie je aan de cpu van
+    de app (`SLOT_STATUS`, bij Hop).
 
 ## Checklist voor de M4
 

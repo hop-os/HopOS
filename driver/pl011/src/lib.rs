@@ -98,10 +98,16 @@ const POLL_LIMIT: u32 = 1 << 20;
 /// de eerste byte meteen.
 const POLL_STALLED: u32 = 1;
 
+/// De baudrate als de kern hem zelf zet ([`Pl011::with_clock`]).
+const BAUD: u32 = 115_200;
+
 /// Eén PL011 op een vaste basis.
 pub struct Pl011 {
     base: Pa,
     tx: Stall,
+    /// De UART-klok in Hz, of 0: de baudrate blijft zoals de firmware hem
+    /// zette.
+    clock: u32,
 }
 
 impl Pl011 {
@@ -116,7 +122,19 @@ impl Pl011 {
         Self {
             base,
             tx: Stall::new(POLL_LIMIT, POLL_STALLED),
+            clock: 0,
         }
+    }
+
+    /// Dezelfde PL011, maar [`init`](Self::init) zet de baudrate zelf
+    /// ([`BAUD`]) uit de UART-klok `hz`, zoals Linux' pl011 hem uit de klok
+    /// van de DT zet. Op de Pi 4 is dat nodig: de firmware draagt de UART
+    /// over op een baudrate waarop niemand hem leest (ze meldt zelf
+    /// "103448 Hz"; 07-11 op ijzer: stil tot de kern hem zette).
+    #[must_use]
+    pub const fn with_clock(mut self, hz: u32) -> Self {
+        self.clock = hz;
+        self
     }
 
     fn regs(&self) -> &'static Regs {
@@ -125,12 +143,19 @@ impl Pl011 {
         unsafe { dev::regs(self.base) }
     }
 
-    /// Zet de UART aan: 8N1 met FIFO's, TX en RX aan. De baudrate blijft
-    /// staan zoals de firmware hem zette (QEMU negeert hem; de Pi-firmware
-    /// zet hem met `uart_2ndstage=1`).
+    /// Zet de UART aan: 8N1 met FIFO's, TX en RX aan. Met een klok
+    /// ([`with_clock`](Self::with_clock)) ook de baudrate; anders blijft hij
+    /// staan zoals de firmware hem zette (QEMU negeert hem).
     pub fn init(&self) {
         let r = self.regs();
         r.cr.write(0);
+        if self.clock != 0 {
+            // Deler = klok / (16 x baud), in 1/64e: IBRD het gehele deel,
+            // FBRD de rest; LCR_H hieronder zet ze in werking.
+            let div = (u64::from(self.clock) * 4 + u64::from(BAUD) / 2) / u64::from(BAUD);
+            r.ibrd.write((div >> 6) as u32);
+            r.fbrd.write((div & 0x3f) as u32);
+        }
         r.lcr_h.write(LCR_FEN | LCR_WLEN8);
         r.imsc.write(0);
         r.icr.write(0x7ff);
@@ -248,6 +273,15 @@ mod tests {
             !u.tx().is_stalled(),
             "full is not stuck: the pump comes back"
         );
+    }
+
+    #[test]
+    fn init_sets_115200_from_a_48_mhz_clock() {
+        let (mem, u) = fake();
+        let u = u.with_clock(48_000_000);
+        u.init();
+        assert_eq!((mem[0x24 / 4], mem[0x28 / 4]), (26, 3));
+        assert_eq!(mem[0x30 / 4], CR_UARTEN | CR_TXE | CR_RXE);
     }
 
     #[test]

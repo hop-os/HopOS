@@ -49,6 +49,8 @@ mod usb;
 /// aparte debug-connector. De bootloader zet hem op 115200 (config.txt
 /// `uart_2ndstage=1`); `dtoverlay=disable-bt` houdt hem bij de header.
 pub const UART0: Pa = Pa(0xFE20_1000);
+/// GPFSEL1 van de GPIO-bank: de functie van pin 10 tot 19, drie bits per pin.
+const GPFSEL1: Pa = Pa(0xFE20_0004);
 /// De GIC-400: distributor op +0x1000, CPU-interface op +0x2000.
 pub const GIC: Pa = Pa(0xFF84_0000);
 /// De VideoCore-mailbox (brcm,bcm2835-mbox, klassieke basis).
@@ -80,8 +82,9 @@ fn nic_ack() {
 }
 
 // SAFETY: 0xFE20_1000 is de PL011 van de BCM2711 en ligt in het
-// Device-venster van de vaste tabel (0xFC00_0000 tot 4 GB).
-static UART: Pl011 = unsafe { Pl011::new(UART0) };
+// Device-venster van de vaste tabel (0xFC00_0000 tot 4 GB). De UART-klok is
+// 48 MHz (de firmware-standaard `init_uart_clock`).
+static UART: Pl011 = unsafe { Pl011::new(UART0) }.with_clock(48_000_000);
 
 // SAFETY: de GIC-400 van de BCM2711, in hetzelfde Device-venster.
 static GIC400: Gic = unsafe { Gic::new(GIC.add(0x1000), GIC.add(0x2000)) };
@@ -111,6 +114,16 @@ impl Soc for Bcm2711 {
 
     fn uart() -> &'static Pl011 {
         &UART
+    }
+
+    /// GPIO14/15 op ALT0, de PL011, zoals Linux ze uit de DT zet
+    /// (`uart0_gpio14`). De firmware laat ze op ALT5, de mini-UART, ook met
+    /// `disable-bt` (die overlay zet alleen de DT voor Linux); TF-A kiest daarom
+    /// zelf de mini-UART (`rpi3_use_mini_uart`). Zonder dit ging de console
+    /// van de kern nergens heen (07-11, op ijzer).
+    fn uart_pins() {
+        let f = dev::read32(GPFSEL1) & !(0x3f << 12);
+        dev::write32(GPFSEL1, f | (0b100_100 << 12));
     }
 
     fn gic() -> &'static Gic {

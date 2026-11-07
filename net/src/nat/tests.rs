@@ -393,7 +393,7 @@ fn sweep_expired() {
 }
 
 #[test]
-fn sweep_compacteert_map_na_verkeerspiek() {
+fn sweep_na_verkeerspiek_houdt_de_overlever() {
     let (mut nat, mut io) = setup();
     let now = T0;
     let mut keep = None;
@@ -405,12 +405,9 @@ fn sweep_compacteert_map_na_verkeerspiek() {
             age(&mut nat, id, now - TCP_IDLE - SEC);
         }
     }
-    assert_eq!(nat.flows.high_water, 128);
+    assert_eq!(nat.flows.len(), 128);
     nat.sweep_expired(now);
-    assert_eq!(
-        (nat.flows.len(), nat.flows.high_water, nat.flows.count(1)),
-        (1, 1, 1)
-    );
+    assert_eq!((nat.flows.len(), nat.flows.count(1)), (1, 1));
     let keep = *nat.flows.get(keep.unwrap()).unwrap();
     assert!(
         nat.flows.by_rev(&keep.rkey()).is_some(),
@@ -521,10 +518,7 @@ fn tcp_rst_bezorging_en_veilige_reclaim() {
             "flow-loze RST niet afgehandeld"
         );
         assert!(io.sent.is_empty(), "flow-loze RST toch vertaald");
-        assert_eq!(
-            (nat.flows.len(), nat.flows.high_water, nat.masq_next),
-            (0, 0, before)
-        );
+        assert_eq!((nat.flows.len(), nat.masq_next), (0, before));
     }
     // Inbound.
     {

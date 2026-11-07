@@ -476,12 +476,14 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
         Ok(())
     }
 
-    /// De NAT, voor setup vóór `run` en voor de kern-flip ná `run`.
+    /// De NAT, voor de toetsen.
+    #[cfg(test)]
     pub fn nat(&mut self) -> &mut Nat {
         &mut self.nat
     }
 
     /// Hangt slot `i` aan de switch?
+    #[cfg(test)]
     #[must_use]
     pub fn is_attached(&self, i: usize) -> bool {
         self.core.ports.get(i).is_some_and(Option::is_some)

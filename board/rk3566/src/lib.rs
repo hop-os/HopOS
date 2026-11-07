@@ -113,7 +113,7 @@ pub const KERN_RAM: Region = Region {
     size: 0x0400_0000,
 };
 /// Het structurenvenster: control-pages, kooien, boot-scratch,
-/// levenstekens, vluchtrecorder en zwarte doos. Device, zie [`slots`].
+/// levenstekens en zwarte doos. Device, zie [`slots`].
 pub const STRUCT_WINDOW: Region = Region {
     base: Pa(0x0620_0000),
     size: 0x0020_0000,

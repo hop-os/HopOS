@@ -54,7 +54,7 @@ pub const DTB_PA: u64 = 0x0F00_0000;
 pub const BOOT_SCRATCH_PA: u64 = 0x0F10_0000;
 /// Het maatwoord van een staging door de kern zelf (de flip-bundel,
 /// `hopos/src/flip.rs`): het handoff-blob ligt in de 256 KiB eronder, de
-/// vluchtrecorder en de trampoline op de boot-scratch-pagina's erboven.
+/// trampoline op de boot-scratch-pagina's erboven.
 pub const STAGE_HDR_PA: u64 = 0x0F1F_F000;
 /// Waar config.txt het image van Hop laadt (`initramfs hop.elf 0x0f200000`).
 pub const STAGE_PA: u64 = 0x0F20_0000;

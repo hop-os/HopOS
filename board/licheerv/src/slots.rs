@@ -118,8 +118,6 @@ pub const FLIP_LINK_BASE: u64 = 0x8400_0000;
 pub const FLIP_PIE: bool = false;
 /// Het einde van het beeld: het begin van de DMA-regio.
 pub const FLIP_IMAGE_END: u64 = 0x8680_0000;
-/// De vluchtrecorder.
-pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline van de sprong.
 pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 
@@ -128,7 +126,7 @@ pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 pub const BLACK_BOX: Region = Region::new(0, 0);
 
 const _: () = {
-    assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
+    assert!(FLIP_TRAMP_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
     assert!(FLIP_TRAMP_PA + 0x1000 <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
     assert!(FLIP_IMAGE_END < STAGE_PA && (STAGE_PA + STAGE_MAX).is_multiple_of(2 << 20));
 };

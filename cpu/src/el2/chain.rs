@@ -14,7 +14,8 @@
 //! vast adres met een vaste identity map, dus de nieuwe kern gaat op het
 //! KOUDE adres van de oude: precies waar de firmware hem ook zou laden. Dat
 //! kan de oude kern niet zelf (hij zou zijn eigen code overschrijven), dus
-//! de laatste meters loopt een kleine trampoline buiten het kern-RAM:
+//! de laatste meters loopt een kleine trampoline buiten het beeld en de
+//! heap ([`Jump::tramp`]):
 //!
 //! 1. interrupts dicht, MMU, D- en I-cache uit (lezen-en-maskeren, m1n1's
 //!    `mmu_disable`, zoals de Go-sprong op de M4);
@@ -47,16 +48,9 @@
 //! core 0; met een ander x0 parkeert `_start` elke core behalve core 0 (de
 //! koude-boot-poort, [`crate::boot::admits`]).
 //!
-//! # riscv64
-//!
-//! Dezelfde sprong in machine mode. Er is
-//! geen MMU om uit te zetten; de trampoline zet de interrupts dicht, veegt op
-//! de C906 de hele D-cache naar DRAM (`th.dcache.ciall`, feature `thead`),
-//! kopieert het beeld, veegt opnieuw, maakt de I-cache leeg en springt naar
-//! `_start` met a0 = 0 en a1 = de a1 die de firmware (QEMU: de DTB) de oude
-//! kern gaf, zoals bij de boot (`cpu::riscv::boot`). Nog zonder gebruiker:
-//! riscv64 flipt niet zolang de switch-code uit het kern-image draait
-//! (`hopos/src/flip.rs`, `FLIPS`).
+//! riscv64 flipt niet (`hopos/src/flip.rs`, `FLIPS`): daar is dit de
+//! host-kant, zonder trampoline. Zijn M-mode-trampoline ging eruit op 07-11
+//! (F2): geen code voor riscv zolang het niet flipt.
 
 use dev::Pa;
 
@@ -150,9 +144,10 @@ pub struct Jump {
     pub sweep: [(Pa, Pa); 2],
     /// Waar de trampoline heen gaat: buiten het beeld en de staging, in
     /// RAM dat de identity map uitvoerbaar mapt. Hij mag in een geveegd
-    /// venster liggen (de heap-top op de Radxa): na zijn kopie draait er
-    /// geen Rust meer, en het vegen van zijn eigen regels (die al in DRAM
-    /// staan) verandert niets aan wat hij uitvoert.
+    /// venster liggen (de bovenste pagina van de kern-RAM, buiten de heap,
+    /// op de Radxa en de M4): na zijn kopie draait er geen Rust meer, en
+    /// het vegen van zijn eigen regels (die al in DRAM staan) verandert
+    /// niets aan wat hij uitvoert.
     pub tramp: Pa,
 }
 
@@ -168,7 +163,7 @@ const TRAP_MAGIC: u64 = u64::from_le_bytes(*b"HOPTRAP1");
 /// Wat de kale vector van de trampoline op `tramp` ([`Jump::tramp`])
 /// vastlegde: `(ESR, ELR, FAR)` van een fault tijdens de sprong of in de
 /// eerste stappen van de nieuwe kern, en daarna leeg. `None` zonder record
-/// (de gewone koude boot) en op een build zonder die vector (riscv64, de
+/// (de gewone koude boot) en op een build zonder trampoline (riscv64, de
 /// host). Voor de boot ná een flip die niet landde.
 pub fn take_trap(tramp: Pa) -> Option<(u64, u64, u64)> {
     take_trap_at(tramp.add(arch::trap_off()?))
@@ -250,7 +245,7 @@ impl Jump {
 ///   waarvan de som getoetst is (`kern::kernflip::Bundle`, `sha256`), en dat
 ///   niemand anders dat bereik of `tramp` nog beschrijft;
 /// - alles wat de nieuwe kern moet lezen buiten het beeld (het handoff-blob,
-///   het pointer/magic-paar, de recorder) al naar DRAM geveegd is;
+///   de feitenpagina) al naar DRAM geveegd is;
 /// - geen andere core in de vensters van `sweep` schrijft of er code
 ///   uitvoert (de app-cores draaien in hun partities en in de switch-code
 ///   in de plan-regio, nooit in het kern-RAM of het kern-beeld).
@@ -445,131 +440,10 @@ hopos_chain_tramp_end:
     }
 }
 
-#[cfg(all(target_os = "none", target_arch = "riscv64"))]
+#[cfg(not(all(target_os = "none", target_arch = "aarch64")))]
 mod arch {
-    use super::Jump;
-
-    // Het cache-onderhoud van de C906 (T-Head, feature `thead`): de hele
-    // D-cache naar DRAM en ongeldig, dan de I-cache ongeldig; zonder (QEMU,
-    // coherent) alleen de `fence.i` erachter.
-    #[cfg(feature = "thead")]
-    macro_rules! flush {
-        () => {
-            r#"
-    .4byte 0x0030000b
-    .4byte 0x01b0000b
-    .4byte 0x0100000b
-    .4byte 0x01b0000b
-"#
-        };
-    }
-    #[cfg(not(feature = "thead"))]
-    macro_rules! flush {
-        () => {
-            ""
-        };
-    }
-
-    // De trampoline. Positie-onafhankelijk (alleen registers en relatieve
-    // sprongen), want hij draait op een adres dat hij niet kent.
-    //
-    // In: a0 = dst, a1 = src, a2 = len (8-voud), a3 = entry, a4 = de a1 van
-    // de firmware. Eerst de D-cache leeg (geen vuile regel van de oude kern
-    // die later over de nieuwe heen valt), dan de kopie, dan alles naar
-    // DRAM en de I-cache leeg (het venster was net nog code van de oude
-    // kern, op dezelfde adressen).
-    core::arch::global_asm!(
-        r#"
-    .pushsection .text.hopos_chain, "ax"
-    .balign 64
-    .global hopos_chain_tramp
-hopos_chain_tramp:
-    csrw mie, zero
-    csrci mstatus, 8
-    mv t6, a3
-"#,
-        flush!(),
-        r#"
-1:  beqz a2, 2f
-    ld t0, 0(a1)
-    sd t0, 0(a0)
-    addi a1, a1, 8
-    addi a0, a0, 8
-    addi a2, a2, -8
-    j 1b
-2:  fence
-"#,
-        flush!(),
-        r#"
-    fence.i
-    li a0, 0
-    mv a1, a4
-    jr t6
-    .global hopos_chain_tramp_end
-hopos_chain_tramp_end:
-    .popsection
-"#
-    );
-
-    unsafe extern "C" {
-        safe static hopos_chain_tramp: u8;
-        safe static hopos_chain_tramp_end: u8;
-    }
-
-    pub(super) fn trampoline() -> Option<&'static [u8]> {
-        let start = &raw const hopos_chain_tramp;
-        let len = (&raw const hopos_chain_tramp_end as usize).wrapping_sub(start as usize);
-        if len == 0 || len > 4096 {
-            return None;
-        }
-        // SAFETY: twee labels in dezelfde `global_asm!` hierboven, in één
-        // sectie, met het einde erachter (net getoetst): code in de eigen
-        // `.text`, leesbaar, `'static` en nooit beschreven.
-        Some(unsafe { core::slice::from_raw_parts(start, len) })
-    }
-
-    /// De kale vector van arm64 ook niet: de trampoline draait in machine
-    /// mode met de interrupts dicht, en een trap gaat naar de mtvec van de
-    /// oude kern.
-    pub(super) fn trap_off() -> Option<u64> {
-        None
-    }
-
-    /// # Safety
-    ///
-    /// Het contract van [`super::chain`].
-    pub(super) unsafe fn jump(j: &Jump) -> ! {
-        // SAFETY: de interrupts gaan dicht (een timer tussen de kopie en de
-        // sprong zou in code landen die er straks niet meer is); de I-cache
-        // wordt ongeldig zodat de net gekopieerde trampoline vers gehaald
-        // wordt; de sprong gaat naar code die `chain` op `tramp` legde en
-        // naar DRAM veegde. Er komt niets terug.
-        unsafe {
-            core::arch::asm!(
-                "csrw mie, zero",
-                "csrci mstatus, 8",
-                flush!(),
-                "fence.i",
-                "jr {t}",
-                t = in(reg) j.tramp.0,
-                in("a0") j.dst.0,
-                in("a1") j.src.0,
-                in("a2") j.len,
-                in("a3") j.entry,
-                in("a4") j.x0,
-                options(noreturn, nostack)
-            )
-        }
-    }
-}
-
-#[cfg(not(all(
-    target_os = "none",
-    any(target_arch = "aarch64", target_arch = "riscv64")
-)))]
-mod arch {
-    //! Host-kant: geen trampoline en geen sprong; de tests bewijzen de
-    //! relocatie en de indeling.
+    //! Host-kant (en riscv64, dat niet flipt): geen trampoline en geen
+    //! sprong; de tests bewijzen de relocatie en de indeling.
     use super::{ChainError, Jump};
 
     pub(super) fn trampoline() -> Option<&'static [u8]> {

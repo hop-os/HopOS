@@ -95,7 +95,7 @@ pub fn staged_image() -> Option<&'static [u8]> {
 //
 // Van het flip-spoor, niet van het board: alleen getallen. De staging is
 // de plek waar QEMU het image van Hop legde (na zijn plaatsing dood
-// geheugen); de recorder, de trampoline en het handoff-blob liggen op de
+// geheugen); de trampoline en het handoff-blob liggen op de
 // boot-scratch-pagina's ertussen. Alles buiten het kern-RAM en de pool.
 
 /// Waar de nieuwe kern heen gaat: het koude linkadres (`hopos/link.ld`,
@@ -106,28 +106,22 @@ pub const FLIP_PIE: bool = false;
 /// Het beeld op het koude adres blijft hieronder: de DMA-regio, waar de
 /// NIC schrijft tot de nieuwe kern hem reset.
 pub const FLIP_IMAGE_END: u64 = 0x4f00_0000;
-/// De vluchtrecorder (twee woorden: de lopende stand en het archief).
-pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline van de sprong: een pagina, uitvoerbaar (Normal) gemapt.
 pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 
 /// De zwarte doos: de console-ring van de kern (`kern::conport`, hopos
 /// conport.rs), die een flip en een reset overleeft: de 32 KiB direct onder
 /// het handoff-blob, boven de trampoline.
-/// Die pagina's liggen met de recorder in hetzelfde gat van de
-/// boot-scratch, en daar schrijft alleen de flip: de recorder en de
-/// trampoline eronder, het blob erboven.
+/// Die pagina's liggen met de trampoline in hetzelfde gat van de
+/// boot-scratch, en daar schrijft alleen de flip: de trampoline eronder,
+/// het blob erboven.
 pub const BLACK_BOX: abi::Region =
     abi::Region::new(abi::layout::flip_handoff_pa(STAGE_HDR_PA) - 0x8000, 0x8000);
 
-const _: () = assert!(
-    BLACK_BOX.base >= FLIP_TRAMP_PA + 0x1000
-        && BLACK_BOX.base > FLIP_RECORDER_PA
-        && BLACK_BOX.base.is_multiple_of(64)
-);
+const _: () =
+    assert!(BLACK_BOX.base >= FLIP_TRAMP_PA + 0x1000 && BLACK_BOX.base.is_multiple_of(64));
 
 const _: () = {
-    assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
-    assert!(FLIP_TRAMP_PA >= FLIP_RECORDER_PA + 16);
+    assert!(FLIP_TRAMP_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
     assert!(FLIP_TRAMP_PA + 0x1000 <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
 };

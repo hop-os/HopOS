@@ -189,8 +189,6 @@ pub const FLIP_LINK_BASE: u64 = 0;
 pub const FLIP_PIE: bool = true;
 /// Geen vaste grens: het nieuwe beeld moet in het oude passen.
 pub const FLIP_IMAGE_END: u64 = 0;
-/// De vluchtrecorder.
-pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline (Normal: de loader-regio is RAM uit de kaart).
 pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 /// De feiten van de stub voor een kern die zonder firmware binnenkomt.
@@ -200,9 +198,9 @@ pub const FLIP_FACTS_LEN: u64 = 0x2000;
 
 /// De zwarte doos: de console-ring van de kern (`kern::conport`, hopos
 /// conport.rs): hetzelfde gat als op virt en de Pi's (direct onder het
-/// handoff-blob), maar boven de feitenpagina van de stub. De loader-regio
-/// van het kernvenster is die van de recorder; de stub schrijft er alleen
-/// het staging-woord en de feiten.
+/// handoff-blob), maar boven de feitenpagina van de stub. In de
+/// loader-regio van het kernvenster schrijft de stub alleen het
+/// staging-woord en de feiten.
 pub const BLACK_BOX: Region =
     Region::new(abi::layout::flip_handoff_pa(STAGE_HDR_PA) - 0x8000, 0x8000);
 
@@ -210,7 +208,7 @@ const _: () =
     assert!(BLACK_BOX.base >= FLIP_FACTS_PA + FLIP_FACTS_LEN && BLACK_BOX.base.is_multiple_of(64));
 
 const _: () = {
-    assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
+    assert!(FLIP_TRAMP_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
     assert!(FLIP_TRAMP_PA + 0x1000 <= FLIP_FACTS_PA);
     assert!(FLIP_FACTS_PA + FLIP_FACTS_LEN <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
 };

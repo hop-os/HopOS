@@ -37,9 +37,7 @@ const CAGE_END: u64 = BOOT_SCRATCH_PA;
 /// Device-venster: in de eerste Go-iteratie lagen ze in gecachet geheugen,
 /// en toen meldde PSCI "accepted" terwijl de core stil bleef (05-08).
 pub const WAKE_PA: u64 = 0x0630_0000;
-/// De vluchtrecorder van de kern-flip: moet een watchdog-reset overleven.
-pub const FLIP_SCRATCH_PA: u64 = WAKE_PA + 0x1000;
-/// De console-zwarte-doos, 32 KB.
+/// De console-zwarte-doos, 32 KB: moet een watchdog-reset overleven.
 pub const BLACK_BOX: Region = Region::new(WAKE_PA + 0x8000, 32 << 10);
 
 /// Het maatwoord van de staging (de vorm van QEMU virt): een MB in het
@@ -110,7 +108,6 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         node_ctrl_pa: NODE_CTRL_PA,
         cage_pa: CAGE_PA,
         boot_scratch_pa: BOOT_SCRATCH_PA,
-        flip_scratch_pa: FLIP_SCRATCH_PA,
         black_box: BLACK_BOX,
         net_dma_pa: crate::NET_DMA.base.0,
         usb_dma_pa: crate::USB_DMA.base.0,
@@ -159,24 +156,24 @@ pub fn staged_image() -> Option<&'static [u8]> {
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
 //
-// Van het flip-spoor, niet van het board: alleen getallen. De staging, het
-// blob en de recorder liggen in Device-vensters (woordgewijs geschreven en
-// geveegd, dus goed); de trampoline moet uitvoerbaar zijn, en het enige
-// Normal-RAM buiten de pool is de kern-RAM zelf: de bovenste pagina van de
-// heap. Dat mag, want na de kopie van de trampoline draait er geen Rust
-// meer, en het nieuwe beeld reikt er niet (`cpu::el2::chain`, `check`). Op
-// ijzer nog niet geflipt.
+// Van het flip-spoor, niet van het board: alleen getallen. De staging en
+// het blob liggen in Device-vensters (woordgewijs geschreven en geveegd,
+// dus goed); de trampoline moet uitvoerbaar zijn, en het enige Normal-RAM
+// buiten de pool is de kern-RAM zelf. Daarom is de bovenste pagina van de
+// kern-RAM de trampoline en niet van de heap: `hopos/link-rk3566.ld` laat
+// de heap een pagina eerder ophouden en toetst dat tegen dit adres (F5,
+// 07-11; tot dan was het de bovenste heap-pagina, en gold de hoop dat de
+// heap hem nooit uitdeelde). Het nieuwe beeld reikt er niet
+// (`cpu::el2::chain`, `check`). Op ijzer nog niet geflipt.
 
 /// Waar de nieuwe kern heen gaat: het koude linkadres
 /// (`hopos/link-rk3566.ld`, `KERN_BASE`).
 pub const FLIP_LINK_BASE: u64 = 0x0221_0000;
 /// Geen PIE.
 pub const FLIP_PIE: bool = false;
-/// De trampoline: de bovenste pagina van de kern-RAM.
+/// De trampoline: de bovenste pagina van de kern-RAM, buiten de heap.
 pub const FLIP_TRAMP_PA: u64 = crate::KERN_RAM.base.0 + crate::KERN_RAM.size - 0x1000;
 /// Het beeld blijft onder de trampoline.
 pub const FLIP_IMAGE_END: u64 = FLIP_TRAMP_PA;
-/// De vluchtrecorder: het woord dat al voor een watchdog-reset vrijlag.
-pub const FLIP_RECORDER_PA: u64 = FLIP_SCRATCH_PA;
 
 const _: () = assert!(abi::layout::flip_handoff_pa(STAGE_HDR_PA) >= crate::STAGE_WINDOW.base.0);

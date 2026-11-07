@@ -15,7 +15,7 @@ Alleen de flip zelf (`hopos/src/flip.rs`, en `setup` in
 `hopos/src/main.rs` dat de stukken uitdeelt) weet dat er een flip is.
 
 De code: `hopos/src/flip.rs` (de haak, de vangst, de sprong en de landing),
-`kern/src/kernflip.rs` (het blob, de bundel, de recorder),
+`kern/src/kernflip.rs` (het blob, de bundel),
 `cpu/src/el2/chain.rs` (de sprong), de feitenpagina
 (`abi::layout::facts_pa`, `kernflip::facts`), de poort van de ingangen
 (`cpu/src/boot.rs` `admits`, `board/uefi/src/entry.rs`; de UEFI-feiten in
@@ -59,10 +59,10 @@ open en antwoordde de nieuwe SYN met een RST, en Hop kwam niet meer terug
 **Na de 202 is er geen weg terug (§13.7).** Een vangst die faalt (hopfs
 bevriest niet binnen 2 s, `snapshot` weigert, bijvoorbeeld bij een lopende
 stroom, het blob past niet), of een landing die een stuk niet terugkrijgt
-(het blob, de cage, een bewoner, de NIC): `HOPOS_FATAL`, en de koude boot
-meldt waar het stopte (`HOPOS_FLIP_LAST`). Dat is de `fatal()` van het
-fundament, `cpu::fatal!`: één regel, de core parkeert, de pets stoppen en
-de watchdog reset. Wat vooraf te toetsen is, toetst de haak:
+(het blob, de cage, een bewoner, de NIC): `HOPOS_FATAL`. Dat is de
+`fatal()` van het fundament, `cpu::fatal!`: één regel, de core parkeert,
+de pets stoppen en de watchdog reset; wat de kern als laatste zei, staat
+in de zwarte doos (hieronder). Wat vooraf te toetsen is, toetst de haak:
 de som, de bundel, de switch-code, de maat, de staging en de indeling van
 de sprong (`Jump::check`).
 
@@ -70,9 +70,9 @@ de sprong (`Jump::check`).
 flip on riscv64`). De switch-code draait daar uit het kern-image; kern B
 zou hem onder de app-harts overschrijven. Wat ontbreekt voor een warme
 flip: een kopie van de M-mode-switcher buiten het image (zoals de
-plan-regio op arm64), `mtvec` van elk app-hart op die kopie, en een
-`adopt` in `cage_riscv`. De M-mode-trampoline in `cpu::el2::chain` staat
-er nog, zonder gebruiker.
+plan-regio op arm64), `mtvec` van elk app-hart op die kopie, een
+`adopt` in `cage_riscv`, en een trampoline in machine mode in
+`cpu::el2::chain` (die zonder gebruiker ging er op 07-11 uit, F2).
 
 ## Het blob
 
@@ -106,6 +106,14 @@ recorder-stappen zonder schrijver. `FLIP_ABI` 4 liet een kern van 3.0.20
 (ABI 3) zo'n bundel weigeren vóór de 202; `FLIP_ABI` 5 (01-11, de ene
 ingang) doet hetzelfde met een kern die nog met x3 = `HOPFLIPE` springt.
 Zo'n node komt naar deze vorm via zijn bootmedium, niet via een flip.
+
+De vluchtrecorder (een woord per board, `FLIP_RECORDER_PA`, met de stap
+waar een flip was en een archief van de poging daarvoor, `HOPOS_FLIP_LAST`
+en `HOPOS_FLIP_ARCHIVED` op de koude boot erna) ging eruit op 07-11 (F1):
+vóór de 202 is een fout een weigering met een reden, en wat een kern na de
+202 als laatste zei, staat in de zwarte doos. De bundel heeft één vorm,
+versie 2 met de som van de switch-code (64 bytes kop); versie 1 (56
+bytes, van 3.0.x) is een onbekende versie (F3, 07-11).
 
 ## Inventaris: wie weet van de flip (01-11)
 
@@ -233,15 +241,15 @@ dezelfde HMAC als een jobspec (met `hopos.insecure=1` zonder).
 
 ### Per board
 
-| Board | Bundel | Koud adres | Staging, blob, recorder, trampoline | Bewezen |
+| Board | Bundel | Koud adres | Staging, blob, trampoline | Bewezen |
 | --- | --- | --- | --- | --- |
 | QEMU virt | `flip-bundle.sh virt` | `0x4020_0000` (link.ld) | de staging van QEMU op `0xB020_0000`, de boot-scratch-pagina's op `0xB000_0000` | `sh tools/qemu-test-flip.sh`, ook `MISMATCH=1` en `OSCORE=1` |
 | UEFI (EDK2) | `flip-bundle.sh uefi` | de basis die de firmware koos (`__efi_head`), binnen `SizeOfImage` | de loader-regio van het kernvenster (`0x5000_0000` + 256 MB) | `BOARD=uefi sh tools/qemu-test-flip.sh` |
 | Orion O6N | `flip-bundle.sh o6n` | idem | idem, venster op `0x8800_0000` | nog niet op ijzer |
 | Ampere Altra | `flip-bundle.sh altra` | idem | idem, venster op `0xB000_0000` | nog niet op ijzer |
 | Pi 4, Pi 5 | `flip-bundle.sh rpi4` / `rpi5` | `0x80000` (link-raspi.ld) | achter de initramfs van Hop op `0x0F20_0000`, de boot-scratch op `0x0F10_0000` | bundels gebouwd; de ingang op QEMU raspi4b (`BOARD=rpi4 sh tools/qemu-test-flip.sh`); nog niet op ijzer |
-| Radxa Zero 3E | `flip-bundle.sh radxa` | `0x0221_0000` (link-rk3566.ld) | het staging-venster op `0x0780_0000`, de recorder op `FLIP_SCRATCH_PA`, de trampoline op de bovenste pagina van de kern-RAM | bundel gebouwd; de ingang is `_start`, dezelfde als virt (`OSCORE=1`); nog niet op ijzer |
-| Mac mini M4 | `flip-bundle.sh apple` | `0x101_0000_0000` (link-apple.ld `KERN_BASE`, het RAM-venster) | de staging in de loader-regio (`LOADER` + 2 MB) met het blob vlak onder de stagingkop; de recorder op `ADMIN` + `0xc0_0000`, buiten de boot-scratch (iBoot legt het bootobject daar bij elke boot terug); de trampoline op de bovenste pagina van de kern-RAM (`board/apple/src/slots.rs`) | op ijzer geflipt tot 3.0.20 (24-10, ALLES.md), met het blob van versie 6 |
+| Radxa Zero 3E | `flip-bundle.sh radxa` | `0x0221_0000` (link-rk3566.ld) | het staging-venster op `0x0780_0000`, de trampoline op de bovenste pagina van de kern-RAM (`0x061F_F000`), buiten de heap | bundel gebouwd; de ingang is `_start`, dezelfde als virt (`OSCORE=1`); nog niet op ijzer |
+| Mac mini M4 | `flip-bundle.sh apple` | `0x101_0000_0000` (link-apple.ld `KERN_BASE`, het RAM-venster) | de staging in de loader-regio (`LOADER` + 2 MB) met het blob vlak onder de stagingkop; de trampoline op de bovenste pagina van de kern-RAM, buiten de heap (`board/apple/src/slots.rs`) | op ijzer geflipt tot 3.0.20 (24-10, ALLES.md), met het blob van versie 6 |
 
 Wat per board eerst te kijken is, morgen op het ijzer:
 
@@ -279,19 +287,24 @@ Wat per board eerst te kijken is, morgen op het ijzer:
   liggen in gaten van de pool (`FW_HOLES`), en de feitenpagina op de
   boot-scratch in het structuurvenster (`0x062E_0080`) draagt het adres van
   de DTB.
-  De trampoline staat in de kern-RAM (de bovenste heap-pagina):
-  het enige uitvoerbare RAM buiten de pool. `cpu::el2::chain` staat dat toe
-  zolang het beeld hem niet raakt. Eerst bewijzen dat de heap die pagina op
-  het moment van de flip niet gebruikt. De heap heeft sinds 29-09 vrije
-  lijsten en vult een gat vóór de staart ([heap.md](heap.md),
-  `holes_are_reused_before_the_tail`), dus die pagina raakt hij pas als
-  zijn gebied bijna vol is; ook dan weigert de flip niet, maar overschrijft
-  hij die pagina vlak voor de sprong, en daarna leest niemand hem meer.
+  De trampoline staat in de kern-RAM, op de bovenste pagina: het enige
+  uitvoerbare RAM buiten de pool. Die pagina is niet van de heap: het
+  linkscript (`hopos/link-rk3566.ld`) laat de heap een pagina eerder
+  ophouden en toetst bij het linken dat `__heap_end` niet boven de
+  trampoline komt (`__hopos_flip_tramp`, uit `hopos/src/flip.rs`). Tot 07-11
+  (F5) was het de bovenste heap-pagina, met de hoop dat de heap hem op het
+  moment van de flip niet uitdeelde. `cpu::el2::chain` staat de kern-RAM
+  toe zolang het beeld de trampoline niet raakt (`FLIP_IMAGE_END`).
 - **Mac mini M4.** De nieuwe kern komt binnen op `_start_apple` met x0 =
   de feitenpagina op de boot-scratch (`LOADER` + `0x80`); `apple_early`
   leest daar met de MMU uit de boot_args van iBoot, en `kmain` krijgt de
   pagina. iBoot legt het bootobject bij elke firmware-boot terug over de
   boot-scratch, en dat mag: bij stroom aan komt de pagina er toch opnieuw.
+  De trampoline staat zoals op de Radxa op de bovenste pagina van de
+  kern-RAM, die `hopos/link-apple.ld` buiten de heap houdt (dezelfde
+  toets bij het linken); niet op de boot-scratch zoals op de andere
+  boards, want daar legt iBoot bij een reset het bootobject terug, en de
+  kale vector van de trampoline (`HOPOS_FLIP_TRAP`) moet die overleven.
   Op ijzer eerst kijken: de eerste regel op de dockchannel (`hopos x`) na
   `HOPOS_FLIP_JUMP` draagt dezelfde boot_args als bij de koude boot, en de
   kaart en de pool van `fwinfo` zijn die van de koude boot.
@@ -304,8 +317,8 @@ Vóór de 202 is elke fout een weigering (`HOPOS_FLIP_REFUSED <reden>`,
 | Reden | Wat |
 | --- | --- |
 | `sha256 mismatch` | de bytes zijn niet wat de som zegt |
-| `bundle invalid` | geen HOPRELO1-staart, een afgekapte stroom, een beeld buiten de grenzen, een relocatie die niet klopt |
-| `bundle carries no switch code sum`, `flip ABI mismatch` | een bundel van een andere vorm (een kern van ABI 4 weigert een bundel van ABI 5, en omgekeerd) |
+| `bundle invalid` | geen HOPRELO1-staart, een staart van een andere versie dan 2 (versie 1, van 3.0.x, droeg de som van de switch-code niet), een afgekapte stroom, een beeld buiten de grenzen, een relocatie die niet klopt |
+| `flip ABI mismatch` | een bundel van een andere vorm (een kern van ABI 4 weigert een bundel van ABI 5, en omgekeerd) |
 | `switch code mismatch` | de EL2-switch-code is een andere dan die waarin de bewoners draaien |
 | `image too large` | het beeld past niet in de staging of op het koude adres |
 | `jump layout` | de trampoline, de vensters of de kopie van de sprong kloppen niet (`Jump::check`) |
@@ -328,20 +341,22 @@ En verder:
 
 | Marker | Wat er gebeurt |
 | --- | --- |
-| niets na `HOPOS_FLIP_JUMP` | kern B hangt vóór zijn console; alleen een hardware-watchdog helpt. De volgende koude boot zegt waar het stopte |
-| `HOPOS_FLIP_LAST`, `HOPOS_FLIP_ARCHIVED` | op de volgende koude boot: de stap waar de laatste flip stopte, en de poging daarvoor |
+| niets na `HOPOS_FLIP_JUMP` | kern B hangt vóór zijn console; alleen een hardware-watchdog helpt. De volgende koude boot speelt de zwarte doos af: wat kern B nog zei, of niets |
+| `HOPOS_FLIP_TRAP` | op de volgende koude boot: de sprong of de eerste stappen van kern B faalden op de kale vector van de trampoline (ESR, ELR, FAR) |
 | `HOPOS_CONSOLE_CARRIED` | bij elke boot, als eerste regel: hoeveel bytes van een vorige kern nog in de console-ring staan; `nc NODE 5555` speelt ze af vóór de nieuwe boot (de zwarte doos, hieronder) |
 
 ## De zwarte doos
 
-De recorder zegt wáár een geflipte kern stierf, de zwarte doos wat hij
-daarvoor zei. Aanleiding: de Pi 5 zonder UART (30-09). Een geflipte kern
-stierf daar vlak na de landing; de koude boot erna meldde alleen
-`HOPOS_FLIP_LAST` op "landed", want de TCP-console (`hopos/src/conport.rs`)
-komt pas na DHCP en zijn ring ligt in de BSS van de dode kern.
+De zwarte doos zegt wat een kern als laatste zei, ook na een flip of een
+reset. Aanleiding: de Pi 5 zonder UART (30-09). Een geflipte kern
+stierf daar vlak na de landing; de koude boot erna meldde alleen de stap
+van de vluchtrecorder ("landed"), want de TCP-console
+(`hopos/src/conport.rs`) kwam pas na DHCP en zijn ring lag in de BSS van
+de dode kern. Sinds 07-11 is de doos het enige spoor (F1): de recorder
+ging eruit.
 
 Sinds 01-11 is de zwarte doos de console zelf: één ring op een vaste plek
-naast de recorder (`kern/src/conport.rs`, `hopos/src/conport.rs`), met de
+(`kern/src/conport.rs`, `hopos/src/conport.rs`), met de
 UART, tcp/5555 en `NEXT_LOG` 0 van Hop als lezers. De kop (magic
 `HOPCON01`, de ringmaat, de schrijfpositie en de posities van de UART en
 van Hop) en elke schrijf gaan meteen naar DRAM, want een watchdog-reset
@@ -354,17 +369,16 @@ er niets van.
 
 | Board | Doos | Waarom die een reset overleeft |
 | --- | --- | --- |
-| Pi 4, Pi 5 | `0x0F1B_7000` (het blob min 32 KiB) | het laadvenster, in het gat van de boot-scratch tussen de trampoline (`0x0F10_2000`) en het blob (`0x0F1B_F000`), met de recorder (`0x0F10_1000`); de firmware schrijft er alleen de DTB (`0x0F00_0000`) en de initramfs (`0x0F20_0000`) |
+| Pi 4, Pi 5 | `0x0F1B_7000` (het blob min 32 KiB) | het laadvenster, in het gat van de boot-scratch tussen de trampoline (`0x0F10_2000`) en het blob (`0x0F1B_F000`); de firmware schrijft er alleen de DTB (`0x0F00_0000`) en de initramfs (`0x0F20_0000`) |
 | QEMU virt | `0xB00B_8000` | hetzelfde gat onder `0xB00C_0000`; een QEMU-reset laadt alleen de ROM's terug (de kern op `0x4020_0000`, de staging) |
 | UEFI, O6N, Altra | loader-regio + `0xB_8000` (virt: `0x600B_8000`) | hetzelfde gat, boven de feitenpagina van de stub (+ `0x3000`, 8 KiB) |
-| Radxa Zero 3E | `0x0630_8000` (`slots::BLACK_BOX`, 32 KiB) | het plan had de doos al, naast de recorder op `0x0630_1000`, Device |
-| Mac mini M4 | ADMIN + `0xc0_8000` (`slots::BLACK_BOX`, 32 KiB) | idem, naast de recorder; niet op de boot-scratch, want iBoot legt daar het bootobject terug (01-09) |
+| Radxa Zero 3E | `0x0630_8000` (`slots::BLACK_BOX`, 32 KiB) | het plan had de doos al, in het structuurvenster naast de levenstekens, Device |
+| Mac mini M4 | ADMIN + `0xc0_8000` (`slots::BLACK_BOX`, 32 KiB) | idem, in het kooi-venster achter de kooi-regio; niet op de boot-scratch, want iBoot legt daar het bootobject terug (01-09) |
 | riscv64 | geen: de ring staat in .bss | nog geen plek die bewezen een reset overleeft |
 
 De plek staat per board in zijn `slots.rs` (`BLACK_BOX`), met daar de
-`const`-asserties: op virt en de Pi's boven de trampoline en de recorder,
-op UEFI boven de feitenpagina, op de M4 achter de recorder en binnen het
-kooi-venster, op de Radxa binnen zijn structuurvenster. Op virt, de Pi's
+`const`-asserties: op virt en de Pi's boven de trampoline, op UEFI boven
+de feitenpagina, op de M4 achter de kooi-regio en binnen het kooi-venster, op de Radxa binnen zijn structuurvenster. Op virt, de Pi's
 en UEFI ligt hij per constructie direct onder het blob (het blob min 32
 KiB). `hopos/src/conport.rs` leest die plek en toetst alleen dat de doos
 op 64 bytes ligt.
@@ -377,7 +391,7 @@ een landing. Komt kern B niet tot een levensteken (een self-dial die
 verbindt, en Hop die slaat), dan houdt de watchdog zijn pets in
 (`HOPOS_BOOT_GUARD_EXPIRED`) en reset de node koud. Luistert het net
 (`net::NET_READY`: de lease, de stack en de system-listener), dan zegt
-`flip::settle` `HOPOS_FLIP_SETTLED` en gaat de vluchtrecorder leeg.
+`flip::settle` `HOPOS_FLIP_SETTLED`.
 
 ## Toetsen
 
@@ -401,7 +415,7 @@ verbindt, en Hop die slaat), dan houdt de watchdog zijn pets in
 - `BOARD=rpi4`: de flip-ingang van de Pi op QEMU raspi4b.
 - `BOARD=uefi`: onder EDK2, met de PIE-basis en de feitenpagina.
 - Host: `kern` (`kernflip`: `handoff_round_trip` met de lease,
-  `a_lease_of_zero_is_no_lease`, de recorder, de bundel; `slots`:
+  `a_lease_of_zero_is_no_lease`, de bundel van één versie; `slots`:
   `adoption_separates_cages_from_smp_cores` met `republish`), `net`
   (`the_first_masquerade_port_moves_with_the_clock_and_stays_in_range`),
   `cpu` (`chain`, `boot`).

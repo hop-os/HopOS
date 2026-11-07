@@ -173,12 +173,10 @@ pub struct PlanSpec {
     /// hem op EL2 met de MMU uit, en een gecachte park-mailbox is op ijzer
     /// een verloren startschot.
     pub device_window: Region,
-    /// Eén woord voor de vluchtrecorder van de kern-flip, buiten alles wat
-    /// firmware bij een verse boot beschrijft (0 = geen). Een plan-veld en
-    /// geen boot-scratch-offset: op de M4 legt iBoot het bootobject terug
-    /// over de scratch (gemeten 01-09: recorder leeg na een gecrashte flip).
-    pub flip_scratch_pa: u64,
-    /// De console-zwarte-doos, zelfde soort plek (maat 0 = geen).
+    /// De console-zwarte-doos, buiten alles wat firmware bij een verse boot
+    /// beschrijft (maat 0 = geen). Een plan-veld en geen
+    /// boot-scratch-offset: op de M4 legt iBoot het bootobject terug over
+    /// de scratch (gemeten 01-09).
     pub black_box: Region,
     /// De vectortabel van de kern-core zelf (ARM, 2 KB-gealigneerd; 0 op
     /// RISC-V).
@@ -289,7 +287,6 @@ impl Plan {
         ];
         let optional = [
             Region::new(spec.trap_vec_pa, 0x800),
-            Region::new(spec.flip_scratch_pa, 8),
             spec.black_box,
             Region::new(spec.usb_dma_pa, USB_DMA_SIZE),
             // De NIC-maat is board-specifiek (LicheeRV 448 KB, ARM 8 MB);
@@ -391,12 +388,6 @@ impl Plan {
     pub fn node_ctrl_pa(&self, core: Core) -> Result<Pa> {
         self.within(core.get())?;
         Ok(Pa(self.spec.node_ctrl_pa + core.get() as u64 * CTRL_STRIDE))
-    }
-
-    /// Het vluchtrecorder-woord van de kern-flip, als het board er een heeft.
-    #[must_use]
-    pub fn flip_stage_pa(&self) -> Option<Pa> {
-        (self.spec.flip_scratch_pa != 0).then_some(Pa(self.spec.flip_scratch_pa))
     }
 
     /// De zwarte doos, als het board er een heeft.

@@ -1,6 +1,7 @@
-//! De kern-flip: de overdracht (het handoff-blob), de adoptie door de nieuwe
-//! kern ([`adopted`]) en de vluchtrecorder met zijn archief. De zwarte doos
-//! van de console is de console-ring zelf ([`crate::conport`]).
+//! De kern-flip: de overdracht (het handoff-blob) en de adoptie door de
+//! nieuwe kern ([`adopted`]). Wat een geflipte kern als laatste zei, staat in
+//! de zwarte doos: de console-ring zelf ([`crate::conport`]), die een reset
+//! overleeft.
 //!
 //! Alles in het blob is BOEKHOUDING, geen inhoud: de app-werelden blijven
 //! staan waar ze staan. Bij een onbruikbare overdracht stopt de nieuwe boot;
@@ -347,8 +348,6 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
 pub struct FlipPlan {
     /// De feitenpagina (`abi::layout::facts_pa`): x0 van elke sprong.
     pub facts_pa: u64,
-    /// De vluchtrecorder (`layout.FlipStagePA`), 0 = geen.
-    pub stage_pa: u64,
     /// De plek van het blob (`abi::layout::flip_handoff_pa`): een handoff
     /// die ergens anders wijst, is een kapotte.
     pub handoff_pa: u64,
@@ -440,172 +439,7 @@ pub fn adopted(mem: &mut impl PhysMem, plan: &FlipPlan, handoff: u64) -> Result<
         })?;
     b.resize(HANDOFF_TAIL, 0);
     mem.copy_out(&mut b, handoff);
-    match decode(&b) {
-        Ok(h) => {
-            archive_stage(mem, plan, h.generation);
-            // Met de generatie (Go schreef 0): een koude boot na een dood
-            // hier meldt dan welke kern het was.
-            stage(mem, plan, Stage::Landed, h.generation);
-            Ok(Some(h))
-        }
-        Err(e) => {
-            stage(mem, plan, Stage::AdoptBlobBad, 0);
-            Err(e)
-        }
-    }
-}
-
-/// De stappen van de flip, in volgorde. Een nieuwe stap hoort ACHTERAAN:
-/// ertussen schuiven hernummert de rest, en dan meldt een oudere kern zijn
-/// eigen stand verkeerd (06-09, het kostte een ronde). De vier stappen
-/// zonder schrijver gingen eruit met `FLIP_ABI` 4 (01-11).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(u16)]
-pub enum Stage {
-    /// Bundel opgehaald en geverifieerd.
-    Fetched = 1,
-    /// Bundel gevalideerd.
-    BundleOk,
-    /// Segmenten geplaatst.
-    Placed,
-    /// Relocaties toegepast.
-    Rebased,
-    /// Bewoners en NAT vastgelegd.
-    Captured,
-    /// Blob geschreven.
-    Handoff,
-    /// Op het punt van springen.
-    Jumping,
-    /// De nieuwe kern haalde main.
-    EarlyMain,
-    /// De overdracht is geconsumeerd.
-    Landed,
-    /// Het net van de nieuwe kern is op.
-    NetUp,
-    /// Het blob decodeerde niet; de kern wacht op de watchdog.
-    AdoptBlobBad,
-}
-
-impl Stage {
-    fn from(n: u64) -> Option<Stage> {
-        use Stage::*;
-        [
-            Fetched,
-            BundleOk,
-            Placed,
-            Rebased,
-            Captured,
-            Handoff,
-            Jumping,
-            EarlyMain,
-            Landed,
-            NetUp,
-            AdoptBlobBad,
-        ]
-        .into_iter()
-        .find(|s| *s as u64 == n)
-    }
-
-    /// De consoletekst bij een stand.
-    #[must_use]
-    pub fn describe(self) -> &'static str {
-        match self {
-            Stage::Fetched => "bundle fetched and verified",
-            Stage::BundleOk => "bundle validated",
-            Stage::Placed => "segments placed",
-            Stage::Rebased => "relocations applied",
-            Stage::Captured => "residents and NAT captured",
-            Stage::Handoff => "handoff blob written",
-            Stage::Jumping => "about to jump into the new kernel",
-            Stage::EarlyMain => "the new kernel reached main but died before the handover",
-            Stage::Landed => {
-                "jump landed and the handover was consumed — died later in the new kernel's boot"
-            }
-            Stage::NetUp => "the new kernel's network is up — died between net and agent",
-            Stage::AdoptBlobBad => {
-                "the handoff blob did not decode; the kernel refused to continue and waited for the watchdog"
-            }
-        }
-    }
-}
-
-/// "FLIP" in de bovenste 32 bits: willekeurige DRAM-rommel na een koude
-/// start wordt nooit als "vorige flip" gelezen.
-const STAGE_TAG: u64 = 0x464C_4950 << 32;
-const ARCHIVE_OFF: u64 = 8;
-
-fn stage_of(v: u64) -> Option<(Stage, u64)> {
-    if v & !0xFFFF_FFFF != STAGE_TAG {
-        return None;
-    }
-    Some((Stage::from(v & 0xFFFF)?, (v >> 16) & 0xFFFF))
-}
-
-/// Legt de lopende stand vast, rechtstreeks naar DRAM geveegd: dit woord
-/// moet een crash één instructie later nog overleven.
-pub fn stage(mem: &mut impl PhysMem, plan: &FlipPlan, s: Stage, generation: u64) {
-    if plan.stage_pa == 0 {
-        return;
-    }
-    mem.write64(
-        plan.stage_pa,
-        STAGE_TAG | s as u64 | (generation & 0xFFFF) << 16,
-    );
-    mem.clean_inv(plan.stage_pa, 8);
-}
-
-/// Schuift een onafgemaakte stand naar het archief. Wat ONZE eigen
-/// generatie schreef is eigen voortgang, geen mislukking.
-///
-/// Het archief bestaat omdat de flip die een gevallen node weer optilt zijn
-/// eigen stappen over het spoor heen schrijft: de eerste twee gevallen flips
-/// op de M4 (06-09) waren daardoor onverklaarbaar.
-pub fn archive_stage(mem: &mut impl PhysMem, plan: &FlipPlan, mine: u64) {
-    if plan.stage_pa == 0 {
-        return;
-    }
-    let v = mem.read64(plan.stage_pa);
-    match stage_of(v) {
-        Some((_, generation)) if generation != mine => {
-            mem.write64(plan.stage_pa + ARCHIVE_OFF, v);
-            mem.clean_inv(plan.stage_pa + ARCHIVE_OFF, 8);
-        }
-        _ => {}
-    }
-}
-
-/// Het archief (de laatste poging die niet landde), gewist na het lezen.
-/// Elke boot vraagt het; `None` betekent dat elke eerdere flip netjes eindigde.
-pub fn take_archived(mem: &mut impl PhysMem, plan: &FlipPlan) -> Option<(Stage, u64)> {
-    if plan.stage_pa == 0 {
-        return None;
-    }
-    let r = stage_of(mem.read64(plan.stage_pa + ARCHIVE_OFF))?;
-    mem.write64(plan.stage_pa + ARCHIVE_OFF, 0);
-    mem.clean_inv(plan.stage_pa + ARCHIVE_OFF, 8);
-    Some(r)
-}
-
-/// De lopende stand, gewist na het lezen. Alleen op een KOUDE boot: op een
-/// flip-boot staat daar de sprong die ons bracht.
-pub fn take_last_flip(mem: &mut impl PhysMem, plan: &FlipPlan) -> Option<(Stage, u64)> {
-    if plan.stage_pa == 0 {
-        return None;
-    }
-    let r = stage_of(mem.read64(plan.stage_pa))?;
-    mem.write64(plan.stage_pa, 0);
-    mem.clean_inv(plan.stage_pa, 8);
-    Some(r)
-}
-
-/// De eerste regel van main van een geflipte kern: stond er "springen",
-/// dan zijn wij die sprong.
-pub fn mark_early_boot(mem: &mut impl PhysMem, plan: &FlipPlan) {
-    if plan.stage_pa != 0
-        && let Some((Stage::Jumping, generation)) = stage_of(mem.read64(plan.stage_pa))
-    {
-        stage(mem, plan, Stage::EarlyMain, generation);
-    }
+    decode(&b).map(Some)
 }
 
 // ---------------------------------------------------------------------------
@@ -629,12 +463,12 @@ pub const FLIP_ABI: u32 = 5;
 /// "HOPRELO1" little-endian: hetzelfde woord als `mkkernel -elfreloc`.
 pub const RELOC_MAGIC: u64 = 0x314F_4C45_5250_4F48;
 /// De kop van de staart: magic, versie, flip-ABI, ELF-maat, linkbasis,
-/// platte maat, entry, aantal relocaties.
-pub const BUNDLE_HEAD: usize = 56;
-/// De kop van versie 2: die van versie 1 plus de som van de switch-code
+/// platte maat, entry, aantal relocaties en de som van de switch-code
 /// ([`Bundle::switch_sum`]).
-pub const BUNDLE_HEAD_V2: usize = 64;
-/// De versie van de staart die `image/flip-bundle.sh` schrijft.
+pub const BUNDLE_HEAD: usize = 64;
+/// De versie van de staart die `image/flip-bundle.sh` schrijft. Versie 1
+/// (zonder de som, 56 bytes) kwam van 3.0.x en valt al op [`FLIP_ABI`];
+/// sinds 07-11 is ze een onbekende versie (F3).
 pub const BUNDLE_VERSION: u32 = 2;
 /// De voet: de offset van de kop en nog een keer de magic.
 pub const BUNDLE_FOOT: usize = 16;
@@ -663,14 +497,13 @@ pub struct Bundle<'a> {
     pub entry: u64,
     /// De FNV-1a-som over de EL2-switch-code van de nieuwe kern
     /// (`cpu::el2::image_hash`), zoals het bundelscript hem uit de
-    /// symbolen van de koude link rekende. `None` in een bundel van versie
-    /// 1: die kan de flip niet vóór de sprong toetsen, en wordt geweigerd.
+    /// symbolen van de koude link rekende.
     ///
     /// Waarom in de bundel: de nieuwe kern adopteert de zittende kopie
     /// alleen bij een gelijke som (`cpu::el2::adopt`), en zonder deze
     /// toets merkt pas de gelande kern een verschil, twee minuten later,
     /// als de guard koud herstart.
-    pub switch_sum: Option<u64>,
+    pub switch_sum: u64,
     relocs: &'a [u8],
 }
 
@@ -713,18 +546,11 @@ impl<'a> Bundle<'a> {
             return Err(Error::Corrupt { at: head });
         }
         let version = le32(b, head + 8)?;
-        let head_len = match version {
-            1 => BUNDLE_HEAD,
-            2 => BUNDLE_HEAD_V2,
-            _ => {
-                return Err(Error::Version {
-                    have: u64::from(version),
-                    want: u64::from(BUNDLE_VERSION),
-                });
-            }
-        };
-        if head > foot - head_len {
-            return Err(Error::Corrupt { at: foot });
+        if version != BUNDLE_VERSION {
+            return Err(Error::Version {
+                have: u64::from(version),
+                want: u64::from(BUNDLE_VERSION),
+            });
         }
         let elf_size = le64(b, head + 16)?;
         let count = le64(b, head + 48)?;
@@ -733,17 +559,13 @@ impl<'a> Bundle<'a> {
             link_load: le64(b, head + 24)?,
             flat_size: le64(b, head + 32)?,
             entry: le64(b, head + 40)?,
-            switch_sum: if version >= 2 {
-                Some(le64(b, head + 56)?)
-            } else {
-                None
-            },
+            switch_sum: le64(b, head + 56)?,
             elf: b
                 .get(..usize::try_from(elf_size).unwrap_or(usize::MAX))
                 .filter(|_| elf_size != 0 && elf_size <= head as u64)
                 .ok_or(Error::Corrupt { at: head + 16 })?,
             relocs: {
-                let start = head + head_len;
+                let start = head + BUNDLE_HEAD;
                 let room = (foot - start) as u64 / 4;
                 if count > room {
                     return Err(Error::Corrupt { at: head + 48 });
@@ -777,7 +599,7 @@ impl<'a> Bundle<'a> {
         for (i, off) in bundle.relocs().enumerate() {
             if !off.is_multiple_of(8) || u64::from(off) + 8 > bundle.flat_size {
                 return Err(Error::Corrupt {
-                    at: head + head_len + i * 4,
+                    at: head + BUNDLE_HEAD + i * 4,
                 });
             }
         }
@@ -1037,7 +859,6 @@ mod tests {
 
     const PLAN: FlipPlan = FlipPlan {
         facts_pa: 0x1000,
-        stage_pa: 0x2000,
         handoff_pa: 0x10_0000,
     };
 
@@ -1102,18 +923,13 @@ mod tests {
         let mut mem = CachedMem::default();
         assert_eq!(facts(&mut mem, &PLAN, 0x4000_0000), (0x4000_0000, 0));
         assert_eq!(adopted(&mut mem, &PLAN, 0), Ok(None));
-        // De sprong: x0 is de pagina, de nieuwe kern vindt de DTB en de
-        // handoff, en het blob met de generatie op de recorder.
+        // De sprong: x0 is de pagina, de nieuwe kern vindt de DTB, de
+        // handoff en het blob.
         let h = jump(&mut mem, 4);
         mem.reset();
         let (fw, handoff) = facts(&mut mem, &PLAN, PLAN.facts_pa);
         assert_eq!((fw, handoff), (0x4000_0000, PLAN.handoff_pa));
         assert_eq!(adopted(&mut mem, &PLAN, handoff), Ok(Some(h)));
-        assert_eq!(
-            stage_of(mem.read64(PLAN.stage_pa)),
-            Some((Stage::Landed, 4)),
-            "landed without the generation"
-        );
         // De O6N (04-10): de kern leeft een minuut en de watchdog reset hem.
         // De firmware geeft geen pagina in x0: koud, wat er ook ligt.
         mem.reset();
@@ -1135,32 +951,8 @@ mod tests {
             adopted(&mut mem, &PLAN, PLAN.handoff_pa).is_err(),
             "garbage blob became a cold boot"
         );
-        assert_eq!(
-            stage_of(mem.read64(PLAN.stage_pa)).map(|s| s.0),
-            Some(Stage::AdoptBlobBad)
-        );
     }
 
-    #[test]
-    fn recorder_archives_foreign_generation_only() {
-        let mut mem = SparseMem::default();
-        // Een eerdere poging (generatie 4) sprong en landde nooit.
-        stage(&mut mem, &PLAN, Stage::Jumping, 4);
-        // Onze eigen sprong (generatie 5) is voortgang, geen mislukking.
-        archive_stage(&mut mem, &PLAN, 4);
-        assert_eq!(take_archived(&mut mem, &PLAN), None);
-        archive_stage(&mut mem, &PLAN, 5);
-        assert_eq!(take_archived(&mut mem, &PLAN), Some((Stage::Jumping, 4)));
-        assert_eq!(take_archived(&mut mem, &PLAN), None, "archive not cleared");
-        // Rommel is geen stand.
-        mem.write64(PLAN.stage_pa, 0x1234_5678_0000_0003);
-        assert_eq!(take_last_flip(&mut mem, &PLAN), None);
-        stage(&mut mem, &PLAN, Stage::Jumping, 9);
-        mark_early_boot(&mut mem, &PLAN);
-        assert_eq!(take_last_flip(&mut mem, &PLAN), Some((Stage::EarlyMain, 9)));
-        assert_eq!(mem.read64(PLAN.stage_pa), 0);
-        assert!(Stage::NetUp.describe().contains("network"));
-    }
     /// Een minimale ELF64 met één PT_LOAD: `code` op `paddr`, `memsz` groot.
     fn mini_elf(entry: u64, paddr: u64, code: &[u8], memsz: u64) -> Vec<u8> {
         let mut e = vec![0u8; 128];
@@ -1189,6 +981,9 @@ mod tests {
         e
     }
 
+    /// De som van de switch-code in de bundels van deze toetsen.
+    const SUM: u64 = 0xfeed_f00d;
+
     /// Een bundel zoals image/flip-bundle.sh hem schrijft.
     fn mini_bundle(
         elf: &[u8],
@@ -1204,33 +999,16 @@ mod tests {
         }
         let head = b.len() as u64;
         b.extend_from_slice(&RELOC_MAGIC.to_le_bytes());
-        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&BUNDLE_VERSION.to_le_bytes());
         b.extend_from_slice(&abi.to_le_bytes());
-        for v in [elf.len() as u64, link, flat, entry, relocs.len() as u64] {
-            b.extend_from_slice(&v.to_le_bytes());
-        }
-        for r in relocs {
-            b.extend_from_slice(&r.to_le_bytes());
-        }
-        while !b.len().is_multiple_of(8) {
-            b.push(0);
-        }
-        b.extend_from_slice(&head.to_le_bytes());
-        b.extend_from_slice(&RELOC_MAGIC.to_le_bytes());
-        b
-    }
-
-    /// Een bundel van versie 2: met de som van de switch-code.
-    fn mini_bundle2(elf: &[u8], link: u64, flat: u64, sum: u64, relocs: &[u32]) -> Vec<u8> {
-        let mut b = elf.to_vec();
-        while !b.len().is_multiple_of(8) {
-            b.push(0);
-        }
-        let head = b.len() as u64;
-        b.extend_from_slice(&RELOC_MAGIC.to_le_bytes());
-        b.extend_from_slice(&2u32.to_le_bytes());
-        b.extend_from_slice(&FLIP_ABI.to_le_bytes());
-        for v in [elf.len() as u64, link, flat, link, relocs.len() as u64, sum] {
+        for v in [
+            elf.len() as u64,
+            link,
+            flat,
+            entry,
+            relocs.len() as u64,
+            SUM,
+        ] {
             b.extend_from_slice(&v.to_le_bytes());
         }
         for r in relocs {
@@ -1245,19 +1023,20 @@ mod tests {
     }
 
     #[test]
-    fn a_version_2_bundle_carries_its_switch_code_sum() {
+    fn a_bundle_carries_its_switch_code_sum_in_one_version() {
         let link = 0x6020_0000u64;
         let elf = mini_elf(link, link, &[0u8; 64], 0x2000);
-        let b = mini_bundle2(&elf, link, 0x2000, 0xfeed_f00d, &[8, 16]);
+        let b = mini_bundle(&elf, FLIP_ABI, link, 0x2000, link, &[8, 16]);
         let bun = Bundle::parse(&b).unwrap();
-        assert_eq!(bun.switch_sum, Some(0xfeed_f00d));
+        assert_eq!(bun.switch_sum, SUM);
         assert_eq!(bun.relocs().collect::<Vec<_>>(), [8, 16]);
-        let v1 = mini_bundle(&elf, FLIP_ABI, link, 0x2000, link, &[8]);
-        assert_eq!(Bundle::parse(&v1).unwrap().switch_sum, None);
-        let mut v3 = b.clone();
+        // Versie 1 (3.0.x, zonder som) en een onbekende versie: nee.
         let head = elf.len().next_multiple_of(8);
-        v3[head + 8] = 3;
-        assert!(Bundle::parse(&v3).is_err(), "an unknown tail version");
+        for v in [1, 3] {
+            let mut old = b.clone();
+            old[head + 8] = v;
+            assert!(Bundle::parse(&old).is_err(), "tail version {v}");
+        }
     }
 
     #[test]

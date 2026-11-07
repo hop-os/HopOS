@@ -76,8 +76,8 @@ pub fn staged_image() -> Option<&'static [u8]> {
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
 //
 // Alleen getallen, zoals op arm64 (board/qemuvirt/src/slots.rs). riscv64
-// flipt (nog) niet (`flip::FLIPS`); de recorder en de plek van het blob
-// gebruikt de landing van elke boot.
+// flipt (nog) niet (`flip::FLIPS`); de plek van het blob gebruikt de
+// landing van elke boot.
 
 /// Het koude linkadres (`hopos/link-riscv.ld`, `KERN_BASE`).
 pub const FLIP_LINK_BASE: u64 = 0x8000_0000;
@@ -85,8 +85,6 @@ pub const FLIP_LINK_BASE: u64 = 0x8000_0000;
 pub const FLIP_PIE: bool = false;
 /// Het einde van het beeld: het begin van de DMA-regio.
 pub const FLIP_IMAGE_END: u64 = 0x8f00_0000;
-/// De vluchtrecorder.
-pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline van de sprong.
 pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 
@@ -95,7 +93,7 @@ pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 pub const BLACK_BOX: Region = Region::new(0, 0);
 
 const _: () = {
-    assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
+    assert!(FLIP_TRAMP_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
     assert!(FLIP_TRAMP_PA + 0x1000 <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
 };
 

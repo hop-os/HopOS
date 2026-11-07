@@ -21,7 +21,7 @@
 //! - 0x0020_0000 tot 0x0220_0000: de firmware-keten (U-Boot). Device.
 //! - 0x0220_0000 tot 0x0620_0000: de kern-RAM, Normal WB (64 MB, zoals Go).
 //! - 0x0620_0000 tot 0x0640_0000: de structuren van de kern (control-pages,
-//!   kooien, boot-scratch, levenstekens, vluchtrecorder): Device, coherent
+//!   kooien, boot-scratch, levenstekens, zwarte doos): Device, coherent
 //!   met een core die met de MMU uit binnenkomt.
 //! - 0x0640_0000 tot 0x0780_0000: NIC-DMA, USB-DMA en de framebuffer:
 //!   Normal-NC, behalve het bufferblok van de NIC (`NET_BUF`, 0x0660_0000

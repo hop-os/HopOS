@@ -33,7 +33,7 @@ niets ervan heeft in v3 op ijzer gedraaid. De gedateerde lessen (28-08 tot
 | `top_of_kernel_data` tot 0x101_0000_0000 | pool, laag deel | Device (2 MB) |
 | 0x101_0000_0000 + 256 MB | kern-RAM: stub, scratch 0xE000, param-blok 0xE100, config 0xF000, kern 0x10000, BSS (met de tabellen), stack, heap | Normal WB |
 | + 16 MB | DMA: tg3 8 MB, ANS 4 MB + RTKit-buffers 3 MB + SMC 1 MB | Normal-NC |
-| + 16 MB | control-pages, kooien, flip-recorder, zwarte doos | Device |
+| + 16 MB | control-pages, kooien, zwarte doos | Device |
 | + 64 MB | boot-scratch, handoff, staging (met magic) | Normal WB |
 | 0x101_1600_0000 tot `phys_base + mem_size` | pool, hoog deel | Device (2 MB) |
 | alles onder 512 GB | MMIO (AIC, dockchannel, APCIe, ANS, PMGR) | Device (1 GB) |

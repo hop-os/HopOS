@@ -328,7 +328,7 @@ pub trait Console {
 }
 
 /// Fysiek geheugen buiten de eigen heap, woordgewijs: de boot-scratch, de
-/// recorder van de flip, de handoff.
+/// feitenpagina en de handoff van de flip.
 ///
 /// Het board vult hem met `dev::read64`/`write64` op adressen uit `layout`;
 /// de tests met een ijle tabel. Zo blijft de rekenkunde van kernflip puur

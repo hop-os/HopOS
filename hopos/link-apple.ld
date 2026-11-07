@@ -17,7 +17,8 @@
  * De stub kopieert het bestand (tot __image_file_end) naar KERN_BASE als
  * iBoot het elders neerzette. De kern-RAM loopt tot KERN_END (256 MB,
  * board_apple::KERN_RAM); daarboven de DMA-regio. De heap is alles tussen
- * het einde van de stack en die grens.
+ * het einde van de stack en die grens, op de bovenste pagina na: dat is de
+ * trampoline van de kern-flip (board_apple::slots::FLIP_TRAMP_PA).
  *
  * De `_start` van cpu::boot (`.text.boot`) blijft hier weg: de ingang is
  * `_start_apple`, en --gc-sections laat de rest vallen.
@@ -82,7 +83,7 @@ SECTIONS
 
   . = ALIGN(4096);
   __heap_start = .;
-  __heap_end = KERN_END;
+  __heap_end = KERN_END - 0x1000;
 
   /DISCARD/ : {
     *(.comment)
@@ -94,4 +95,6 @@ SECTIONS
 ASSERT(__apple_head == KERN_BASE, "de bootstub moet op offset 0 staan")
 ASSERT(_start_apple == KERN_BASE + 0x10000, "de kern begint op 0x10000")
 ASSERT(__heap_start < __heap_end, "het image loopt de DMA-regio in")
+ASSERT(__heap_end <= __hopos_flip_tramp, "de heap loopt de trampoline van de flip in")
+ASSERT(__hopos_flip_tramp + 0x1000 <= KERN_END, "de trampoline van de flip ligt buiten de kern-RAM")
 ASSERT(__apple_tables % 4096 == 0, "de tabellen zijn 4 KB-gealigneerd")

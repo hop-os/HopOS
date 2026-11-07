@@ -110,8 +110,8 @@ pub const BLK_DMA: Region = Region {
     base: Pa(RAM_BASE + 0x1080_0000),
     size: 0x0080_0000,
 };
-/// Het kooi-venster: 16 MB Device (control-pages, kooien, de flip-recorder
-/// en de zwarte doos).
+/// Het kooi-venster: 16 MB Device (control-pages, kooien en de zwarte
+/// doos).
 pub const ADMIN: Region = Region {
     base: Pa(RAM_BASE + 0x1100_0000),
     size: 0x0100_0000,

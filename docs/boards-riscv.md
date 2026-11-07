@@ -376,40 +376,6 @@ zet hem; HopOS doet geen init). Bouw met
       een regel die de kern of de switcher niet veegde (de C906L is niet
       coherent met de C906B).
 
-## De koude flip op de LicheeRV
-
-Een nieuwe kern over het net in plaats van via de SD-kaart (docs/flip.md,
-"riscv64"; alleen koud). Op de Mac:
-
-```sh
-HOPOS_STAMP=<naam> sh image/flip-bundle.sh licheerv    # Hop van tools/hop-build.sh, of STAGE=<hop.elf>
-cd target && python3 -m http.server 8000
-hop --agent <node>:8080 flip http://<mac>:8000/hopos-licheerv.flip $(cat target/hopos-licheerv.flip.sha256) --cold
-```
-
-Zonder `CFG=` krijgt de nieuwe kern het config-venster van de draaiende
-(`HOPOS_FLIP_CFG`). Een kern van vóór 04-10 droeg een eigen venster
-(`HOPOS.CFG.WINDOW`) en geeft het nieuwe niets mee: flip daarvandaan met
-`CFG="image/cfg/default.cfg image/cfg/licheerv.cfg image/cfg/headless.cfg"`
-(of je eigen). Op de console (TCP 5555 of de UART), in volgorde:
-`HOP_FLIP_COLD_STOP`, `HOPOS_FLIP_COLD_ASKED`, `HOPOS_FLIP_CFG`,
-`HOPOS_FLIP_STAGED ... staged at 0x86900000, cold`, `HOPOS_FLIP_COLD
-stopped=N cores_off=1` (de C906L in reset), `HOPOS_FLIP_JUMP gen=G`, dan de
-bunny, `HOPOS_FLIP_BOOT gen=G HOPOS_FLIP_COLD_BOOT`, `HOPOS_BOOT gen=G
-stamp=<naam>` op de C906B, `HOPOS_RV_HART_UP` (de C906L uit reset),
-`HOPOS_HOP_START`, `HOP_UP` en `HOPOS_FLIP_SETTLED`. De TCP-console valt
-weg met de sprong en komt terug na DHCP; wat ertussen gebeurt staat alleen
-op de UART (er is op riscv64 nog geen zwarte doos).
-
-Wat alleen het ijzer bewijst: de trampoline op de C906 (`th.dcache.ciall`
-en `th.icache.iall` vóór en na de kopie), de C906L die uit een reset komt
-die de oude kern vasthield, de DW-watchdog die doorloopt over de sprong
-(de oude kern aait vlak ervoor, de nieuwe wapent hem meteen als
-boot-guard), en een node waarvan de pool vol is: de bundel (10,7 MB) moet
-eerst in een partitie passen, dus haal jobs weg als Hop "out of memory"
-meldt. Faalt de nieuwe kern vóór zijn console, dan helpt alleen de
-watchdog of de stroom, en de kaart start de oude kern.
-
 ## Niet gedaan
 
 - **Hop op de LicheeRV, op ijzer**: sinds 3.0.1 bakt de release Hop
@@ -452,9 +418,11 @@ watchdog of de stroom, en de kaart start de oude kern.
   bewaart sinds 02-10 f0..f31 en `fcsr`, en de kill-tick is op een gedeeld
   hart de tijdschijf (10 ms), de enige preemptie in HopOS
   (`tools/qemu-riscv-test-share.sh`).
-- De warme kern-flip op riscv64: de switch-code draait uit het kern-image
-  (op arm64 staat een kopie in de plan-regio), dus `cage_riscv::adopt` weigert
-  en de flip is alleen koud. Een zwarte doos voor riscv64 ook niet.
+- De kern-flip op riscv64: de switch-code draait uit het kern-image (op
+  arm64 staat een kopie in de plan-regio), dus `cage_riscv::adopt` weigert,
+  en er is geen koude flip meer (01-11). De haak weigert vóór de 202; de
+  trampoline in machine mode ging eruit op 07-11 (F2, docs/flip.md). Een
+  zwarte doos voor riscv64 ook niet.
 - De LicheeRV: slapen in de switcher (de C906B droeg in Go twee weken
   `wfi`; een soak met deze switcher, dan een slaapgrens in `app_hart`), en een SD-driver (dan `hopos.cfg` naast
   `fip.bin` in plaats van in het image).

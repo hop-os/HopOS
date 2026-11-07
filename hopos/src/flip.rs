@@ -33,10 +33,9 @@
 //! 3. De flip-taak ([`start`]) wacht even, zodat het antwoord op de FLIP
 //!    Hop nog bereikt, en vangt dan, in deze volgorde: hopfs vastleggen en
 //!    dicht, de USB stil, de bewoners en de lease. Dan het handoff-blob, de
-//!    handoff in de feitenpagina, de recorder op "springen", en de sprong
-//!    (`cpu::el2::chain::chain`) met x0 = de feitenpagina. Na de 202 is er
-//!    geen weg terug (§13.7): wat hier misgaat, is `HOPOS_FATAL` en de
-//!    koude boot.
+//!    handoff in de feitenpagina, en de sprong (`cpu::el2::chain::chain`)
+//!    met x0 = de feitenpagina. Na de 202 is er geen weg terug (§13.7): wat
+//!    hier misgaat, is `HOPOS_FATAL` en de koude boot.
 //! 4. De nieuwe kern komt door dezelfde ingang als bij stroom aan, en
 //!    [`facts`] leest in `kmain` de feitenpagina (O6). Dan [`land`] als
 //!    eerste in `setup`. Een overdracht is
@@ -44,14 +43,19 @@
 //!    aan zijn onderdeel. Een stuk dat niet terugkomt, is `HOPOS_FATAL`.
 //!    Een kern die niet tot een luisterend net komt, vangt de ene guard van
 //!    de watchdog (`kern::watchdog::GUARD_SECS`), net als bij elke boot;
-//!    [`settle`] ruimt na het net de recorder op.
+//!    [`settle`] meldt het net.
+//!
+//! Wat een kern die stierf als laatste zei, staat in de zwarte doos (de
+//! console-ring, `conport`), niet in een eigen spoor van de flip (F1,
+//! 07-11): vóór de 202 is een fout een weigering, erna `HOPOS_FATAL`.
 //!
 //! De adressen zijn die van het board (`vboard::slots::FLIP_*`): de
-//! staging, de recorder, de trampoline en het blob liggen buiten het
-//! kern-RAM en buiten de pool. Het koude adres is het linkadres van het
-//! board, behalve op UEFI: daar is de kern een PIE die de firmware ergens
-//! neerlegde, en gaat de nieuwe kern op precies die basis (`__efi_head`),
-//! binnen de maat die de firmware toen gaf.
+//! staging, de trampoline en het blob liggen buiten de pool, de staging en
+//! het blob ook buiten het kern-RAM (de trampoline op de Radxa en de M4
+//! niet: de bovenste pagina ervan, buiten de heap). Het koude adres is het
+//! linkadres van het board, behalve op UEFI: daar is de kern een PIE die de
+//! firmware ergens neerlegde, en gaat de nieuwe kern op precies die basis
+//! (`__efi_head`), binnen de maat die de firmware toen gaf.
 //!
 //! De flip heeft ÉÉN trigger: `PrivOp::FLIP` van Hop (`POST /flip` achter
 //! dezelfde HMAC als een jobspec). Alleen warm (Derek, 01-11): een bundel
@@ -84,13 +88,11 @@ use cpu::println;
 use dev::Pa;
 use executor::Executor;
 use kern::cage::PhysMem;
-use kern::kernflip::{self, Bundle, FLIP_ABI, FlipPlan, HANDOFF_TAIL, Handoff, Stage};
+use kern::kernflip::{self, Bundle, FLIP_ABI, FlipPlan, HANDOFF_TAIL, Handoff};
 use kern::slots::{Reply, Request, Response, SlotState};
 use kern::system::FlipBundle;
 use sync::{Local, Signal};
-use vboard::slots::{
-    BOOT_SCRATCH_PA, FLIP_RECORDER_PA, FLIP_TRAMP_PA, STAGE_HDR_PA, STAGE_MAX, STAGE_PA,
-};
+use vboard::slots::{BOOT_SCRATCH_PA, FLIP_TRAMP_PA, STAGE_HDR_PA, STAGE_MAX, STAGE_PA};
 
 /// Het handoff-blob: direct onder het staging-maatwoord, op elk board.
 const FLIP_HANDOFF_PA: u64 = abi::layout::flip_handoff_pa(STAGE_HDR_PA);
@@ -100,12 +102,17 @@ const FLIP_HANDOFF_PA: u64 = abi::layout::flip_handoff_pa(STAGE_HDR_PA);
 const FACTS_PA: u64 = abi::layout::facts_pa(BOOT_SCRATCH_PA);
 
 // De poort van `cpu::boot::_start` (het linkcontract): een core met dit
-// adres in x0 komt uit een sprong en mag door.
+// adres in x0 komt uit een sprong en mag door. En de trampoline: waar die
+// in de kern-RAM ligt (de Radxa, de M4), toetst het linkscript dat de heap
+// ervoor ophoudt.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(
     ".globl __hopos_facts",
     ".set __hopos_facts, {facts}",
+    ".globl __hopos_flip_tramp",
+    ".set __hopos_flip_tramp, {tramp}",
     facts = const FACTS_PA,
+    tramp = const FLIP_TRAMP_PA,
 );
 
 // Het blob van de kern en de plek van het board zijn even groot: een
@@ -172,7 +179,6 @@ static REPLY: Reply = Reply::new();
 fn plan() -> FlipPlan {
     FlipPlan {
         facts_pa: FACTS_PA,
-        stage_pa: FLIP_RECORDER_PA,
         handoff_pa: FLIP_HANDOFF_PA,
     }
 }
@@ -311,11 +317,7 @@ pub(crate) struct Landing {
 /// machine komt koud terug.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn land() -> Option<Landing> {
-    let (mut mem, p) = (DevMem, plan());
     let handoff = HANDOFF.load(Relaxed);
-    if handoff != 0 {
-        kernflip::mark_early_boot(&mut mem, &p);
-    }
     // De kale vector van de trampoline: een fault tijdens de kopie of in de
     // eerste stappen van de nieuwe kern (Go 01-09). Na de reset komt de
     // oude kern koud terug (het blob dat de sprong achterliet is dan oud);
@@ -325,12 +327,8 @@ pub(crate) fn land() -> Option<Landing> {
             "flip: the jump faulted before the new kernel had vectors: ESR {esr:#x} ELR {elr:#x} FAR {far:#x} HOPOS_FLIP_TRAP"
         );
     }
-    match kernflip::adopted(&mut mem, &p, handoff) {
-        Ok(Some(h)) => Some(landed(h)),
-        Ok(None) => {
-            report_cold(&mut mem, &p);
-            None
-        }
+    match kernflip::adopted(&mut DevMem, &plan(), handoff) {
+        Ok(h) => h.map(landed),
         Err(e) => cpu::fatal!(
             "flip: the handoff blob does not decode: {e}; resetting cold HOPOS_FLIP_BLOB_BAD"
         ),
@@ -354,35 +352,14 @@ fn landed(h: Handoff) -> Landing {
     }
 }
 
-/// Een koude boot vertelt wat een eerdere flip achterliet: de laatste
-/// poging die niet landde, en de lopende stand als de machine midden in
-/// een flip omviel.
-fn report_cold(mem: &mut DevMem, p: &FlipPlan) {
-    if let Some((s, g)) = kernflip::take_archived(mem, p) {
-        println!(
-            "flip: an earlier flip (generation {g}) stopped at: {} HOPOS_FLIP_ARCHIVED",
-            s.describe()
-        );
-    }
-    if let Some((s, g)) = kernflip::take_last_flip(mem, p) {
-        println!(
-            "flip: the last flip (generation {g}) ended cold at: {} HOPOS_FLIP_LAST",
-            s.describe()
-        );
-    }
-}
-
 /// Na een landing: zodra het net luistert (`net::NET_READY`: lease,
-/// uplink, stack en de system-listener) gaat de vluchtrecorder leeg, want
-/// een latere koude boot is dan geen mislukte flip. Komt het net niet, dan
-/// wacht dit voorgoed en reset de ene guard van de watchdog de node
-/// (docs/sequence-hopos.md §14.1 O1); tot 01-11 had de flip daarvoor een
-/// eigen guard met een eigen klok.
+/// uplink, stack en de system-listener) is de flip binnen. Komt het net
+/// niet, dan wacht dit voorgoed en reset de ene guard van de watchdog de
+/// node (docs/sequence-hopos.md §14.1 O1); tot 01-11 had de flip daarvoor
+/// een eigen guard met een eigen klok.
 async fn settle() {
     crate::net::NET_READY.wait().await;
-    let (generation, mut mem, p) = (generation(), DevMem, plan());
-    kernflip::stage(&mut mem, &p, Stage::NetUp, generation);
-    let _ = kernflip::take_last_flip(&mut mem, &p);
+    let generation = generation();
     println!("flip: generation {generation} settled, net up HOPOS_FLIP_SETTLED");
 }
 
@@ -481,19 +458,12 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
         return Err(too_large(flat, room));
     }
     let src = stage_slot(flat)?;
-    let generation = generation() + 1;
-    let (mut mem, p) = (DevMem, plan());
-    kernflip::archive_stage(&mut mem, &p, generation);
-    kernflip::stage(&mut mem, &p, Stage::Fetched, generation);
-    kernflip::stage(&mut mem, &p, Stage::BundleOk, generation);
-    let segs = kernflip::flatten(&bundle, &mut mem, src)?;
-    kernflip::stage(&mut mem, &p, Stage::Placed, generation);
+    let segs = kernflip::flatten(&bundle, &mut DevMem, src)?;
     let delta = base.wrapping_sub(bundle.link_load);
     let relocs = chain::relocate(Pa(src), flat, bundle.relocs(), delta).map_err(|e| {
         println!("flip: {e} HOPOS_FLIP_RELOC");
         refuse("relocation", kern::Error::Corrupt { at: 0 })
     })?;
-    kernflip::stage(&mut mem, &p, Stage::Rebased, generation);
     // De config gaat mee: het venster in het image (`board::cfgwin`) is
     // het configbestand van de node, en de nieuwe kern gaat over dit image
     // heen. Een bundel met een gevuld venster (`CFG=` van
@@ -582,12 +552,7 @@ fn stage_slot(flat: u64) -> Result<u64, Refused> {
 /// door de guard. Zonder geïnstalleerde kopie (geen slots op dit board) is
 /// er niets te adopteren en geldt elke som.
 fn check_switch_code(bundle: &Bundle<'_>) -> Result<(), Refused> {
-    let Some(theirs) = bundle.switch_sum else {
-        return Err(refuse(
-            "bundle carries no switch code sum",
-            kern::Error::Version { have: 0, want: 2 },
-        ));
-    };
+    let theirs = bundle.switch_sum;
     let Some(ours) = crate::slots::os_plan()
         .ok()
         .and_then(|p| cpu::el2::installed_hash(&p))
@@ -615,13 +580,13 @@ pub(crate) fn start(exec: &'static Executor, landed: bool) {
         println!("flip: task not spawned: {e:?} HOPOS_FLIP_SPAWN");
     }
     if landed && let Err(e) = exec.spawn(settle()) {
-        println!("flip: settle not spawned: {e:?}, the recorder stays HOPOS_FLIP_SPAWN");
+        println!("flip: settle not spawned: {e:?} HOPOS_FLIP_SPAWN");
     }
 }
 
 /// De flip-taak: wacht op een klaargelegde flip en springt. Na de 202 is
 /// er geen weg terug (§13.7): een vangst of sprong die faalt, is
-/// `HOPOS_FATAL`, en de koude boot meldt de stap (`HOPOS_FLIP_LAST`).
+/// `HOPOS_FATAL`, en de watchdog brengt de node koud terug.
 async fn run(exec: &'static Executor) {
     loop {
         BELL.wait().await;
@@ -719,7 +684,6 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     // Koud of warm: het blob zegt het, de rest van de weg is dezelfde.
     let generation = h.generation;
     let (mut mem, fp) = (DevMem, plan());
-    kernflip::stage(&mut mem, &fp, Stage::Captured, generation);
     let base = image::base();
     let blob = match kernflip::encode(h, HANDOFF_TAIL) {
         Ok(b) => b,
@@ -728,7 +692,6 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
     mem.clear(FLIP_HANDOFF_PA, FLIP_HANDOFF_LEN);
     mem.copy_in(FLIP_HANDOFF_PA, &blob);
     kernflip::hand_over(&mut mem, &fp, FLIP_HANDOFF_PA);
-    kernflip::stage(&mut mem, &fp, Stage::Handoff, generation);
     println!(
         "flip: {} KiB to {base:#x}, {} resident(s) and a {} B handoff, jumping to {:#x} HOPOS_FLIP_JUMP gen={generation}",
         p.len >> 10,
@@ -736,15 +699,14 @@ fn handoff_and_jump(p: Prepared, h: &Handoff) -> JumpError {
         blob.len(),
         p.entry
     );
-    kernflip::stage(&mut mem, &fp, Stage::Jumping, generation);
     let j = jump_of(&p);
     // SAFETY: dit is de flip-taak op de OS-core, en na de sprong hoeft hier
     // niets meer te gebeuren. De staging draagt op `p.src` het complete
     // beeld van een bundel waarvan de som getoetst is (`prepare`),
     // gerelokeerd naar het koude adres; niemand schrijft er nog in (de
     // firmware of QEMU legde er alleen bij de boot iets neer, en dat ligt
-    // ernaast, `kernflip::stage_slot`). Het blob, de feitenpagina en de
-    // recorder zijn net naar DRAM geveegd; hopfs is vastgelegd en dicht. De
+    // ernaast, `kernflip::stage_slot`). Het blob en de feitenpagina zijn
+    // net naar DRAM geveegd; hopfs is vastgelegd en dicht. De
     // app-cores draaien in hun partities en in de switch-code in de
     // plan-regio, nooit in het kern-RAM of het kern-beeld dat de trampoline
     // veegt en overschrijft.

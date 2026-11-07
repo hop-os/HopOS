@@ -32,11 +32,9 @@ pub const NODE_CTRL_PA: u64 = ADMIN.base.0;
 /// De kooi-regio: 1 MB verder, blok 0 en de ctx-blokken van de cores
 /// (`abi::layout::cage_len`). Wat per slot is, komt uit de pool.
 pub const CAGE_PA: u64 = ADMIN.base.0 + 0x10_0000;
-/// De vluchtrecorder van de kern-flip: buiten het image, want iBoot legt
-/// het bootobject bij élke boot terug over het begin van het venster
-/// (GEMETEN 01-09: een spoor op de boot-scratch wiste zichzelf).
-pub const FLIP_SCRATCH_PA: u64 = ADMIN.base.0 + 0xc0_0000;
-/// De console-zwarte-doos, 32 KB, naast de recorder en BUITEN de
+/// De console-zwarte-doos, 32 KB: buiten het image, want iBoot legt het
+/// bootobject bij élke boot terug over het begin van het venster (GEMETEN
+/// 01-09: een spoor op de boot-scratch wiste zichzelf), en BUITEN de
 /// kooi-regio (Go 06-09: een doos die 256 bytes de kooi in liep, schreef
 /// consoletekst over de vectoren van de app-cores).
 pub const BLACK_BOX: Region = Region::new(ADMIN.base.0 + 0xc0_8000, 32 << 10);
@@ -63,8 +61,7 @@ const _: () = {
     assert!(STAGE_MAGIC_PA + 8 <= STAGE_PA);
     let cores = abi::layout::CORES_MAX - 1;
     assert!(NODE_CTRL_PA + abi::layout::node_ctrl_len(cores) <= CAGE_PA);
-    assert!(CAGE_PA + abi::layout::cage_len(cores) <= FLIP_SCRATCH_PA);
-    assert!(FLIP_SCRATCH_PA + 8 <= BLACK_BOX.base);
+    assert!(CAGE_PA + abi::layout::cage_len(cores) <= BLACK_BOX.base);
     assert!(BLACK_BOX.base + BLACK_BOX.size <= ADMIN.base.0 + ADMIN.size);
     assert!(CAGE_PA.is_multiple_of(2048));
 };
@@ -77,12 +74,14 @@ const _: () = {
 pub const FLIP_LINK_BASE: u64 = RAM_BASE;
 /// Geen PIE.
 pub const FLIP_PIE: bool = false;
-/// De trampoline: de bovenste pagina van de kern-RAM.
+/// De trampoline: de bovenste pagina van de kern-RAM, buiten de heap
+/// (`hopos/link-apple.ld` laat de heap een pagina eerder ophouden en toetst
+/// dat tegen dit adres; F5, 07-11). Niet op de boot-scratch zoals op de
+/// andere boards: daar legt iBoot het bootobject terug, en de kale vector
+/// van de trampoline moet een reset overleven (`chain::take_trap`).
 pub const FLIP_TRAMP_PA: u64 = crate::KERN_RAM.base.0 + crate::KERN_RAM.size - 0x1000;
 /// Het beeld blijft onder de trampoline.
 pub const FLIP_IMAGE_END: u64 = FLIP_TRAMP_PA;
-/// De vluchtrecorder.
-pub const FLIP_RECORDER_PA: u64 = FLIP_SCRATCH_PA;
 const _: () = assert!(
     abi::layout::flip_handoff_pa(STAGE_HDR_PA) >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN
 );
@@ -234,7 +233,6 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         node_ctrl_pa: NODE_CTRL_PA,
         cage_pa: CAGE_PA,
         boot_scratch_pa: BOOT_SCRATCH_PA,
-        flip_scratch_pa: FLIP_SCRATCH_PA,
         black_box: BLACK_BOX,
         net_dma_pa: crate::NET_DMA.base.0,
         ram_base: crate::DRAM_BASE,
@@ -311,7 +309,6 @@ mod tests {
             node_ctrl_pa: NODE_CTRL_PA,
             cage_pa: CAGE_PA,
             boot_scratch_pa: BOOT_SCRATCH_PA,
-            flip_scratch_pa: FLIP_SCRATCH_PA,
             black_box: BLACK_BOX,
             net_dma_pa: crate::NET_DMA.base.0,
             ram_base: crate::DRAM_BASE,

@@ -116,8 +116,8 @@ mod imp {
 ///    (`map::DTB_PA`), buiten de kern-RAM en de pool, waar niemand schrijft;
 ///    `hopos/src/flip.rs` toetst vóór de sprong dat hij er nog staat. De
 ///    `dc ivac` van stap 3 raakt op een flip alleen schone regels: de
-///    trampoline veegde de kern-RAM, en de pagina, het blob, de staging en
-///    de recorder zijn vóór de sprong naar DRAM geduwd.
+///    trampoline veegde de kern-RAM, en de pagina, het blob en de staging
+///    zijn vóór de sprong naar DRAM geduwd.
 ///
 /// CPUECTLR_EL1 (SMPEN) wordt NIET aangeraakt: de EEPROM-bootloader van
 /// 2026-05 brengt een BL31 (v2.6-240) mee die EL2 er geen toegang meer toe

@@ -2,7 +2,13 @@
 
 Alles over de Pi 4 (BCM2711) en de Pi 5 (BCM2712) hieronder is op de host
 getest en bouwt voor het target; de Pi 4-kern boot bovendien op QEMU `raspi4b` tot de
-executor-tik. Niets ervan heeft in v3 op ijzer gedraaid. De metingen
+executor-tik. Op ijzer (07-11, rc7 en de fixes van rc8): de Pi 5 en de Pi 4
+(8 GB, rev 1.5) boten koud en flippen warm, met Hop door de flip heen. De
+Pi 4 vroeg twee dingen die QEMU niet zag: de kern zet GPIO14/15 zelf op de
+PL011 (ALT0) en de baud uit de klok (de firmware laat de pins op de
+mini-UART, ook met `disable-bt`), en de GENET houdt zijn MAC in soft reset
+met lokale loopback tot de link er is (zonder PHY-klok is een UMAC-toegang
+een SError). De metingen
 (07-07 tot 21-09) staan in het commentaar van de code; deze checklist zegt
 per stap wat de console moet tonen en wat een afwijking betekent.
 

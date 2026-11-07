@@ -81,10 +81,11 @@ fn nic_ack() {
     NIC_ACK.ack();
 }
 
-// SAFETY: 0xFE20_1000 is de PL011 van de BCM2711 en ligt in het
-// Device-venster van de vaste tabel (0xFC00_0000 tot 4 GB). De UART-klok is
-// 48 MHz (de firmware-standaard `init_uart_clock`).
-static UART: Pl011 = unsafe { Pl011::new(UART0) }.with_clock(48_000_000);
+// De UART-klok is 48 MHz (de firmware-standaard `init_uart_clock`).
+static UART: Pl011 =
+    // SAFETY: 0xFE20_1000 is de PL011 van de BCM2711 en ligt in het
+    // Device-venster van de vaste tabel (0xFC00_0000 tot 4 GB).
+    unsafe { Pl011::new(UART0) }.with_clock(48_000_000);
 
 // SAFETY: de GIC-400 van de BCM2711, in hetzelfde Device-venster.
 static GIC400: Gic = unsafe { Gic::new(GIC.add(0x1000), GIC.add(0x2000)) };

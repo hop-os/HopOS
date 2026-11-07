@@ -1914,3 +1914,119 @@ inzoomen.
 Per element: wat willen we bereiken, wat is de kleinste vorm, en hoeveel
 regels kost het. Volgorde: **de flip**, dan het hok (slots en kooi), het
 netwerk, opslag, de console, meten, en de rest van §14.2.
+
+## 15. Inzoomen: de besluiten (07-11)
+
+Na v3.2.0-rc5 (5f4179b, qemu-all 33 van 33), vóór v3.2.0: per element één
+kaart (wat willen we, wat staat er, wat kan weg), Derek beslist per punt.
+Alles wordt daarna in één keer gebouwd en getoetst, dan rc6 op ijzer, dan
+v3.2.0. Meegenomen: wat er nog staat uit de leesreview van Codex
+(1 november, gelezen tegen 4461670; de rest daarvan is gedaan door de
+agents van §14.8).
+
+### 15.1 De flip
+
+Stand: `hopos/src/flip.rs` 451 regels code (was 1.042), `kern/src/kernflip.rs`
+596, `cpu/src/el2/chain.rs` 382, `board/uefi/src/flip.rs` 194. Doel: kern B
+neemt over wat leeft (hokken, volumes, lease, klok), de rest is een gewone
+boot; na de 202 is elke fout fataal.
+
+| # | Besluit (Derek, 07-11: ja op alle vijf) |
+| --- | --- |
+| F1 | De vluchtrecorder weg (`Stage`, `stage`, `archive_stage`, `take_last_flip`, `take_archived`, `mark_early_boot`, `FLIP_RECORDER_PA` per board en hun aanroepen). De zwarte doos (de console-ring die een reset overleeft) zegt wat kern B als laatste zei; de stappen vóór de 202 zijn een weigering en geen dood. |
+| F2 | De M-mode-trampoline van riscv64 in `cpu/src/el2/chain.rs` weg: riscv flipt niet (geen extra code voor riscv, 01-11). |
+| F3 | Bundelvorm 1 (`BUNDLE_HEAD` 56) weg: zo'n bundel komt van 3.0.x en valt al op `FLIP_ABI`. |
+| F4 | Hop: de `cold`-vlag uit de flip-API (`api/src/node.rs`); er is geen koude flip, de parser weigert een onbekend veld. |
+| F5 | Radxa en M4: de trampoline op een vaste pagina, niet op de bovenste heap-pagina (de heap één pagina korter), zoals `FLIP_TRAMP_PA` op de andere boards. |
+
+Gehouden: de toets van de switch-code, `Jump::check` vóór de 202, de
+500 ms tot de sprong, de lease in het blob, de feitenpagina en de
+adressen per board. Het risico zit in het ijzer, niet in de code: de ene
+ingang is alleen op QEMU bewezen. De ronde van rc6 doet per board een
+koude boot en één warme flip.
+
+### 15.2 Het hok
+
+Stand: ~9.500 regels code. kern 2.569 (de lifecycle-actor `slots.rs`
+1.297, partities, core-plaatsing, kooi-geheugen, grants), hopos 2.575 (de
+board-lijm en de supervisor van Hop `slots.rs` 944, `kooi.rs` 717,
+`cage.rs`, `cage_riscv.rs`, `glue.rs`), cpu arm 2.851 (`switch.rs` 985,
+`oscore.rs` 1.074, dispatch, stage-2, de bewonerslijst), cpu riscv 1.492
+(switcher 875, OS-core 617). Doel: een app in een hok, op een core die
+gedeeld mag worden; hard stoppen; geen maximum aantal slots.
+
+| # | Besluit (Derek, 07-11: ja op alle drie) |
+| --- | --- |
+| K1 | De OS-core-rotatie op riscv64 weg (`cpu/src/riscv/oscore.rs` en de riscv-tak in de lijm). Geen riscv-board gebruikt hem: de LicheeRV zet Hop op het app-hart (`sharegroup=hop`). De QEMU-ring `riscv-hop` zet Hop dan ook op het app-hart. |
+| K2 | Het herstel van de registers één keer in de arm-assembly (`oscore.rs` en `switch.rs` deelden blokken van 35 en 19 gelijke regels): één fragment, offsets uit `abi::layout`. |
+| K3 | `cage_riscv.rs` rekent met `abi::checksum::Fnv64` in plaats van een eigen FNV. |
+
+Gehouden: de OS-core-rotatie op arm (Pi 4, Pi 5, Radxa: Hop naast de kern
+houdt 3 van 4 cores vrij), het kooi-geheugen en de VMID bij de plaatsing
+(de prijs van geen maximum), de supervisor van Hop (een vallende Hop is
+al fataal; hij doet alleen `HOP_RESTART`), de grants (gui). Toetsen in
+rc6: de riscv-ringen (K1), de arm- en VHE-ringen (K2), op ijzer de Pi
+(Hop op de OS-core) en de LicheeRV.
+
+### 15.3 Het netwerk
+
+Stand: `net/` 2.489 regels code (switch, NAT, conntrack, pomp, ringen),
+`hopos/src/net.rs` met `input.rs` 1.075 (lease, node-stack, keeper),
+`driver/nic` 5.007 (zeven drivers), applib appnet en net 1.313,
+`applibhttp` 410. Doel: de node aan het LAN, elk hok erachter met NAT en
+gepubliceerde poorten, apps die zelf TCP en HTTP doen. Het plafond zit
+bewust bij de OS-core (`docs/apps.md`).
+
+| # | Besluit (Derek, 07-11: ja op alle vijf) |
+| --- | --- |
+| N1 | Hop (`agentd-hopos`): het park krijgt de twee fixes van applibhttp uit rc4: met alle werkers bezet wacht de acceptor op een bel in plaats van elke 5 ms (`BUSY_POLL` weg), en leegt hij intussen `back`, zodat een werker geen goede keep-alive-verbinding meer sluit. Hop blijft een eigen park houden (`freed(i)` voor de herstart, `none_free()`); het commentaar dat "geen werkernummer" als reden noemde, gaat recht. |
+| N2 | `maybe_compact` en `high_water` uit de conntrack (`net/src/flows.rs`, de aanroepen in `nat.rs`): de functie compacteerde niets, het veld had geen lezer. |
+| N3 | `net::Stats::host_tx_drops` weg: gedrukt, nooit opgehoogd. |
+| N4 | De lus om DHCP heen weg: één client zonder termijn, die zelf opnieuw zendt (leandhcp: vaste rondes van 3 s, `ROUND_WINDOW`), tot er een lease is; de boot-guard van 120 s is het einde. |
+| N5 | Gehouden: de keeper houdt na een verlopen lease het adres en blijft rebinden (`HOPOS_DHCP_RETRY`). Een DHCP-storing langer dan de lease mag niet elke node rebooten; een NAK of een ander adres blijft een reset. |
+
+Gehouden: de drivers (de `dsb` per frame in tg3 bewust), applibhttp, de
+conntrack zonder grens per flow.
+
+### 15.4 Opslag
+
+Stand: hopfs 1.294 regels code, de bestandscalls en de actor (`rpc.rs`)
+953, de store-ops 726, `hopos/src/storage.rs` 165, blkdev 569, NVMe
+1.537, virtio-blk 447.
+
+| # | Besluit (Derek, 07-11: ja) |
+| --- | --- |
+| O1 | `LIFE_TICK` weg: een verbinding van een slot wacht op een stopbel per levensduur (`sync::Stop`, meerdere wachters) in plaats van elke 100 ms te kijken of haar levensduur nog leeft (`Watched` in `kern/src/system.rs`, `kern/src/store.rs`). |
+| O2 | `Fs::list_n` weg: de toets gaat via het echte `list_into`. |
+
+Gehouden: de commit van de boom elke 10 s naast `OP_SYNC` (zoals de
+writeback van Linux), de store-ops als kopie en niet als sync.
+
+### 15.5 Console
+
+Af: één ring (`kern/src/conport.rs` 218, `hopos/src/conport.rs` 103) met
+drie lezers (UART, tcp/5555, `NEXT_LOG` 0 van Hop), die een reset
+overleeft. Geen besluiten.
+
+### 15.6 Meten
+
+| # | Besluit (Derek, 07-11: ja) |
+| --- | --- |
+| M1 | `waker(rounds seen kicks)` uit `HOPOS_TICK` en `WakerStats`: zonder schrijver, altijd 0. `rx` (de RX-kick op de M4) blijft. |
+| M2 | `tools/loc.py` telt `testutil.rs` en `*_tests.rs` als toetsen (717 regels stonden bij productie); beide tellers blijven (de bronboom, en `tools/loc` per gelinkte smaak). |
+
+Gehouden: `HOPOS_TICK` als de ene diagnoseregel van de kern (opt-in,
+`hopos.tick=1`).
+
+### 15.7 De SDK-rand (vóór de tag: erna is weghalen een breuk)
+
+| # | Besluit (Derek, 07-11: ja) |
+| --- | --- |
+| S1 | Uit applib, zonder gebruiker in Hop, stulp, meet, haasbase en de andere repos: `App::net_ready` (met zijn setter), `Ctrl::rx_door`, `Env::from_bytes`, `Nic::deferring`. `Net::resolve6` blijft (stulp). |
+| S2 | De lezers `le16`/`le32`/`le64` van abi twee keer in plaats van vier: één set voor systemapi en store (te kort is 0), één voor hopabi en codec (te kort is een fout van de aanroeper). |
+| S3 | Achter `#[cfg(test)]`: `Queue::in_flight`, `Pump::is_holding`, `Switch::nat`, `Switch::is_attached`, `Nat::flow_count`, `HostPort::stack`. |
+
+### 15.8 Daarna
+
+Alles van 15.1 tot 15.7 in één ronde gebouwd, één gate en qemu-all, dan
+rc6 op ijzer (per board een koude boot en één warme flip), dan v3.2.0.

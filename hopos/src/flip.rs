@@ -102,17 +102,19 @@ const FLIP_HANDOFF_PA: u64 = abi::layout::flip_handoff_pa(STAGE_HDR_PA);
 const FACTS_PA: u64 = abi::layout::facts_pa(BOOT_SCRATCH_PA);
 
 // De poort van `cpu::boot::_start` (het linkcontract): een core met dit
-// adres in x0 komt uit een sprong en mag door. En de trampoline: waar die
-// in de kern-RAM ligt (de Radxa, de M4), toetst het linkscript dat de heap
-// ervoor ophoudt.
+// adres in x0 komt uit een sprong en mag door. En de trampoline, als
+// afstand tot het koude linkadres: waar die in de kern-RAM ligt (de Radxa,
+// de M4), toetst het linkscript dat de heap ervoor ophoudt, ook in de
+// schaduwlink van image/flip-bundle.sh, die het beeld verschuift en de
+// trampoline niet.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(
     ".globl __hopos_facts",
     ".set __hopos_facts, {facts}",
-    ".globl __hopos_flip_tramp",
-    ".set __hopos_flip_tramp, {tramp}",
+    ".globl __hopos_flip_tramp_off",
+    ".set __hopos_flip_tramp_off, {tramp}",
     facts = const FACTS_PA,
-    tramp = const FLIP_TRAMP_PA,
+    tramp = const FLIP_TRAMP_PA.wrapping_sub(vboard::slots::FLIP_LINK_BASE),
 );
 
 // Het blob van de kern en de plek van het board zijn even groot: een

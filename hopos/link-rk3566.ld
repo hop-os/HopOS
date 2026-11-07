@@ -78,6 +78,6 @@ SECTIONS
 }
 
 ASSERT(__heap_start < __heap_end, "het image loopt het structurenvenster in")
-ASSERT(__heap_end <= __hopos_flip_tramp, "de heap loopt de trampoline van de flip in")
-ASSERT(__hopos_flip_tramp + 0x1000 <= KERN_END, "de trampoline van de flip ligt buiten de kern-RAM")
+ASSERT(__heap_end <= KERN_BASE + __hopos_flip_tramp_off, "de heap loopt de trampoline van de flip in")
+ASSERT(KERN_BASE + __hopos_flip_tramp_off + 0x1000 <= KERN_END, "de trampoline van de flip ligt buiten de kern-RAM")
 ASSERT(_start == KERN_BASE, "_start moet vooraan staan: de header-branch springt erheen")

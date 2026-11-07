@@ -95,6 +95,6 @@ SECTIONS
 ASSERT(__apple_head == KERN_BASE, "de bootstub moet op offset 0 staan")
 ASSERT(_start_apple == KERN_BASE + 0x10000, "de kern begint op 0x10000")
 ASSERT(__heap_start < __heap_end, "het image loopt de DMA-regio in")
-ASSERT(__heap_end <= __hopos_flip_tramp, "de heap loopt de trampoline van de flip in")
-ASSERT(__hopos_flip_tramp + 0x1000 <= KERN_END, "de trampoline van de flip ligt buiten de kern-RAM")
+ASSERT(__heap_end <= KERN_BASE + __hopos_flip_tramp_off, "de heap loopt de trampoline van de flip in")
+ASSERT(KERN_BASE + __hopos_flip_tramp_off + 0x1000 <= KERN_END, "de trampoline van de flip ligt buiten de kern-RAM")
 ASSERT(__apple_tables % 4096 == 0, "de tabellen zijn 4 KB-gealigneerd")

@@ -291,7 +291,9 @@ Wat per board eerst te kijken is, morgen op het ijzer:
   uitvoerbare RAM buiten de pool. Die pagina is niet van de heap: het
   linkscript (`hopos/link-rk3566.ld`) laat de heap een pagina eerder
   ophouden en toetst bij het linken dat `__heap_end` niet boven de
-  trampoline komt (`__hopos_flip_tramp`, uit `hopos/src/flip.rs`). Tot 07-11
+  trampoline komt (`KERN_BASE + __hopos_flip_tramp_off`, uit
+  `hopos/src/flip.rs`: een afstand, want de schaduwlink van de bundel
+  verschuift het beeld en niet de trampoline). Tot 07-11
   (F5) was het de bovenste heap-pagina, met de hoop dat de heap hem op het
   moment van de flip niet uitdeelde. `cpu::el2::chain` staat de kern-RAM
   toe zolang het beeld de trampoline niet raakt (`FLIP_IMAGE_END`).

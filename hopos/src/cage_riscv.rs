@@ -143,6 +143,19 @@ impl Rv {
 /// boot staan, en elke plaatsing weigerde met "still live").
 pub(crate) fn new(plan: Plan) -> Result<SlotCage, Error> {
     let base = plan.vec_base_pa();
+    // Het sched-blok van de OS-core (core 0) ook: zijn rotatie leest de
+    // bewonerslijst (`SCHED_LIST_PA`) en de lengte, en verse DRAM is geen
+    // nul, zoals arm64 alle sched-blokken wist (`cpu::el2::dispatch`). De
+    // LicheeRV (07-11): rommel van een vorige boot als lijst, en de kern
+    // viel in zijn eerste slaap op een load van 0x3_4044_9505.
+    let os = plan
+        .park_mbox_pa(layout::Core::new(0).ok_or(Error::Plan(abi::Error::TooMany {
+            what: "app cores",
+            cap: layout::CORES_MAX - 1,
+        }))?)
+        .map_err(Error::Plan)?;
+    dev::clear(os, PARK_MBOX_LEN as usize);
+    dev::push(os, PARK_MBOX_LEN as usize);
     for c in 1..=plan.app_cores() {
         let core = layout::Core::new(c).ok_or(Error::Plan(abi::Error::TooMany {
             what: "app cores",

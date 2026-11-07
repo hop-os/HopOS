@@ -96,6 +96,9 @@ pub trait Soc: 'static {
 
     /// De console-UART.
     fn uart() -> &'static Pl011;
+    /// Zet de pins van de console-UART op die UART, vóór zijn `init`. De
+    /// standaard: de firmware deed het al (de Pi 5).
+    fn uart_pins() {}
     /// De GIC-400.
     fn gic() -> &'static Gic;
     /// De VideoCore-mailbox.
@@ -368,6 +371,7 @@ impl<S: Soc> Board for Raspi<S> {
     const DTB_IN_X0: bool = true;
 
     fn console(&self) -> fn(&[u8]) {
+        S::uart_pins();
         S::uart().init();
         console_write::<S>
     }

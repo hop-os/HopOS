@@ -446,14 +446,16 @@ impl Genet {
     /// wissen (valkuil 2); MIB-reset, framelengte, RX-alignment, interrupts
     /// dicht, de poort-mux naar de externe GPHY. Hierna werkt MDIO.
     pub fn reset(&mut self) -> Result {
+        // Geen lees van UMAC_CMD vóór de soft reset: de UniMAC krijgt zijn
+        // klok van de PHY, en zonder link (een koude boot) is een toegang
+        // daar een asynchrone abort (de Pi 4, 07-11: de SError die pas bij
+        // de eerste ERET naar EL1 viel). Linux raakt hem hier ook niet aan.
         let u = self.umac();
-        u.cmd.update(|c| c & !(1 << 1));
         self.stop_dma(true)?;
         dev::delay(self.now, 10_000_000);
         self.stop_dma(false)?;
         self.tx().ctrl.update(|c| c & !DMA_ENABLE_MASK);
         self.rx().ctrl.update(|c| c & !DMA_ENABLE_MASK);
-        u.cmd.update(|c| c & !1);
         let s = self.sys();
         let r = s.rbuf_flush_ctrl.read();
         s.rbuf_flush_ctrl.write(r | 2);
@@ -463,10 +465,12 @@ impl Genet {
         s.rbuf_flush_ctrl.write(0);
         dev::delay(self.now, 10_000);
 
-        u.cmd.write(0);
-        u.cmd.write((1 << 13) | (1 << 15));
+        // De MAC blijft in soft reset tot de link er is, met de lokale
+        // loopback als klok, zodat de UMAC-registers hieronder en in `init`
+        // geklokt zijn (`reset_umac` van Linux, "keep MAC in reset until PHY
+        // is up"); `adjust_link` haalt hem eruit.
+        u.cmd.write(CMD_SW_RESET | CMD_LCL_LOOP_EN);
         dev::delay(self.now, 2_000);
-        u.cmd.write(0);
 
         u.mib_ctrl.write(7);
         u.mib_ctrl.write(0);
@@ -580,7 +584,15 @@ impl Genet {
     /// ontvanger aan (`bcmgenet_mii_setup`, de `adjust_link` van Linux).
     fn adjust_link(&self, link: Link) {
         let u = self.umac();
-        u.cmd.write(cmd_for(u.cmd.read(), link) | 1 | (1 << 1));
+        let mut c = cmd_for(u.cmd.read(), link);
+        // De eerste link: de MAC uit de reset van `reset` (Linux
+        // `bcmgenet_mac_config`), en pas daarna zender en ontvanger aan.
+        if c & CMD_SW_RESET != 0 {
+            c &= !(CMD_SW_RESET | CMD_LCL_LOOP_EN);
+            u.cmd.write(c);
+            dev::delay(self.now, 2_000);
+        }
+        u.cmd.write(c | 1 | (1 << 1));
         dev::mb();
     }
 
@@ -634,6 +646,12 @@ impl Genet {
 
 /// UMAC_CMD voor een link: snelheid [3:2] (2 = 1000, 1 = 100), HD_EN bij
 /// half duplex; de rest van `cmd` blijft staan.
+/// UMAC_CMD.SW_RESET.
+const CMD_SW_RESET: u32 = 1 << 13;
+/// UMAC_CMD.LCL_LOOP_EN: de lokale loopback, ook de klok van de MAC zolang
+/// de PHY er geen geeft.
+const CMD_LCL_LOOP_EN: u32 = 1 << 15;
+
 fn cmd_for(cmd: u32, link: Link) -> u32 {
     let mut c = cmd & !((3 << 2) | (1 << 10));
     match link.mbps {

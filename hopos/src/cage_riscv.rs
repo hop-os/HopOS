@@ -24,6 +24,7 @@
 //! switcher-woord met `dev::pull`.
 
 use crate::kooi::{Built, Isa, Kooi, KooiCores, app_ram, code, err, tail_of};
+use abi::checksum::Fnv64;
 use abi::hopabi::{CTRL_IDLE_MODE, CTRL_TIMEBASE_HZ, IDLE_KICK, IDLE_YIELD};
 use abi::layout::{
     self, ABI_CTRL_OFF, ABI_MAP_PAGES, ABI_TAIL, CTX_ASID, CTX_BOOT_ARG, CTX_BOOT_PC, CTX_REGIME,
@@ -460,18 +461,17 @@ fn ring_bell(t: &AppHart) {
     }
 }
 
-/// FNV-1a over `[begin, end)` van het image (woordgewijs).
+/// De som van de switch-code (`abi::checksum::Fnv64`, zoals op arm64)
+/// over `[begin, end)` van het image, woordgewijs: vanaf `begin` naar
+/// beneden op 8, het woord waarin `end` valt nog mee.
 fn code_hash(begin: u64, end: u64) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h = Fnv64::new();
     let mut a = begin & !7;
     while a < end {
-        for b in dev::read64(Pa(a)).to_le_bytes() {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
+        h.write(&dev::read64(Pa(a)).to_le_bytes());
         a += 8;
     }
-    h
+    h.sum()
 }
 
 // De architectuur-naad van `slots.rs`: wat daar op arm64 `cpu::el2` is.

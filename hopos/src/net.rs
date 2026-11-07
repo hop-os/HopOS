@@ -159,14 +159,6 @@ const LINK_POLL: Duration = Duration::from_millis(50);
 /// zijn DHCP (eerst de link, dan de lease).
 static LINK_UP: Signal = Signal::new();
 
-/// Hoe lang één DHCP-poging mag duren. QEMU's user-net antwoordt binnen een
-/// milliseconde; een LAN-server binnen een seconde. Tien seconden is ruim
-/// genoeg voor een trage router en kort genoeg om het in de log te zien.
-const DHCP_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// De wacht tussen twee mislukte DHCP-pogingen.
-const DHCP_RETRY: Duration = Duration::from_secs(5);
-
 /// De proeflease na een verlopen lease: renew na 1 s, rebind na 2 s, op na
 /// 60 s. Een keeper daarop rebindt elke ~70 s; de eerste ACK legt de echte
 /// looptijd eroverheen.
@@ -538,7 +530,10 @@ impl Node {
             }
             None => {
                 LINK_UP.wait().await;
-                self.lease().await
+                let Some(l) = self.lease().await else {
+                    return;
+                };
+                l
             }
         };
         set_uplink(&lease, mac).await;
@@ -596,46 +591,49 @@ impl Node {
             .await;
     }
 
-    /// Haalt een lease, en blijft het proberen: een node zonder adres kan
-    /// niets, maar de rest van de kern draait door. Met het moment van het
-    /// REQUEST (ns sinds boot), waar de termijnen van de lease van tellen.
-    async fn lease(&mut self) -> (Lease, u64) {
-        let mut attempt: u32 = 0;
-        loop {
-            attempt = attempt.saturating_add(1);
-            let t0 = self.exec.now();
-            match self.dhcp().await {
-                Ok((l, since)) => {
-                    let ms = self.exec.now().saturating_sub(t0) / 1_000_000;
-                    println!(
-                        "dhcp: lease {} from {}, dns {}, {} s, attempt {attempt}, {ms} ms HOPOS_DHCP_BOUND",
-                        l.cidr(),
-                        l.server,
-                        l.dns,
-                        l.lease_secs,
-                    );
-                    let since = u64::try_from(since.as_duration().as_nanos()).unwrap_or(u64::MAX);
-                    return (l, since);
-                }
-                Err(e) => {
-                    // Go: de eerste poging en daarna elke tiende, niet elke 15 s.
-                    if attempt == 1 || attempt.is_multiple_of(10) {
-                        println!("{e}, attempt {attempt}, retry in 5 s HOPOS_DHCP_FAIL");
-                    }
-                    self.exec.after(DHCP_RETRY).await;
-                }
+    /// Haalt een lease: één client zonder termijn, die zelf opnieuw vraagt
+    /// (de vaste rondes van leandhcp) tot er een lease is. Een node zonder
+    /// adres kan niets; het einde is de boot-guard van de waakhond
+    /// (`HOPOS_BOOT_GUARD_EXPIRED`), geen termijn of lus hier. Met het moment
+    /// van het REQUEST (ns sinds boot), waar de termijnen van de lease van
+    /// tellen. `None` als zenden faalde (de host-TX-ring liep vol): luid, en
+    /// ook dan is de guard het einde.
+    async fn lease(&mut self) -> Option<(Lease, u64)> {
+        let t0 = self.exec.now();
+        println!(
+            "dhcp: asking for a lease for {}, until one comes",
+            netdev::Mac(self.mac)
+        );
+        match self.dhcp().await {
+            Ok((l, since)) => {
+                let ms = self.exec.now().saturating_sub(t0) / 1_000_000;
+                println!(
+                    "dhcp: lease {} from {}, dns {}, {} s, {ms} ms HOPOS_DHCP_BOUND",
+                    l.cidr(),
+                    l.server,
+                    l.dns,
+                    l.lease_secs,
+                );
+                let since = u64::try_from(since.as_duration().as_nanos()).unwrap_or(u64::MAX);
+                Some((l, since))
+            }
+            Err(e) => {
+                println!("{e} HOPOS_DHCP_FAIL");
+                None
             }
         }
     }
 
-    /// Eén DHCP-poging over de rauwe ringen van poort 0: zonder uplink-adres
+    /// De DHCP over de rauwe ringen van poort 0: zonder uplink-adres
     /// geeft de switch alles van de draad aan ons (`KIND_UPLINK`), en wat wij
     /// als `KIND_UPLINK` schrijven gaat de draad op. Dat is Go's
     /// `hopnet.Up`-volgorde: eerst de lease, dan de stack.
     async fn dhcp(&mut self) -> leandhcp::Result<(Lease, Instant)> {
         let exec = self.exec;
         let now = || Instant::from_duration(Duration::from_nanos(exec.now()));
-        let mut c = Client::new(self.mac, now(), DHCP_TIMEOUT);
+        // Geen termijn: `Instant + Duration` verzadigt in leandhcp, dus de
+        // deadline is het einde van de tijd en elke ronde begint opnieuw.
+        let mut c = Client::new(self.mac, now(), Duration::MAX);
         loop {
             // Eén frame toevoeren en dan pollen, zoals de client vraagt.
             let fed = match self.rx.read_into(&mut self.buf) {

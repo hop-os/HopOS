@@ -10,35 +10,48 @@ een v3-board is pas klaar als het op elk gemeten punt minstens doet wat v2 deed.
 
 ## De config (alle boards)
 
-De config van een node is drie lagen uit `image/cfg`, aaneengeplakt in het
-venster van de kern, in deze volgorde; de laatste waarde van een sleutel
-wint (`fw::bootcfg::get`), een herhaalde sleutel (`hopos.init[]`) telt alle
-lagen:
+De config van een node is één bestand per smaak uit `image/cfg`, compleet
+(07-11, geen lagen meer), in het venster van de kern:
 
-| Laag | Bestand | Wat erin staat |
+| Smaak | Bestand | Wat erin staat |
 | --- | --- | --- |
-| 1, de default | `image/cfg/default.cfg` | voor elke node: `hopos.cluster=hopos`, `hopos.insecure=1` en `hopos.console=1` (open op het eigen LAN), `hopos.cages=on`, `hopos.storage=stateless` (een device begint schoon en vergeet alles; `stateful` in een eigen laag laadt de boom van de schijf en laat Hop's staat op `/hop/` een herstart overleven; `HOPOS_FS_STATELESS` op de console zegt dat de boot leeg begon) |
-| 2, het bord | `image/cfg/<board>.cfg` (`rpi4`, `rpi5`, `radxa`, `o6n`, `altra`, `apple`, `licheerv`) | alleen wat per bord afwijkt, de plaatsing van Hop: `hopos.hop.sharegroup=system` op de Pi's en de Radxa (Hop op de OS-core naast de kern; een storm van RPC's van apps kan hem daar uithongeren), `hopos.hop.sharegroup=hop` met `hopos.hop.core-class=small` op de O6N, de Altra en de M4 (een eigen app-core, een zuinige waar het bord klassen heeft: de A520 op de O6N, een E-core op de M4; de Altra kent geen klassen), en `hop` zonder klasse op de LicheeRV (de C906L) |
-| 3, de smaak | `image/cfg/headless.cfg` of `image/cfg/headfull.cfg` | alleen init-jobs: headless geen, headfull welcome op poort 80 van de release `apps`, en de display-app als regel met een hekje |
+| zonder glas | `image/cfg/headless.cfg` | `hopos.cluster=hopos`, `hopos.insecure=1` en `hopos.console=1` (open op het eigen LAN), `hopos.cages=on`, `hopos.storage=stateless` (een device begint schoon en vergeet alles; `stateful` in een eigen regel laadt de boom van de schijf en laat Hop's staat op `/hop/` een herstart overleven; `HOPOS_FS_STATELESS` op de console zegt dat de boot leeg begon) |
+| met glas (`GUI=1`, `MEDIA=1`) | `image/cfg/headfull.cfg` | hetzelfde, plus welcome op poort 80 van de release `apps` als init-job, en de display-app als regel met een hekje; de media-smaak van de O6N is headfull |
 
-Elk image-script stapelt de drie zelf (de smaak volgt `GUI=1` of
-`MEDIA=1`), `tools/release.sh` per board en smaak, en
+Waar Hop woont, is de standaard van het board in de code (`board::Board`,
+`HOP_GROUP` en `HOP_CORE_CLASS`), niet van de config:
+
+| Board | Groep | Klasse |
+| --- | --- | --- |
+| de Pi's, de Radxa, QEMU virt (arm64 en riscv64), QEMU onder EDK2 | `system`: de OS-core naast de kern (een storm van RPC's van apps kan Hop daar uithongeren) | geen |
+| de O6N, de Altra, de M4 | `hop`: een eigen app-core | `small`: de A520 op de O6N, een E-core op de M4; de Altra kent geen klassen en neemt de eerste vrije |
+| de LicheeRV | `hop`: de C906L | geen (het bord kent geen klassen) |
+
+`hopos.hop.sharegroup` en `hopos.hop.core-class` in de config overschrijven
+dat; de regel `HOPOS_HOP_GROUP` op de console zegt waar de groep vandaan
+kwam (`the board's default` of `hopos.hop.sharegroup`), en
+`HOPOS_HOP_CLASS` de klasse.
+
+Elk image-script kiest de smaak zelf (`GUI=1` of `MEDIA=1` is headfull),
+`tools/release.sh` per board en smaak, en
 `CFG=headless|headfull sh image/flip-bundle.sh <board>` in een bundel. Een
-eigen `CFG=` is een lijst bestanden in die volgorde, bijvoorbeeld de drie
-lagen plus een eigen bestand erachter (een node buiten het eigen LAN: met
-`hopos.apikey` en `hopos.insecure=0`). `hop image --config` neemt één
-bestand: `cat default.cfg <board>.cfg <smaak>.cfg eigen.cfg >node.cfg`.
+eigen `CFG=` is een lijst bestanden, aaneengeplakt; de laatste waarde van een
+sleutel wint (`fw::bootcfg::get`), een herhaalde sleutel (`hopos.init[]`)
+telt alle bestanden. Bijvoorbeeld de smaak plus een eigen bestand erachter
+(een node buiten het eigen LAN: met `hopos.apikey` en `hopos.insecure=0`).
+`hop image --config` neemt één bestand: `cat headless.cfg eigen.cfg
+>node.cfg`.
 
 Geen `hopos.node` erin: zonder heet een node naar zijn board en de laatste
 twee bytes van zijn uplink-MAC (`rpi4-4c54`, `o6n-1a2b`; de regel
-`HOPOS_NODE_DEFAULT` op de console), zodat dezelfde lagen op elke node
-passen. De media-node heeft zijn eigen `jobs/hopos-media-o6n.cfg`.
+`HOPOS_NODE_DEFAULT` op de console), zodat dezelfde config op elke node
+past. De media-node heeft zijn eigen `jobs/hopos-media-o6n.cfg`.
 
 **Het config-venster** (`board/src/cfgwin.rs`, zoals v2 met `image/hopcfg`
 en `mkcard -cfgwindow`): elke kern draagt een venster van 16 KiB in
 `.data.hopcfg`, op een 4 KiB-grens: de kopregel `#HOPCFG1 window=16384
 len=0000000432`, de config, en `#`-regels als padding. Elk image-script zet
-`CFG=` (of de drie lagen van `image/cfg`) daarin met `image/hopcfg.py`: in
+`CFG=` (of de smaak uit `image/cfg`) daarin met `image/hopcfg.py`: in
 `kernel8.img` van de Pi's, `hopos.img` van de Radxa, `BOOTAA64.EFI` van de
 UEFI-boards, het bootobject van de M4, `monitor.bin` van de LicheeRV, en
 met `CFG=` van `image/flip-bundle.sh` in een flipbundel. Een gevuld venster
@@ -54,10 +67,11 @@ mijn.cfg --write /dev/rdiskN` schrijft de kaart in één keer, `hop image
 <img|bundel|/dev/rdiskN>` toont wat erin staat.
 
 Kanttekening: de Radxa en de LicheeRV leiden hun MAC-adres af van
-`hopos.node` (anders een vaste MAC, `HOPOS_MAC_FIXED`). De Radxa zet daarom
-`hopos.node` in de APPEND van extlinux (`NODE=`, standaard `radxa-1`); op de
-LicheeRV hoort een eigen `CFG=` met `hopos.node` of `hopos.mac` zodra er
-twee op één LAN staan.
+`hopos.node` (anders een vaste MAC, `HOPOS_MAC_FIXED`, en dus ook dezelfde
+naam). Op de Radxa zet `NODE=` `hopos.node` in de APPEND van extlinux; de
+kaart uit de release heeft geen (07-11: een vaste `radxa-1` gaf elke Radxa
+dezelfde naam). Op beide hoort een eigen `hopos.node` of `hopos.mac` (`NODE=`,
+een eigen `CFG=`, `hop image --config`) zodra er twee op één LAN staan.
 
 ## Bouwen
 
@@ -69,7 +83,7 @@ GUI=1 BOARD=o6n sh image/uefi-run.sh   # de gui-smaak (GOP); MEDIA=1 voor de VPU
 ```
 
 Op een stick: een FAT32-partitie met die boom erop (de config staat in het
-venster van `BOOTAA64.EFI`: de lagen van `image/cfg`, of `CFG=`), Secure Boot uit. Een dd-bare stick
+venster van `BOOTAA64.EFI`: de smaak uit `image/cfg`, of `CFG=`), Secure Boot uit. Een dd-bare stick
 maakt `tools/release.sh` (`hopos-o6n-headless.img.gz` en zo). Beide boards zijn het UEFI-board
 (`board-uefi`; het kernvenster van de O6N is `window-8000` op 0x8800_0000,
 dat van de Altra `window-a000` op 0xA000_0000) plus een eigen crate:
@@ -278,9 +292,9 @@ door niemand aangezet.
   `HOPOS_NVME_IRQ_DIAG`. De schijf telt in de tik onder `other=`, niet
   onder `nic=`; `queue_polls=` in `HOPOS_DISK_STATS` zegt hoe vaak de
   wachter naar de CQ keek.
-- Hop met de bordlaag `image/cfg/o6n.cfg`: `slots: Hop in the sharegroup
-  hop (hopos.hop.sharegroup) HOPOS_HOP_GROUP`, `slots: Hop prefers a small
-  core for his group (hopos.hop.core-class) HOPOS_HOP_CLASS` en
+- Hop met de standaard van het board: `slots: Hop in the sharegroup
+  hop (the board's default) HOPOS_HOP_GROUP`, `slots: Hop prefers a small
+  core for his group (the board's default) HOPOS_HOP_CLASS` en
   `HOPOS_HOP_START slot=1 core=N cpu=N ... class=small` (een A520). Een
   warme flip neemt Hop mee op zijn oude
   core (`HOPOS_HOP_RESUMED`); de nieuwe plaatsing geldt vanaf de volgende

@@ -14,12 +14,12 @@
 #                                            die er al een heeft (de snelle
 #                                            iteratie)
 #   CFG="a.cfg b.cfg" image/licheerv-agent.sh
-#                                          → een andere hopos.cfg in lagen in
-#                                            het venster van het image, de
+#                                          → een andere hopos.cfg in het
+#                                            venster van het image, de
+#                                            bestanden aaneengeplakt, de
 #                                            laatste waarde wint (standaard
-#                                            image/cfg/default.cfg,
-#                                            licheerv.cfg en headless.cfg;
-#                                            CFG= zonder pad: een leeg venster)
+#                                            image/cfg/headless.cfg; CFG=
+#                                            zonder pad: een leeg venster)
 #   STAGE=/pad/hop.elf image/licheerv-agent.sh
 #                                          → met die ELF in de kern gebakken
 #                                            als Hop: de eerste bewoner, in
@@ -107,7 +107,7 @@ ELF="$DIR/target/$TARGET/release/hopos"
 ENTRY="$(python3 -c 'import struct,sys; print(hex(struct.unpack_from("<Q", open(sys.argv[1],"rb").read(32), 24)[0]))' "$ELF")"
 [ "$ENTRY" = "$RUNADDR" ] || { echo "WEIGER: entry $ENTRY is niet RUNADDR $RUNADDR (linkscript?)" >&2; exit 1; }
 "$OBJCOPY" -O binary "$ELF" "$OUT/monitor.bin"
-CFG="${CFG-$DIR/image/cfg/default.cfg $DIR/image/cfg/licheerv.cfg $DIR/image/cfg/headless.cfg}"
+CFG="${CFG-$DIR/image/cfg/headless.cfg}"
 if [ -n "$CFG" ]; then
 	for f in $CFG; do
 		[ -f "$f" ] || { echo "config ontbreekt: $f" >&2; exit 1; }

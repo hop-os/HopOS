@@ -4,12 +4,12 @@
 # `kmutil configure-boot --raw --entry-point 2048`.
 #
 #   image/apple-m4.sh                       → target/apple-m4/hopos-apple.img
-#   CFG="a.cfg b.cfg" image/apple-m4.sh     een andere hopos.cfg in lagen in
-#                                           het venster van het image, de
+#   CFG="a.cfg b.cfg" image/apple-m4.sh     een andere hopos.cfg in het
+#                                           venster van het image, de
+#                                           bestanden aaneengeplakt, de
 #                                           laatste waarde wint (standaard
-#                                           image/cfg/default.cfg, apple.cfg
-#                                           en headless.cfg; CFG= zonder pad:
-#                                           een leeg venster)
+#                                           image/cfg/headless.cfg; CFG=
+#                                           zonder pad: een leeg venster)
 #   APP=hop image/apple-m4.sh               + Hop (../hop/hop, rol hop)
 #   image/apple/boot-cycle.sh target/apple-m4/hopos-apple.img [s]
 #                                           → via m1n1's proxy laden en starten
@@ -74,7 +74,7 @@ fi
 # De toets: het parameterblok op 0x100 ("HOPASTUB", doel, grootte, entry)
 # moet kloppen met het ELF, de stub-ingang op 0x800 moet code zijn, en
 # 0xF000 (de plek van de loader) leeg: de linker legt er niets, head.rs.
-CFG="${CFG-$DIR/image/cfg/default.cfg $DIR/image/cfg/apple.cfg $DIR/image/cfg/headless.cfg}"
+CFG="${CFG-$DIR/image/cfg/headless.cfg}"
 for f in $CFG; do
 	[ -f "$f" ] || {
 		echo "apple-m4: CFG: $f does not exist" >&2

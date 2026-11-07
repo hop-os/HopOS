@@ -327,6 +327,10 @@ impl Board for Apple {
     /// node-stack een veeg per cacheline (GEMETEN 01-10 op M10: 930 MB/s
     /// tegen 4300 app naar app).
     const HOST_RINGS: Coherence = Coherence::Hardware;
+    /// Hop op een eigen app-core (de EL2-smaak deelt de OS-core niet), en
+    /// die core een E-core.
+    const HOP_GROUP: &'static str = "hop";
+    const HOP_CORE_CLASS: Option<CoreClass> = Some(CoreClass::Small);
     /// WFE op EL1 slaapt op de M4 niet (board.go `IdleMode`, 02-09).
     const APP_IDLE_YIELD: bool = true;
 

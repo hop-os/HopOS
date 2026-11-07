@@ -10,14 +10,16 @@
 #                                        plaatst alleen Hop, 01-11 O7)
 #   APP= image/...                       zonder image (HOPOS_SLOT_NONE)
 #   HOP_DIR=pad image/...                de hop-repo (standaard ../hop/hop)
-#   CFG="a.cfg b.cfg" image/...          de config van de node in lagen
-#                                        (standaard image/cfg/default.cfg,
-#                                        radxa.cfg en headless.cfg, met
-#                                        GUI=1 headfull.cfg), in het venster
-#                                        van hopos.img (board/src/cfgwin.rs);
+#   CFG="a.cfg b.cfg" image/...          de config van de node, de bestanden
+#                                        aaneengeplakt (standaard
+#                                        image/cfg/headless.cfg, met GUI=1
+#                                        headfull.cfg), in het venster van
+#                                        hopos.img (board/src/cfgwin.rs);
 #                                        de laatste waarde wint
-#   NODE=radxa-2 image/...               een andere hopos.node in de APPEND
-#                                        (ook de bron van het MAC-adres)
+#   NODE=radxa-2 image/...               hopos.node in de APPEND (ook de
+#                                        bron van het MAC-adres); zonder
+#                                        geen APPEND, en de node heet naar
+#                                        zijn board en zijn MAC
 #   RADXA_DONOR=pad image/...            een eigen donor-boot-blok (standaard
 #                                        image/firmware/radxa/donor-boot.bin)
 #   GUI=1 image/...                      de gui-smaak (`--features gui`,
@@ -114,7 +116,7 @@ print(f"hopos.img: {len(img)} bytes, image_size {mem_end - IMAGE_BASE:#x}, entry
 PYEOF
 # De config in het venster van de kern (board/src/cfgwin.rs), zoals op elk
 # board: hij wint van hopos.cfg in de initrd en van de APPEND.
-CFG="${CFG:-$DIR/image/cfg/default.cfg $DIR/image/cfg/radxa.cfg $DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg}"
+CFG="${CFG:-$DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg}"
 for f in $CFG; do
 	[ -f "$f" ] || { echo "FOUT: CFG: $f bestaat niet" >&2; exit 1; }
 done
@@ -136,8 +138,11 @@ fi
 #    leest ze in Board::boot_param). De config staat in het venster
 #    van hopos.img (stap 2), dus hopos.cfg in de initrd blijft leeg: die is
 #    de terugval van een kern met een leeg venster. Een sleutel in het
-#    venster wint van dezelfde sleutel in de APPEND; de gedeelde config zet
-#    geen hopos.node, dus het MAC-adres komt uit die van de APPEND.
+#    venster wint van dezelfde sleutel in de APPEND. De APPEND draagt
+#    alleen NODE: de kaart uit de release heeft geen, want een vaste naam
+#    gaf elke Radxa dezelfde (07-11). Zonder hopos.node heet de node naar
+#    zijn board en zijn MAC, en die MAC is dan de vaste van net::nodemac
+#    (HOPOS_MAC_FIXED): het board heeft er geen eigen.
 : >"$OUT/hopos.cfg"
 python3 "$DIR/image/radxa-initrd.py" pack "$OUT/hopos.ird" "$OUT/hopos.cfg" \
 	${IMAGE:+"$OUT/hop.elf"}
@@ -156,7 +161,7 @@ default hopos
 label hopos
     kernel /hopos.img
     initrd /hopos.ird
-    append hopos.node=${NODE:-radxa-1}
+${NODE:+    append hopos.node=$NODE}
 EOF
 
 # 5. De donor: de bytes LBA 64..32767 van het officiële Radxa Zero 3-image,
@@ -188,7 +193,7 @@ CARD="$OUT/hopos-radxa-zero3.img"
 # 7. De proef op de kaart: mkcard -verify las hierboven de FAT terug zoals
 #    U-Boot hem leest (MBR, BPB, root, de clusterketen, LFN) en vond elk
 #    bestand en de donor zoals ze erin gingen. Hier: hopos.ird gesplitst
-#    zoals de kern hem splitst, de rol in de APPEND, en precies één venster
+#    zoals de kern hem splitst, de APPEND, en precies één venster
 #    op de hele kaart. Een fout in de container is hier rood, niet pas op de
 #    seriële console.
 RB="$OUT/readback"
@@ -212,8 +217,10 @@ elif [ -s "$RB/hop.elf" ]; then
 	echo "FOUT: er zit een image in hopos.ird terwijl APP leeg was" >&2
 	exit 1
 fi
-if ! grep -q "hopos.node=${NODE:-radxa-1}" "$OUT/extlinux.conf"; then
-	echo "FOUT: hopos.node=${NODE:-radxa-1} staat niet in de APPEND van de kaart" >&2
+# De APPEND: hopos.node=$NODE, en zonder NODE geen.
+APPEND="$(grep "^ *append" "$OUT/extlinux.conf" || true)"
+if [ "$APPEND" != "${NODE:+    append hopos.node=$NODE}" ]; then
+	echo "FOUT: de APPEND van de kaart is '$APPEND', met NODE='${NODE:-}'" >&2
 	exit 1
 fi
 # De config: precies één venster op de hele kaart, met wat erin ging.

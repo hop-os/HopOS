@@ -10,14 +10,14 @@
 #                                   de boot-regel (tools/qemu-test-flip.sh)
 #   GUI=1 image/flip-bundle.sh rpi5 de gui-smaak (de korte vorm van
 #                                   FEATURES=gui, zoals image/uefi-run.sh)
-#   CFG="a.cfg b.cfg" image/flip-bundle.sh <board>  hopos.cfg in lagen in
-#                                   het venster van de bundel
+#   CFG="a.cfg b.cfg" image/flip-bundle.sh <board>  hopos.cfg in het
+#                                   venster van de bundel
 #                                   (board/src/cfgwin.rs), op elk board, de
-#                                   laatste waarde wint; zonder CFG neemt de
-#                                   flip de config van de draaiende kern mee
-#   CFG=headless|headfull image/flip-bundle.sh <board>  de lagen van
-#                                   image/cfg: default.cfg, <board>.cfg en
-#                                   die smaak
+#                                   bestanden aaneengeplakt, de laatste
+#                                   waarde wint; zonder CFG neemt de flip
+#                                   de config van de draaiende kern mee
+#   CFG=headless|headfull image/flip-bundle.sh <board>  de config van die
+#                                   smaak uit image/cfg
 #
 # Een bundel is de kern-ELF (zonder debug-info, mét symbolen) plus een
 # HOPRELO1-staart (versie 2, kern::kernflip::Bundle) met de relocatietabel
@@ -141,7 +141,7 @@ fi
 # stonden dezelfde bytes.
 CFG="${CFG-}"
 case "$CFG" in
-headless | headfull) CFG="$DIR/image/cfg/default.cfg $DIR/image/cfg/$BOARD.cfg $DIR/image/cfg/$CFG.cfg" ;;
+headless | headfull) CFG="$DIR/image/cfg/$CFG.cfg" ;;
 esac
 if [ -n "$CFG" ]; then
 	for f in $CFG; do

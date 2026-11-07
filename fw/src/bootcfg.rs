@@ -22,9 +22,9 @@
 //! op te vertrouwen.
 //!
 //! Een enkelvoudige sleutel die vaker staat: de LAATSTE waarde wint
-//! ([`get`], 04-10). Zo is een config in lagen (image/cfg: default, het
-//! bord, de smaak, en een eigen bestand erachter) gewoon de aaneengeplakte
-//! tekst; een herhaalde sleutel (`hopos.init[]`) telt alle lagen.
+//! ([`get`], 04-10). Zo is de config van een smaak (image/cfg) met een
+//! eigen bestand erachter gewoon de aaneengeplakte tekst; een herhaalde
+//! sleutel (`hopos.init[]`) telt beide.
 //!
 //! De node heeft twee bronnen, en hun volgorde staat hier één keer
 //! ([`layered`], [`param`]): eerst de `hopos.*`-tokens van de bootargs, dan

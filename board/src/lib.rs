@@ -395,6 +395,19 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
     /// Het geheugen van Hop in bytes: 64 MiB, op een klein board minder.
     const HOP_MEM: u64 = 64 << 20;
 
+    /// Waar Hop woont zonder `hopos.hop.sharegroup` in de config (07-11):
+    /// `system`, de OS-core naast de kern (jobs met de tag system delen
+    /// hem; een storm van RPC's van apps kan Hop daar uithongeren, en
+    /// daarmee de canary en de watchdog raken). Een board met een eigen
+    /// app-core voor Hop zet `hop`, en een board waarvan de EL2-smaak de
+    /// OS-core niet deelt (Apple) moet dat.
+    const HOP_GROUP: &'static str = "system";
+
+    /// De soort core die de groep van Hop als eerste zoekt zonder
+    /// `hopos.hop.core-class` in de config: geen voorkeur, of een zuinige
+    /// waar het board klassen heeft. Op de OS-core doet hij niets.
+    const HOP_CORE_CLASS: Option<CoreClass> = None;
+
     /// Eén keer, als eerste: de UART op. Geeft de console-haak.
     fn console(&self) -> fn(&[u8]);
 

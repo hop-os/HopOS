@@ -36,8 +36,8 @@
 use core::cell::UnsafeCell;
 
 /// De maat van het venster: 16 KiB, wat de UEFI-stub van `hopos.cfg` op de
-/// ESP las. De lagen van `image/cfg` samen zijn ~1,5 KiB, de GUI-config van Go
-/// was ~9 KiB.
+/// ESP las. De config van een smaak uit `image/cfg` is hoogstens ~2 KiB, de
+/// GUI-config van Go was ~9 KiB.
 pub const SIZE: usize = 16 << 10;
 
 /// Het begin van de kopregel.

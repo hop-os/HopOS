@@ -47,7 +47,8 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       `HOPOS_SLOT_PUBLISH` voor Hop's poorten, `HOPOS_NVME_IRQ`).
 - [ ] De media met `hop image --config` op v3.0.11 (Derek; Hop blijft 3.0.8,
       de ABI is gelijk). 3.0.11 vergeet standaard: `hopos.storage=stateless`
-      in default.cfg negeert bij een koude boot het indexbestand
+      in de config (sinds 07-11 image/cfg/headless.cfg en headfull.cfg)
+      negeert bij een koude boot het indexbestand
       (`HOPOS_FS_STATELESS`); alleen de O6N-stick krijgt in zijn eigen laag
       `hopos.storage=stateful`, en een flip-landing blijft altijd stateful.
       Op ijzer te zien: de eerste koude boot van elk medium drukt

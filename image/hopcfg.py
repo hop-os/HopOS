@@ -4,9 +4,9 @@
     python3 image/hopcfg.py set  <bestand> <cfg>...  de config in het venster
     python3 image/hopcfg.py show <bestand>           de config uit het venster
 
-Meer dan één <cfg>: de lagen, aaneengeplakt in die volgorde (image/cfg:
-default.cfg, <bord>.cfg, headless.cfg of headfull.cfg, en desgewenst een
-eigen bestand erachter); de kern leest de laatste waarde van een sleutel.
+Meer dan één <cfg>: aaneengeplakt in die volgorde (de config van een smaak
+uit image/cfg, headless.cfg of headfull.cfg, met een eigen bestand
+erachter); de kern leest de laatste waarde van een sleutel.
 
 <bestand> is alles wat de kern draagt: de kern-ELF, kernel8.img, het
 arm64-Image van de Radxa, BOOTAA64.EFI, het bootobject van de M4,

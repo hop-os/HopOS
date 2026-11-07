@@ -37,8 +37,8 @@ sudo dd if=target/radxa-zero3/hopos-radxa-zero3.img of=/dev/rdiskN bs=4m
 
 Op de FAT staan `hopos.img` (de kern, met de config in zijn venster),
 `hopos.ird` (de initrd: een lege `hopos.cfg` plus `hop.elf`) en
-`extlinux/extlinux.conf`, met in de APPEND-regel
-`hopos.node=radxa-1`. Het script bouwt `agentd-hopos` uit
+`extlinux/extlinux.conf`, met een APPEND-regel `hopos.node=$NODE` als
+`NODE=` gezet is (anders geen APPEND, 07-11). Het script bouwt `agentd-hopos` uit
 `HOP_DIR` met `tools/hop-build.sh`, stript hem (19 MB naar 1,5 MB,
 30-09) en weigert een initrd boven 16 MB (`board_rk3566::INITRD_MAX`). Aan het eind leest het de kaart
 terug en vergelijkt elk bestand met wat erin ging; `FOUT` daar is een kapot
@@ -49,8 +49,10 @@ config-venster"), zoals op elk board. Drie wegen om hem te veranderen:
 herbouw met `CFG=`, `hop image` op het image of de kaart, of een sleutel in
 de APPEND-regel van `extlinux/extlinux.conf` (die blijft tekst). Let op:
 een sleutel in het venster wint van dezelfde sleutel in de APPEND
-(`Board::boot_param`); de standaardconfig zet geen `hopos.node`,
-dus die komt uit de APPEND. Een kaart met een kern zonder gevuld venster
+(`Board::boot_param`); de standaardconfig zet geen `hopos.node`, dus die
+komt uit de APPEND (`NODE=`). Zonder heet de node `radxa-0001`: de MAC is
+dan de vaste (`HOPOS_MAC_FIXED`), en een tweede Radxa op het LAN botst op
+naam en MAC; geef elke Radxa dus een eigen `NODE=` of `hopos.node`. Een kaart met een kern zonder gevuld venster
 leest `hopos.cfg` uit de initrd, zoals vóór 04-10.
 
 ## Hop als bewoner: waarom één initrd
@@ -113,7 +115,8 @@ b6-image) staat in `image/firmware/radxa/donor-boot.bin` (herkomst in de
 4. **`boot: ... EL2`.** `booti` levert op EL2 af (gemeten). EL1 geeft
    `HOPOS_BOOT_EL` en parkeren.
 5. **`fdt: N bytes at 0x7c......, bootargs "hopos.node=radxa-1",
-   hopos.cfg M bytes`.** Dit is de kopie van DTB en initrd
+   hopos.cfg M bytes`** (met `NODE=radxa-1`; zonder `NODE=` staan er de
+   bootargs die U-Boot zelf heeft). Dit is de kopie van DTB en initrd
    naar de heap; M is de config ín de container (de standaard is ~170
    bytes), niet de hele initrd. Staat er `HOPOS_RAM_CHECK_SKIPPED`, dan lag
    x0 niet in het DRAM of was de header geen FDT; noteer x0. `GIC differs

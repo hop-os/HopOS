@@ -22,7 +22,7 @@
 //! (700 MHz). Sinds 03-10 blijft de kern op de C906B, waar de FSBL hem
 //! start: alleen de PLIC van dat hart heeft de dwmac ([`GMAC_IRQ`]). Hij
 //! deelt zijn core als groep `system` (welcome en wat geen eigen core
-//! vindt), en de C906L is het app-hart van Hop (`hopos.hop.sharegroup=hop` in de bordlaag image/cfg/licheerv.cfg). De
+//! vindt), en de C906L is het app-hart van Hop (de groep `hop`, [`Board::HOP_GROUP`]). De
 //! C906L komt via het resetblok op ([`LicheeRv::start_little`]): reset
 //! vast, boot-vector zetten, reset los.
 //!
@@ -344,6 +344,9 @@ impl Board for LicheeRv {
     /// 256 MB, pool 200 MB: Hop meet er 0,5 tot 0,9 MB (03-10, slot 1 als
     /// systeemtaak), en elke MB is hier een app-MB.
     const HOP_MEM: u64 = 10 << 20;
+    /// Twee harts: Hop op zijn eigen, de C906L, en de OS-core (de C906B)
+    /// als groep `system` voor de apps. Geen klasse: het bord kent er geen.
+    const HOP_GROUP: &'static str = "hop";
 
     fn console(&self) -> fn(&[u8]) {
         console_write

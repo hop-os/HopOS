@@ -30,7 +30,8 @@
 //! Twee sleutels zijn voor de kern zelf, de plaatsing van Hop:
 //! `hopos.hop.sharegroup` (zijn groep, `HOPOS_HOP_GROUP` in de env) en
 //! `hopos.hop.core-class` ([`hop_core_class`]: de soort core die die groep
-//! als eerste krijgt).
+//! als eerste krijgt). Zonder sleutel geldt de standaard van het board
+//! (`board::Board`, `HOP_GROUP` en `HOP_CORE_CLASS`, 07-11).
 //!
 //! # Per board twee bronnen
 //!
@@ -40,8 +41,8 @@
 //! de initrd op de Radxa), en als bootargs (`Board::bootargs`: de Pi's, de
 //! Radxa, QEMU). [`NodeCfg::new`] leest ze in de volgorde van
 //! `fw::bootcfg::layered`: eerst de bootargs, dan het bestand, en de laatste
-//! waarde wint (04-10). Zo is een config in lagen (image/cfg: default, bord,
-//! smaak) gewoon de aaneengeplakte tekst, en het bestand wint nog steeds van
+//! waarde wint (04-10). Zo is een eigen regel achter de config van een
+//! smaak (image/cfg) gewoon de aaneengeplakte tekst, en het bestand wint van
 //! de bootargs (Go: `rk3566.BootParam`). Alleen QEMU, dat geen bootmedium
 //! heeft, krijgt voor Hop [`QEMU_CFG`] er nog vóór ([`NodeCfg::on_bank`],
 //! Go: `board_virt.go`). Zonder
@@ -295,7 +296,8 @@ impl fmt::Display for EnvError {
 ///
 /// # Errors
 ///
-/// De waarde zelf als het geen klasse is; `Ok(None)` zonder sleutel.
+/// De waarde zelf als het geen klasse is; `Ok(None)` zonder sleutel (dan
+/// geldt die van het board, `board::Board::HOP_CORE_CLASS`).
 pub fn hop_core_class<'a>(cfg: &NodeCfg<'a>) -> Result<Option<CoreClass>, &'a str> {
     match cfg.one("hopos.hop.core-class") {
         "" => Ok(None),
@@ -531,44 +533,42 @@ mod tests {
         assert_eq!(b.get("HOPOS_INSECURE"), Some("1"), "QEMU blijft de bank");
     }
 
-    /// De config in lagen zoals de image-scripts hem in het venster zetten
-    /// (image/cfg: default, het bord, de smaak).
-    fn layers(board: &str, flavor: &str) -> String {
-        let read = |f: &str| match f {
-            "default" => include_str!("../../image/cfg/default.cfg"),
-            "rpi4" => include_str!("../../image/cfg/rpi4.cfg"),
-            "o6n" => include_str!("../../image/cfg/o6n.cfg"),
-            "licheerv" => include_str!("../../image/cfg/licheerv.cfg"),
+    /// De config van een smaak zoals de image-scripts hem in het venster
+    /// zetten (image/cfg: headless of headfull).
+    fn flavor(name: &str) -> &'static str {
+        match name {
             "headless" => include_str!("../../image/cfg/headless.cfg"),
             _ => include_str!("../../image/cfg/headfull.cfg"),
-        };
-        format!("{}{}{}", read("default"), read(board), read(flavor))
+        }
     }
 
     #[test]
-    fn the_last_value_wins_so_the_layers_stack() {
-        let o6n = layers("o6n", "headless");
-        let cfg = NodeCfg::parse(&o6n);
-        assert_eq!(cfg.one("hopos.hop.sharegroup"), "hop");
-        assert_eq!(hop_core_class(&cfg), Ok(Some(CoreClass::Small)));
-        assert_eq!(cfg.one("hopos.cluster"), "hopos", "the default stays");
-        // Een eigen regel erachter wint van alle lagen.
-        let own = format!("{o6n}hopos.hop.sharegroup=system\nhopos.hop.core-class=big\n");
+    fn a_flavor_is_one_config_and_the_last_value_wins() {
+        let less = flavor("headless");
+        let cfg = NodeCfg::parse(less);
+        assert_eq!(cfg.one("hopos.cluster"), "hopos");
+        // De plek van Hop is van het board, niet van de smaak.
+        assert_eq!(cfg.one("hopos.hop.sharegroup"), "");
+        assert_eq!(hop_core_class(&cfg), Ok(None));
+        // Een eigen regel erachter wint.
+        let own = format!("{less}hopos.hop.sharegroup=system\nhopos.hop.core-class=big\n");
         let cfg = NodeCfg::parse(&own);
         assert_eq!(cfg.one("hopos.hop.sharegroup"), "system");
         assert_eq!(hop_core_class(&cfg), Ok(Some(CoreClass::Big)));
-        // De Pi: Hop op de OS-core, geen klasse.
-        let pi = layers("rpi4", "headless");
-        let cfg = NodeCfg::parse(&pi);
-        assert_eq!(cfg.one("hopos.hop.sharegroup"), "system");
-        assert_eq!(hop_core_class(&cfg), Ok(None));
-        let lrv = layers("licheerv", "headless");
-        assert_eq!(NodeCfg::parse(&lrv).one("hopos.hop.sharegroup"), "hop");
-        // Alleen headfull draagt init-jobs (welcome); een herhaalde sleutel
-        // telt alle lagen.
-        assert_eq!(NodeCfg::parse(&pi).all("hopos.init[]").count(), 0);
-        let full = layers("rpi4", "headfull");
-        let b = build(&NodeCfg::parse(&full), &FACTS).unwrap();
+        // Alleen headfull draagt init-jobs (welcome), en verder dezelfde
+        // sleutels als headless.
+        assert_eq!(NodeCfg::parse(less).all("hopos.init[]").count(), 0);
+        let full = NodeCfg::parse(flavor("headfull"));
+        for k in [
+            "hopos.cluster",
+            "hopos.insecure",
+            "hopos.console",
+            "hopos.cages",
+            "hopos.storage",
+        ] {
+            assert_eq!(full.one(k), NodeCfg::parse(less).one(k), "{k}");
+        }
+        let b = build(&full, &FACTS).unwrap();
         assert_eq!(b.init_jobs, 1);
         assert!(
             b.get("HOPOS_INIT_JOBS")
@@ -592,7 +592,7 @@ mod tests {
     fn the_window_with_the_shared_config_wins_from_the_cmdline() {
         // De gedeelde config zoals image/hopcfg.py hem in het venster van de
         // kern zet (board/src/cfgwin.rs): kopregel, config, '#'-padding.
-        let cfg = &layers("rpi4", "headfull");
+        let cfg = flavor("headfull");
         let mut window = format!("#HOPCFG1 window=16384 len={:010}\n{cfg}", cfg.len());
         while window.len() < 16384 {
             let n = (16384 - window.len()).min(65);
@@ -619,7 +619,6 @@ mod tests {
                     .contains(r#""name":"welcome""#)
             );
             assert!(console_enabled(&c));
-            assert_eq!(c.one("hopos.hop.sharegroup"), "system");
         }
     }
 

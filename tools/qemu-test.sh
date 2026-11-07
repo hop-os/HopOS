@@ -11,13 +11,13 @@
 #                   een eigen tijdelijk bestand, dus altijd leeg);
 #   HOPOS_FS_UP     hopfs erop gemount, vers (fresh=1);
 #   HOPOS_CFG_WINDOW de config in het venster van het kern-image
-#                   (board/src/cfgwin.rs), in twee lagen erin gezet door
-#                   image/hopcfg.py zoals elk image-script het doet: de kern
-#                   leest hem (de bootregel) en gebruikt hem, en de laatste
-#                   waarde wint (de eerste laag zegt system, de tweede hop,
-#                   en de bootregel moet "Hop in the sharegroup hop
-#                   (hopos.hop.sharegroup)" zeggen; zonder config staat er
-#                   "(default)", HOPOS_HOP_GROUP);
+#                   (board/src/cfgwin.rs), twee bestanden aaneengeplakt
+#                   door image/hopcfg.py zoals een eigen CFG= het doet: de
+#                   kern leest hem (de bootregel) en gebruikt hem, en de
+#                   laatste waarde wint (het eerste bestand zegt system, het
+#                   tweede hop, en de bootregel moet "Hop in the sharegroup
+#                   hop (hopos.hop.sharegroup)" zeggen; zonder sleutel staat
+#                   er "(the board's default)", HOPOS_HOP_GROUP);
 #   HOPOS_NET_UP    pomp, switch, poort 0 en een DHCP-lease van user-net;
 #   HOPOS_SYSTEM_UP de system-listener op poort 10100;
 #   HOPOS_WD_CANARY_OK de canary van de watchdog: een nieuwe verbinding van
@@ -123,7 +123,7 @@ if [ "$GUI" = display ]; then TIMEOUT="${TIMEOUT:-75}"; else TIMEOUT="${TIMEOUT:
 scratch qemu
 KCFG="$ART/kern"
 CFGWIN="$ART/cfg"
-CFGBORD="$ART/cfg-bord"
+CFGOWN="$ART/cfg-own"
 if [ "$GUI" != 0 ]; then
 	FEATURES=board-qemuvirt,gui
 	# Kort pad: een unix-socket mag niet langer dan ~104 tekens zijn.
@@ -144,9 +144,9 @@ cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURES"
 # De kern met een config in zijn venster: een kopie, zodat de build zelf
 # leeg blijft (de andere toetsen rekenen op hun eigen config).
 printf '# tools/qemu-test.sh: de config in het venster van de kern\nhopos.hop.sharegroup=system\n' >"$CFGWIN"
-printf '# de bordlaag erachter: de laatste waarde wint\nhopos.hop.sharegroup=hop\n' >"$CFGBORD"
+printf '# een eigen regel erachter: de laatste waarde wint\nhopos.hop.sharegroup=hop\n' >"$CFGOWN"
 cp "$DIR/target/$TARGET/release/hopos" "$KCFG"
-python3 "$DIR/image/hopcfg.py" set "$KCFG" "$CFGWIN" "$CFGBORD"
+python3 "$DIR/image/hopcfg.py" set "$KCFG" "$CFGWIN" "$CFGOWN"
 KERNEL="$KCFG"
 echo "== bouwen: $APP_PKG en agentd-hopos"
 apps "$APP_PKG"

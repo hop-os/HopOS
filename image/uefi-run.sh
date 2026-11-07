@@ -14,12 +14,12 @@
 #                                     hopos-stage.elf op de ESP (de kern
 #                                     plaatst alleen Hop, 01-11 O7)
 #   CFG="a.cfg b.cfg" image/uefi-run.sh
-#                                     hopos.cfg in lagen in het venster van
-#                                     BOOTAA64.EFI, de laatste waarde wint
+#                                     hopos.cfg in het venster van
+#                                     BOOTAA64.EFI, de bestanden
+#                                     aaneengeplakt, de laatste waarde wint
 #                                     (standaard op o6n en altra
-#                                     image/cfg/default.cfg, <bord>.cfg en
-#                                     headless.cfg, met GUI=1 of MEDIA=1
-#                                     headfull.cfg; op QEMU een leeg venster
+#                                     image/cfg/headless.cfg, met GUI=1 of
+#                                     MEDIA=1 headfull.cfg; op QEMU een leeg venster
 #                                     en een minimale hopos.cfg op de ESP
 #                                     zonder sleutels)
 #   GUI=1 image/uefi-run.sh           de gui-smaak (`--features gui`, docs/gui.md):
@@ -146,7 +146,7 @@ NTPCFG=""
 if [ -z "${CFG:-}" ] && [ "$BOARD" != uefi ]; then
 	FLAVOR=headless
 	if [ "${GUI:-0}" = 1 ] || [ "${MEDIA:-0}" = 1 ]; then FLAVOR=headfull; fi
-	CFG="$DIR/image/cfg/default.cfg $DIR/image/cfg/$BOARD.cfg $DIR/image/cfg/$FLAVOR.cfg"
+	CFG="$DIR/image/cfg/$FLAVOR.cfg"
 fi
 if [ -n "${CFG:-}" ]; then
 	for f in $CFG; do

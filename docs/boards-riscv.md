@@ -230,8 +230,8 @@ een core als elke andere, als sharegroep `system` (`kern::pool::SYSTEM_GROUP`),
 met de kern als vaste bewoner met voorrang. Een job met de tag
 `"sharegroup":"system"` woont erbij, en een job zonder groep die geen vrije
 app-core vindt ook (`HOPOS_PLACE_SYSTEM`, docs/apps.md). Hop woont er naast
-de kern (`Placement::hop`, sharegroep `hop`) als het board dat kiest
-(`HOP_ON_OS_CORE`: QEMU wel, de LicheeRV niet), en de idle van de executor
+de kern (`Placement::hop`, sharegroep `system`) als het board dat kiest
+(`Board::HOP_GROUP`: QEMU `system`, de LicheeRV `hop`), en de idle van de executor
 is een beurt voor de bewoners (`cpu/src/riscv/oscore.rs`,
 `RvSleeper::host`). De overgang is een functie: `enter` bewaart ra, sp, gp,
 tp en s0..s11 van de kern, zet `mtvec` op een eigen trap-ingang en de kooi
@@ -339,7 +339,7 @@ zet hem; HopOS doet geen init). Bouw met
     PLIC zijn per core, elke core is voor zichzelf hart 0). Hij deelt zijn
     core als groep `system`: welcome (geen tag, geen vrije core) komt
     erbij met `HOPOS_PLACE_SYSTEM`. Hop heeft de C906L voor zich
-    (`HOP_ON_OS_CORE` = false op dit board): `HOPOS_HOP_START slot=1
+    (`Board::HOP_GROUP` is `hop` op dit board): `HOPOS_HOP_START slot=1
     core=1 cpu=1`.
 
     De loterij van 03-10 ochtend is dezelfde dag weer verwijderd: de PLIC

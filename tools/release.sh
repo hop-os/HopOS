@@ -14,9 +14,9 @@
 #   headless   de kern zonder gui
 #   headfull   de kern met gui (en media op de O6N)
 #
-# De config in het venster is per board en smaak drie lagen uit image/cfg,
-# in die volgorde: default.cfg, <board>.cfg, headless.cfg of headfull.cfg
-# (de laatste waarde van een sleutel wint).
+# De config in het venster is per smaak één bestand uit image/cfg,
+# headless.cfg of headfull.cfg (07-11); waar Hop woont is de standaard van
+# het board (board::Board).
 #
 # Wat erin komt, per board de kaart of stick (gzip, dd-baar) en de
 # flipbundel:
@@ -83,8 +83,6 @@ WS="$(sed -n 's/^version = "\(.*\)"/\1/p' "$DIR/Cargo.toml" | head -1)"
 [ "$WS" = "$VERSION" ] || { echo "release $VERSION: Cargo.toml [workspace.package] version is $WS; zet die eerst gelijk" >&2; exit 65; }
 OUT="$DIR/target/release-$VERSION"
 NOTES="$DIR/target/release-$VERSION.notes.md"
-# layers <board> <smaak>: de drie lagen van image/cfg, als lijst voor CFG=.
-layers() { echo "$DIR/image/cfg/default.cfg $DIR/image/cfg/$1.cfg $DIR/image/cfg/$2.cfg"; }
 export HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 # Het stempel op de bootregel van elke kern (hopos/build.rs), ook van de
 # kaarten: zo zegt een node welke release hij draait.
@@ -188,7 +186,7 @@ uefi() {
 	card "$ESP.img" "hopos-$1-$4.img"
 }
 apple() {
-	CFG="$(layers apple headless)" EMBED="$HOP_ELF" sh image/apple-m4.sh
+	CFG="$DIR/image/cfg/headless.cfg" EMBED="$HOP_ELF" sh image/apple-m4.sh
 	# De stick: het bootobject, de installer en de uitleg op één FAT-partitie
 	# (LBA 2048, label HOPOS), zodat er in Recovery niets te typen valt behalve
 	# het pad naar install.sh; die zoekt het image naast zichzelf.
@@ -199,7 +197,7 @@ apple() {
 	flip apple headless 0 ""
 }
 licheerv() {
-	STAGE="$HOP_RV" CFG="$(layers licheerv headless)" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
+	STAGE="$HOP_RV" CFG="$DIR/image/cfg/headless.cfg" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
 	card target/licheerv/hopos-licheerv.img hopos-licheerv-headless.img
 	# Ook de losse fip.bin: een kaart die al een HopOS-kaart is, krijgt zo een
 	# nieuwe versie door alleen dat bestand te vervangen (ook vanaf een
@@ -214,11 +212,11 @@ for FLAVOR in headless headfull; do
 		G=1
 	fi
 	for b in rpi4 rpi5; do
-		job "$b-$FLAVOR" pi "$b" "$G" "$(layers "$b" "$FLAVOR")" "$FLAVOR"
+		job "$b-$FLAVOR" pi "$b" "$G" "$DIR/image/cfg/$FLAVOR.cfg" "$FLAVOR"
 	done
-	job "radxa-$FLAVOR" radxa "$G" "$(layers radxa "$FLAVOR")" "$FLAVOR"
+	job "radxa-$FLAVOR" radxa "$G" "$DIR/image/cfg/$FLAVOR.cfg" "$FLAVOR"
 	for b in o6n altra; do
-		job "$b-$FLAVOR" uefi "$b" "$G" "$(layers "$b" "$FLAVOR")" "$FLAVOR"
+		job "$b-$FLAVOR" uefi "$b" "$G" "$DIR/image/cfg/$FLAVOR.cfg" "$FLAVOR"
 	done
 done
 job apple-headless apple
@@ -274,14 +272,14 @@ fi
 	cat <<EOF
 HopOS v$VERSION, the Rust generation. Every board comes in two flavors:
 **headless** (no gui) and **headfull** (gui, plus media on the O6N). The
-config in each image is three layers from \`image/cfg\`, the last value of a
-key wins: \`default.cfg\` (open on your own LAN: no API key, console over
-TCP), \`<board>.cfg\` (where Hop lives: the OS core on the Pis and the
-Radxa, a core of his own, a small one where the board has them, on the O6N,
-the Altra, the M4 and the LicheeRV) and \`headless.cfg\` or
-\`headfull.cfg\` (the init jobs: headfull starts **welcome** on port 80). A
-node without \`hopos.node\` names itself after its board and the tail of its
-MAC (\`rpi4-4c54\`).
+config in each image is one file per flavor from \`image/cfg\`:
+\`headless.cfg\` (open on your own LAN: no API key, console over TCP) or
+\`headfull.cfg\` (the same, and **welcome** on port 80). Where Hop lives is
+the board's default: the OS core on the Pis and the Radxa, a core of his
+own, a small one where the board has them, on the O6N, the Altra, the M4
+and the LicheeRV (\`hopos.hop.sharegroup\` and \`hopos.hop.core-class\`
+override it). A node without \`hopos.node\` names itself after its board
+and the tail of its MAC (\`rpi4-4c54\`).
 
 | Board | Headless | Headfull |
 | --- | --- | --- |
@@ -297,12 +295,12 @@ Every image carries its node config (\`hopos.cfg\`) inside the kernel, in a
 16 KiB config window, the same on every board and in every flip bundle. Put
 your own config in (\`hopos.node\`, \`hopos.apikey\`, your jobs) and write the
 card or stick in one go with the \`hop\` command from
-[hop](https://github.com/xinix00/hop); stack the layers with your own lines
-last:
+[hop](https://github.com/xinix00/hop); your own lines go last, the last
+value of a key wins:
 
 \`\`\`
 gunzip hopos-rpi4-headless.img.gz
-cat default.cfg rpi4.cfg headless.cfg my-node.cfg >node.cfg
+cat headless.cfg my-node.cfg >node.cfg
 hop image hopos-rpi4-headless.img --config node.cfg --write /dev/rdiskN
 \`\`\`
 

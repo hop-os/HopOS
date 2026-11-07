@@ -368,11 +368,7 @@ impl Isa for Arm {
     }
 
     fn class(phys: usize) -> Option<CoreClass> {
-        Some(match crate::BOARD.core_class(phys) {
-            board::CoreClass::Small => CoreClass::Small,
-            board::CoreClass::Mid => CoreClass::Mid,
-            board::CoreClass::Big => CoreClass::Big,
-        })
+        Some(super::kern_class(crate::BOARD.core_class(phys)))
     }
 }
 

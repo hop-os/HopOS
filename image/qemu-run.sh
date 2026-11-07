@@ -69,8 +69,9 @@
 #                                    hopos.ntp=10.0.2.2:$NTPPORT voor: de
 #                                    tijd van de host, tools/lib.sh sntp)
 #   CFG="a.cfg b.cfg" image/qemu-run.sh
-#                                    hopos.cfg in lagen in het venster van de
-#                                    kern (board/src/cfgwin.rs,
+#                                    hopos.cfg in het venster van de kern,
+#                                    de bestanden aaneengeplakt
+#                                    (board/src/cfgwin.rs,
 #                                    image/hopcfg.py), in een kopie van de
 #                                    ELF: de build zelf blijft leeg. De
 #                                    laatste waarde wint; het venster wint

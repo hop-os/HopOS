@@ -1141,7 +1141,8 @@ async fn wait_uplink() -> Option<core::net::Ipv4Addr> {
 /// `Placement::hop`: de sharegroup van Hop, op de OS-core met de kern als
 /// die groep `system` is (de klasse van die core koos `hopos.oscore`), en
 /// anders een eigen app-core, met `hopos.hop.core-class` als voorkeur voor
-/// de eerste core van de groep (`Placement::prefer`).
+/// de eerste core van de groep (`Placement::prefer`); zonder sleutel die
+/// van het board (`Board::HOP_CORE_CLASS`).
 fn hop_placement(plan: &abi::layout::Plan, cfg: &NodeCfg<'_>) -> kern::Result<Placement> {
     let mut at = Placement::hop()?;
     let class = kern::nodecfg::hop_core_class(cfg);
@@ -1166,12 +1167,28 @@ fn hop_placement(plan: &abi::layout::Plan, cfg: &NodeCfg<'_>) -> kern::Result<Pl
                 "slots: Hop prefers a {want} core for his group (hopos.hop.core-class) HOPOS_HOP_CLASS"
             );
         }
-        Ok(None) => {}
+        Ok(None) => {
+            if let Some(c) = <crate::Machine as Board>::HOP_CORE_CLASS {
+                at.prefer = Some(kern_class(c));
+                println!(
+                    "slots: Hop prefers a {c} core for his group (the board's default) HOPOS_HOP_CLASS"
+                );
+            }
+        }
         Err(v) => println!(
             "slots: hopos.hop.core-class={v} is not small, mid or big, ignored HOPOS_HOP_CLASS"
         ),
     }
     Ok(at)
+}
+
+/// De klasse van het board als die van de kern (de kooi, de plaatsing).
+pub(crate) fn kern_class(c: board::CoreClass) -> kern::cage::CoreClass {
+    match c {
+        board::CoreClass::Small => kern::cage::CoreClass::Small,
+        board::CoreClass::Mid => kern::cage::CoreClass::Mid,
+        board::CoreClass::Big => kern::cage::CoreClass::Big,
+    }
 }
 
 /// Het plan van deze node: de kern-core is de OS-core, en dat is de core
@@ -1191,8 +1208,8 @@ fn hop_on_os() -> bool {
 
 /// De sharegroup van Hop uit de config (`hopos.hop.sharegroup`): `system`
 /// is de OS-core bij de kern, elke andere naam een eigen app-core die jobs
-/// met dezelfde tag delen. Zonder sleutel: `system` waar de kern zijn core
-/// deelt, anders `hop`. Vraagt de config `system` op een board dat niet
+/// met dezelfde tag delen. Zonder sleutel die van het board
+/// (`Board::HOP_GROUP`). Vraagt de config `system` op een board dat niet
 /// deelt (Apple), dan `hop`, luid. Eén keer, vóór de pool en de plaatsing.
 ///
 /// FLIP: een warme flip verplaatst Hop niet (`carried`, zijn staat uit het
@@ -1203,10 +1220,9 @@ fn hop_on_os() -> bool {
 fn init_hop_group(cfg: &NodeCfg<'_>, carried: Option<&kern::slots::SlotState>) {
     let want = cfg.one("hopos.hop.sharegroup");
     let (cfg_name, cfg_why): (&[u8], &str) = match want {
-        "" if arch::SHARES_OS_CORE => (kern::pool::SYSTEM_GROUP, "default"),
         "" => (
-            kern::pool::HOP_GROUP,
-            "default, this board does not share the OS core",
+            <crate::Machine as Board>::HOP_GROUP.as_bytes(),
+            "the board's default",
         ),
         "system" if !arch::SHARES_OS_CORE => (
             kern::pool::HOP_GROUP,

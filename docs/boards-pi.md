@@ -56,8 +56,9 @@ van een bestaande Pi-kaart. De firmware staat in `image/firmware/rpi4` en
 `hopos.cfg` staat niet als bestand op de kaart. Het
 `initramfs`-kanaal draagt het image van Hop (`hop.elf`), en de config staat
 in het venster van de kern ([boards.md](boards.md), "Het config-venster"):
-het script zet `CFG=` (standaard de lagen `image/cfg/default.cfg`,
-`rpi4.cfg` of `rpi5.cfg`, en `headless.cfg` of `headfull.cfg`) erin.
+het script zet `CFG=` (standaard `image/cfg/headless.cfg`, of met `GUI=1`
+`headfull.cfg`) erin. Hop woont op de OS-core naast de kern (groep `system`,
+de standaard van het board).
 `cmdline.txt` draagt `EXTRA=` (een gestaged image is Hop, er is geen rol
 meer, 01-11); daar mogen ook `hopos.cores=N` en `hopos.oscore=` (op de Pi altijd core 0), maar
 een sleutel in het venster wint.

@@ -118,6 +118,11 @@ impl<P: Platform> Board for On<P> {
 
     const NAME: &'static str = P::NAME;
     const FLAVOR: Flavor = <Uefi as Board>::FLAVOR;
+    /// Hop op een eigen app-core, een zuinige waar de machine klassen heeft
+    /// (de A520 op de O6N; de Altra kent geen klassen en neemt de eerste
+    /// vrije). QEMU onder EDK2 is [`Uefi`] zelf en houdt `system`.
+    const HOP_GROUP: &'static str = "hop";
+    const HOP_CORE_CLASS: Option<CoreClass> = Some(CoreClass::Small);
 
     fn console(&self) -> fn(&[u8]) {
         self.uefi.console()

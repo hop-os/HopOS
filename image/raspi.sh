@@ -20,9 +20,9 @@
 #                                    fixup4.dat, bcm2711-rpi-4-b.dtb en
 #                                    bl31.bin, Pi 5 bcm2712-rpi-5-b.dtb en
 #                                    overlays/bcm2712d0.dtbo
-#   CFG="a.cfg b.cfg" image/rpi4.sh  de config van de node in lagen, in die
-#                                    volgorde (standaard image/cfg/default.cfg,
-#                                    rpi4.cfg of rpi5.cfg en headless.cfg, met
+#   CFG="a.cfg b.cfg" image/rpi4.sh  de config van de node, de bestanden
+#                                    aaneengeplakt in die volgorde
+#                                    (standaard image/cfg/headless.cfg, met
 #                                    GUI=1 headfull.cfg), in het venster van
 #                                    de kern (board/src/cfgwin.rs,
 #                                    image/hopcfg.py); de laatste waarde wint
@@ -121,7 +121,7 @@ EOF
 # De config: in het venster van de kern (board/src/cfgwin.rs), zoals op
 # elk board; de kern leest eerst het venster en dan /chosen/bootargs
 # (cmdline.txt: alleen EXTRA).
-CFG="${CFG:-$DIR/image/cfg/default.cfg $DIR/image/cfg/$B.cfg $DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg}"
+CFG="${CFG:-$DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg}"
 for f in $CFG; do
 	[ -f "$f" ] || {
 		echo "$B: CFG: $f does not exist" >&2

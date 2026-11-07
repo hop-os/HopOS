@@ -2031,3 +2031,5 @@ Gehouden: `HOPOS_TICK` als de ene diagnoseregel van de kern (opt-in,
 
 Alles van 15.1 tot 15.7 in één ronde gebouwd, één gate en qemu-all, dan
 rc6 op ijzer (per board een koude boot en één warme flip), dan v3.2.0.
+
+07-11: één config per smaak (headless, headfull; media = headfull), de plek van Hop als standaard van het board; de Radxa uit de release zonder vaste hopos.node.

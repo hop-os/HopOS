@@ -57,3 +57,21 @@ impl crate::cage::Timer for FakeTimer {
         sync::yield_now()
     }
 }
+
+/// Een klok die per slaap hoogstens een milliseconde opschuift: een lange
+/// wacht (de stilte van een verbinding, `NEXT_STORE`, de ophaaltijd van een
+/// store-call) blijft zo echt wachten terwijl een andere taak verder gaat, in
+/// plaats van in één sprong af te lopen zoals op [`FakeTimer`].
+#[derive(Default)]
+pub(crate) struct SlowTimer(pub(crate) Cell<u64>);
+
+impl crate::cage::Timer for SlowTimer {
+    fn now(&self) -> u64 {
+        self.0.get()
+    }
+    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
+        let step = d.min(Duration::from_millis(1));
+        self.0.set(self.0.get() + step.as_nanos() as u64);
+        sync::yield_now()
+    }
+}

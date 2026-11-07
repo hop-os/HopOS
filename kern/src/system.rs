@@ -54,7 +54,8 @@
 //! is een leesbare tabel in een `LocalCell` (handboek §1.1): elke lening
 //! duurt één synchrone stap, nooit over een `.await`. Een verbinding hoort
 //! bij één levensduur van haar slot: wisselt die (stop, herstart), dan sluit
-//! de kern haar binnen [`LIFE_TICK`], ook als de peer zwijgt. Gemeten 29-09
+//! de kern haar op de stopbel van die levensduur
+//! ([`ServicerCtl::ended`]), ook als de peer zwijgt. Gemeten 29-09
 //! vóór deze vorm: één verbinding tegelijk, en de half-open verbinding van
 //! een geparkeerde app hield de listener voor altijd vast (de toets van
 //! buiten zag daarna nooit meer een antwoord).
@@ -110,20 +111,9 @@ pub const MAX_STREAMS: usize = 8;
 /// enige heap die een streamende plaatsing per stroom kost (`maxHead` in
 /// `stream.go`).
 pub const MAX_HEAD: usize = 64 << 10;
-/// Hoe vaak een wachtende verbinding kijkt of haar levensduur nog loopt.
-///
-/// De stopbel van de servicer heeft één wachter (de servicer zelf), dus een
-/// verbinding kijkt naar de generatie in de servicer-tabel: bij elke wek, en
-/// zonder verkeer op deze tik. Go sloot de verbinding op `<-s.stop`; hier is
-/// het hoogstens één tik later. 100 ms is ruim onder elke herstart van een
-/// slot (scrub en image-stream duren seconden), dus de nieuwe levensduur
-/// krijgt haar toelating ([`MAX_SYSTEM_CONNS`]) altijd terug; tien wekken
-/// per seconde per open verbinding is op de meetlat van 29-09 (ruim 700
-/// slaapjes per seconde op QEMU) ruis.
-pub const LIFE_TICK: Duration = Duration::from_millis(100);
 /// Hoe lang een verbinding zonder enig verkeer open blijft.
 ///
-/// Go had geen time-out, wel `evict`; de generatietoets hierboven is die
+/// Go had geen time-out, wel `evict`; de stopbel van de levensduur is die
 /// evict. Dit is de vangrail daarachter: een levend slot waarvan de peer
 /// verdween zonder FIN (een app-stack die opnieuw begon) houdt anders een
 /// van zijn twee plaatsen voor altijd bezet. Vijf minuten, want applib
@@ -1151,15 +1141,13 @@ impl fmt::Display for End {
     }
 }
 
-/// Een verbinding onder toezicht: elke wachtende lees of schrijf kijkt op
-/// elke wek, en minstens elke [`LIFE_TICK`], of de levensduur waarvoor ze
-/// toegelaten werd nog loopt en of er recent verkeer was.
+/// Een verbinding onder toezicht: elke wachtende lees of schrijf wacht ook
+/// op de stopbel van de levensduur waarvoor ze toegelaten werd, en op het
+/// einde van [`IDLE_TIMEOUT`] sinds het laatste verkeer.
 struct Watched<'a, C, T> {
     conn: &'a mut C,
     timer: &'a T,
-    svc: &'a Servicers,
-    slot: Slot,
-    generation: u32,
+    life: &'a ServicerCtl,
     /// Het laatste moment met verkeer (nanoseconden van `timer`).
     last: u64,
     /// Waarom het toezicht de verbinding sloot.
@@ -1171,22 +1159,28 @@ impl<C: Conn, T: Timer> Watched<'_, C, T> {
     /// herstart nog bytes stuurt, krijgt de nieuwe eigenaar van hetzelfde
     /// IP nooit cadeau, en een geparkeerde app houdt niets meer vast.
     fn alive(&mut self) -> Result {
-        if self.svc.current(self.slot) == Some(self.generation) {
+        if !self.life.is_ended() {
             return Ok(());
         }
         self.end = Some(End::Evicted);
         Err(Error::Conn)
     }
 
-    /// De toets op een tik zonder verkeer: levensduur en stilte.
-    fn check(&mut self) -> Result {
-        self.alive()?;
+    /// Hoe lang de verbinding nog stil mag zijn; nul is [`End::Idle`].
+    fn idle_left(&mut self) -> Result<Duration> {
         let idle = u64::try_from(IDLE_TIMEOUT.as_nanos()).unwrap_or(u64::MAX);
-        if self.timer.now().saturating_sub(self.last) >= idle {
+        let left = idle.saturating_sub(self.timer.now().saturating_sub(self.last));
+        if left == 0 {
             self.end = Some(End::Idle);
             return Err(Error::Conn);
         }
-        Ok(())
+        Ok(Duration::from_nanos(left))
+    }
+
+    /// Wat het toezicht na een wek zegt: de stop, of de stilte.
+    fn check(&mut self) -> Result {
+        self.alive()?;
+        self.idle_left().map(drop)
     }
 
     /// Noteert verkeer.
@@ -1200,15 +1194,17 @@ impl<C: Conn, T: Timer> Watched<'_, C, T> {
 impl<C: Conn, T: Timer> Conn for Watched<'_, C, T> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         loop {
-            // De lees links: klaar werk gaat vóór de tik. Een gedropte lees
-            // verliest niets, want een `Conn`-lees kopieert pas als hij klaar
-            // is.
-            match select(self.conn.read(buf), self.timer.sleep(LIFE_TICK)).await {
+            // De lees links: klaar werk gaat vóór de stop en de stilte. Een
+            // gedropte lees verliest niets, want een `Conn`-lees kopieert pas
+            // als hij klaar is.
+            let left = self.idle_left()?;
+            let watch = select(self.life.ended(), self.timer.sleep(left));
+            match select(self.conn.read(buf), watch).await {
                 Either::Left(r) => {
                     self.touch(&r);
                     return r;
                 }
-                Either::Right(()) => self.check()?,
+                Either::Right(_) => self.check()?,
             }
         }
     }
@@ -1217,12 +1213,14 @@ impl<C: Conn, T: Timer> Conn for Watched<'_, C, T> {
         loop {
             // Een peer die niet leest (een geparkeerde app met een vol
             // venster) houdt de schrijf anders voor altijd vast.
-            match select(self.conn.write(buf), self.timer.sleep(LIFE_TICK)).await {
+            let left = self.idle_left()?;
+            let watch = select(self.life.ended(), self.timer.sleep(left));
+            match select(self.conn.write(buf), watch).await {
                 Either::Left(r) => {
                     self.touch(&r);
                     return r;
                 }
-                Either::Right(()) => self.check()?,
+                Either::Right(_) => self.check()?,
             }
         }
     }
@@ -1345,7 +1343,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// is of een frame ongeldig is. Meerdere verbindingen tegelijk mogen
     /// (elk in een eigen taak): `buf` is de callbuffer van déze verbinding,
     /// `out` haar antwoordbuffer, `reply` haar antwoordplek bij de actor.
-    /// `timer` draagt de tik van het toezicht. Een log-frame (`Kind::Log`) gaat
+    /// `timer` draagt de termijn van de stilte. Een log-frame (`Kind::Log`) gaat
     /// naar `log.app_line`, dus op de console (en zo bij Hop, `NEXT_LOG` 0).
     /// Een Rust-app logt via de outbox; `Kind::Log` blijft voor de
     /// Go-apps (`Logf` van de Go-SDK `metal/v2` schrijft elke regel zo,
@@ -1369,9 +1367,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         let mut w = Watched {
             conn,
             timer,
-            svc: self.svc,
-            slot: who.slot,
-            generation: who.generation,
+            life: &who.ctl,
             last: timer.now(),
             end: None,
         };
@@ -1556,7 +1552,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             fs: self.fs,
             svc: self.svc,
             slot: who.slot,
-            generation: who.generation,
+            life: Rc::clone(&who.ctl),
             hop: self.privilege.as_ref().filter(|p| p.slot == who.slot),
             hop_slot: self.privilege.as_ref().map(Privilege::slot),
             reply,
@@ -2355,7 +2351,7 @@ mod tests {
     use crate::cage::tests::SparseMem;
     use crate::slots::tests::{Actor, FakeConsole, Obey, actor, s};
     use crate::slots::{Outbox, servicer_task};
-    use crate::testutil::FakeTimer;
+    use crate::testutil::{FakeTimer, SlowTimer};
     use abi::layout::port_ip4;
     use abi::systemapi::{StreamState, plain_req, stream_req};
     use core::cell::Cell;
@@ -4026,7 +4022,7 @@ mod tests {
         let (mut s1, mut s2) = (Seat::new(), Seat::new());
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
         let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))));
-        let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
+        let (timer, hooks) = (SlowTimer::default(), NoHooks::default());
         let mut quiet = Pipe::silent(port_ip4(2));
         let mut hop = Pipe::new(
             port_ip4(1),
@@ -4095,7 +4091,7 @@ mod tests {
         let (mut s1, mut s2) = (Seat::new(), Seat::new());
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
         let sys = System::new(&inbox, &svc, None);
-        let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
+        let (timer, hooks) = (SlowTimer::default(), NoHooks::default());
         let (mut p1, mut p2) = (Pipe::silent(port_ip4(2)), Pipe::silent(port_ip4(2)));
         let ctl = svc.ctl(s(2)).unwrap();
         let (w1, w2) = (
@@ -4180,11 +4176,10 @@ mod tests {
             &mut seat.out,
         ));
         assert_eq!(end, End::Idle);
-        let idle = IDLE_TIMEOUT.as_nanos() as u64;
-        let now = timer.now.get();
-        assert!(
-            (idle..idle + 2 * LIFE_TICK.as_nanos() as u64).contains(&now),
-            "closed after {now} ns"
+        assert_eq!(
+            timer.now.get(),
+            IDLE_TIMEOUT.as_nanos() as u64,
+            "closed at the end of the silence, not later"
         );
     }
 }

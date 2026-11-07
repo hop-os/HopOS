@@ -12,6 +12,7 @@
 //! Alles little-endian, met vaste koppen: de kern leest dit op de rand van
 //! zijn vertrouwensgrens, ook al is de afzender bevoegd.
 
+use super::{le16, le32, le64};
 use crate::{Error, Result};
 
 /// Het langste pad of de langste objectnaam in een opdracht (de grens van
@@ -109,27 +110,6 @@ pub struct StoreTask<'a> {
     /// Het lokale pad van de app (pull en push), zoals de app het gaf; Hop
     /// geeft het letterlijk terug in STORE_READ en STORE_WRITE.
     pub path: &'a [u8],
-}
-
-/// Een little-endian `u16` op `b[i..]`, of 0.
-fn le16(b: &[u8], i: usize) -> u16 {
-    b.get(i..i + 2)
-        .and_then(|s| <[u8; 2]>::try_from(s).ok())
-        .map_or(0, u16::from_le_bytes)
-}
-
-/// Een little-endian `u32` op `b[i..]`, of 0.
-fn le32(b: &[u8], i: usize) -> u32 {
-    b.get(i..i + 4)
-        .and_then(|s| <[u8; 4]>::try_from(s).ok())
-        .map_or(0, u32::from_le_bytes)
-}
-
-/// Een little-endian `u64` op `b[i..]`, of 0.
-fn le64(b: &[u8], i: usize) -> u64 {
-    b.get(i..i + 8)
-        .and_then(|s| <[u8; 8]>::try_from(s).ok())
-        .map_or(0, u64::from_le_bytes)
 }
 
 impl<'a> StoreTask<'a> {

@@ -300,8 +300,8 @@ pub fn slot_config(slot: u64, budget: usize) -> Config {
 }
 
 /// Brengt de netstack van `app` op: de stack, de gateway als statische
-/// buur, de pomp-taak op [`EXEC`], en dan [`App::network_ready`]. Geeft de
-/// stack, die daarna ook via [`net`] te vinden is.
+/// buur en de pomp-taak op [`EXEC`]. Geeft de stack, die daarna ook via
+/// [`net`] te vinden is.
 pub fn up(app: &'static App) -> Result<&'static Net> {
     if net().is_some() {
         return Err(NetError::AlreadyUp);
@@ -332,7 +332,6 @@ pub fn up(app: &'static App) -> Result<&'static Net> {
         log!("appnet: cannot spawn the pump: {e} HOPOS_APPNET_SPAWN");
         return Err(NetError::Spawn);
     }
-    app.network_ready();
     let [a, b, c, d] = net.ip();
     // Hoe de frame-ringen kopiëren (zie `Nic::open`): op ijzer de eerste
     // vraag als de doorvoer van een app verandert.

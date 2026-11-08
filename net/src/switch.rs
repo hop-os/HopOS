@@ -954,7 +954,7 @@ fn forward<R: Reader, W: Writer>(
     }
     // Naar de gateway. Volgorde: eerst 10.100.0.1 zelf ("mijn node"), dan
     // het antwoord van een gepubliceerde poort, anders masquerade.
-    if gateway_claim(core, p) || nat.slot_reply(core, src, p, now) {
+    if gateway_claim(core, nat, p) || nat.slot_reply(core, src, p, now) {
         return;
     }
     nat.outbound(core, src, p, now);
@@ -1050,13 +1050,18 @@ fn valid_source_ip(src: usize, p: &[u8]) -> bool {
 }
 
 /// Hoort dit gateway-frame bij HOP's poort 0? Ja voor IPv4 naar het
-/// gateway-IP. `true` = bezorgd.
-fn gateway_claim<R: Reader, W: Writer>(core: &mut Core<'_, R, W>, p: &[u8]) -> bool {
+/// gateway-IP, behalve een gepubliceerde poort: die is op 10.100.0.1 net zo
+/// bereikbaar als op het node-IP, zonder dat een app dat IP hoeft te kennen.
+/// `true` = bezorgd.
+fn gateway_claim<R: Reader, W: Writer>(core: &mut Core<'_, R, W>, nat: &Nat, p: &[u8]) -> bool {
     if !core.attached(0) || p.len() < ETH_LEN + 20 || be16(p, 12) != ET_IPV4 {
         return false;
     }
     if be32(p, ETH_LEN + 16) != host_ip4() {
         return false; // IPv4 naar elders: NAT-terrein
+    }
+    if nat.published_here(p) {
+        return false; // een gepubliceerde poort: de hairpin, zoals op het node-IP
     }
     core.write_rx(0, KIND_FRAME, p);
     true

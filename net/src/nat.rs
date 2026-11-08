@@ -26,7 +26,7 @@
 //! snapshot voor de kern-flip is een gewone lees-ronde.
 
 use crate::flows::{FKey, Flow, FlowTable, Id, MAX_FLOWS_PER_SLOT, RKey};
-use crate::plan::{HOST_MAC, port_ip4, port_mac};
+use crate::plan::{HOST_MAC, host_ip4, port_ip4, port_mac};
 use crate::wire::{
     ETH_LEN, PROTO_TCP, PROTO_UDP, TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN, be16, be32, byte,
     fix_csum32, ipv4_l4, mac_at, put_mac, put32, rewrite_l4,
@@ -258,6 +258,18 @@ impl Nat {
             .map_err(|_| Error::Full("publications", MAX_PUBS))
     }
 
+    /// Gaat dit slotframe naar een gepubliceerde poort? De switch vraagt het
+    /// voor 10.100.0.1: dan de hairpin in plaats van de node-stack, zoals
+    /// [`inbound`](Self::inbound) een publicatie vóór de node-stack laat gaan.
+    /// Zonder uplink geen hairpin: dan houdt de node-stack hem.
+    pub(crate) fn published_here(&self, f: &[u8]) -> bool {
+        let Some(ip) = ipv4_l4(f) else { return false };
+        self.uplink.is_some()
+            && self
+                .pub_by_node_port(ip.proto, be16(f, ip.l4 + 2))
+                .is_some()
+    }
+
     fn pub_by_node_port(&self, proto: u8, node_port: u16) -> Option<Pub> {
         self.pubs
             .iter()
@@ -338,19 +350,19 @@ impl Nat {
         io.deliver(slot, f);
     }
 
-    /// Herschrijft de bron naar het node-IP (SNAT).
+    /// Herschrijft de bron naar `new_ip`, het node-IP of 10.100.0.1 (SNAT).
     fn snat_src(
-        u: Uplink,
         f: &mut [u8],
         l4: usize,
         proto: u8,
         old_ip: u32,
+        new_ip: u32,
         old_port: u16,
         new_port: u16,
     ) {
-        put32(f, ETH_LEN + 12, u.ip);
-        fix_csum32(f, ETH_LEN + 10, old_ip, u.ip);
-        rewrite_l4(f, l4, proto, 0, old_ip, u.ip, old_port, new_port);
+        put32(f, ETH_LEN + 12, new_ip);
+        fix_csum32(f, ETH_LEN + 10, old_ip, new_ip);
+        rewrite_l4(f, l4, proto, 0, old_ip, new_ip, old_port, new_port);
     }
 
     /// Zet de MAC's en stuurt het frame de externe NIC uit.
@@ -466,7 +478,7 @@ impl Nat {
             return true; // next-hop onbekend: drop, de vraag loopt
         };
         let src_ip = be32(f, ETH_LEN + 12);
-        Self::snat_src(u, f, ip.l4, ip.proto, src_ip, sport, m.node_port);
+        Self::snat_src(f, ip.l4, ip.proto, src_ip, u.ip, sport, m.node_port);
         Self::tx_uplink(io, u, f, next_hop);
         true
     }
@@ -489,9 +501,10 @@ impl Nat {
         let flags = byte(f, ip.l4 + 13);
         let proto = ip.proto;
 
-        // Het node-IP zelf: hairpin, nooit de NIC uit en nooit de
+        // Het node-IP zelf, of 10.100.0.1 op een gepubliceerde poort (de
+        // switch liet hem door): hairpin, nooit de NIC uit en nooit de
         // neighbour-tabel in.
-        if dst_ip == u.ip {
+        if dst_ip == u.ip || dst_ip == host_ip4() {
             return self.hairpin_out(io, src, f, ip.l4, proto, slot_ip, sport, dport, u, now);
         }
 
@@ -530,7 +543,7 @@ impl Nat {
         let Some(np) = self.flows.get(id).map(|f| f.node_port) else {
             return true;
         };
-        Self::snat_src(u, f, ip.l4, proto, slot_ip, sport, np);
+        Self::snat_src(f, ip.l4, proto, slot_ip, u.ip, sport, np);
         Self::tx_uplink(io, u, f, next_hop);
         if reap {
             self.flows.remove(id);
@@ -560,6 +573,7 @@ impl Nat {
         };
         let srv = usize::from(m.slot);
         let srv_ip = port_ip4(srv);
+        let dst_ip = be32(f, ETH_LEN + 16);
         let flags = byte(f, l4 + 13);
         let Some((id, _)) = self.flow_for_packet(
             io,
@@ -576,11 +590,13 @@ impl Nat {
             return true;
         };
         let reap = self.note_tcp_flags(id, flags, false);
-        let Some(np) = self.flows.get(id).map(|f| f.node_port) else {
+        let Some(fl) = self.flows.get_mut(id) else {
             return true;
         };
-        Self::snat_src(u, f, l4, proto, slot_ip, sport, np);
-        Self::dnat_to_slot(io, srv, f, l4, proto, u.ip, srv_ip, dport, m.slot_port);
+        fl.via_gw = dst_ip != u.ip;
+        let np = fl.node_port;
+        Self::snat_src(f, l4, proto, slot_ip, u.ip, sport, np);
+        Self::dnat_to_slot(io, srv, f, l4, proto, dst_ip, srv_ip, dport, m.slot_port);
         if reap {
             self.flows.remove(id);
         }
@@ -616,7 +632,8 @@ impl Nat {
         };
         // Eerst de src-helft, dan de dst-helft (die ook bezorgt): disjuncte
         // velden en incrementele checksums, dus de volgorde is vrij.
-        Self::snat_src(u, f, l4, proto, srv_ip, m.slot_port, m.node_port);
+        let from = if fl.via_gw { host_ip4() } else { u.ip };
+        Self::snat_src(f, l4, proto, srv_ip, from, m.slot_port, m.node_port);
         Self::dnat_to_slot(
             io,
             usize::from(fl.slot),
@@ -718,6 +735,7 @@ impl Nat {
             slot: s,
             fin_fwd: false,
             fin_rev: false,
+            via_gw: false,
             slot_ip,
             dst_ip,
             slot_port,

@@ -10,7 +10,7 @@ description = "De HTTP-server van een app, opt-in: een acceptor met een park voo
 applib = { path = "../applib", features = ["http"] }
 sync = { path = "../sync" }
 # Dezelfde tag als applib, zodat één `leanhttp::Conn` bestaat.
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc3" }
+leanhttp = { git = "https://github.com/haas-software/lean.git", tag = "v3.2.0-rc3" }
 
 [lints]
 workspace = true

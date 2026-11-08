@@ -138,7 +138,7 @@ fn layer(key: &str) -> String {
 enum Origin {
     /// Deze werkruimte (`path+file://...`).
     Ours,
-    /// De lean-repo (`git+https://github.com/xinix00/lean.git?tag=...`).
+    /// De lean-repo (`git+https://github.com/haas-software/lean.git?tag=...`).
     Lean,
     /// Al het andere: hoort er niet te zijn (handboek §8), dus zichtbaar.
     Extern,
@@ -147,7 +147,7 @@ enum Origin {
 fn origin_of(package_id: &str) -> Origin {
     if package_id.starts_with("path+") {
         Origin::Ours
-    } else if package_id.contains("xinix00/lean") {
+    } else if package_id.contains("haas-software/lean") {
         Origin::Lean
     } else {
         Origin::Extern

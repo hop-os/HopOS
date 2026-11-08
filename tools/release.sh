@@ -1,7 +1,7 @@
 #!/bin/sh
 # Bouwt een release van HopOS v3 op de host en zet hem klaar in
 # target/release-<versie>/, met een SHA256SUMS. Publiceert niets: aan het eind
-# staan de regels om te taggen en te publiceren, voor wie dat mag (xinix00).
+# staan de regels om te taggen en te publiceren, voor wie dat mag (derekdhaas, de organisatie hop-os).
 #
 #   sh tools/release.sh 3.0.0             bouwen, klaarzetten, de notes en de regels
 #   sh tools/release.sh --dry-run 3.0.0   alleen bouwen en klaarzetten
@@ -295,7 +295,7 @@ Every image carries its node config (\`hopos.cfg\`) inside the kernel, in a
 16 KiB config window, the same on every board and in every flip bundle. Put
 your own config in (\`hopos.node\`, \`hopos.apikey\`, your jobs) and write the
 card or stick in one go with the \`hop\` command from
-[hop](https://github.com/xinix00/hop); your own lines go last, the last
+[hop](https://github.com/hop-os/hop); your own lines go last, the last
 value of a key wins:
 
 \`\`\`
@@ -320,7 +320,7 @@ with its sum from SHA256SUMS. A bundle's config window is empty, so the
 node keeps its own config over the flip; \`hop image <bundle> --config
 <cfg>\` gives it another one (and prints the new sha256).
 
-Apps (rolling release [apps](https://github.com/xinix00/HopOS/releases/tag/apps),
+Apps (rolling release [apps](https://github.com/hop-os/HopOS/releases/tag/apps),
 named \`<app>-<arch>.elf\`): $(echo $ARM_APPS | sed 's/ /, /g') for arm64;
 $(echo $RV_APPS | sed 's/ /, /g; s/, \([^,]*\)$/ and \1/') for riscv64. Jobspecs in \`jobs/\`.
 
@@ -335,10 +335,10 @@ EOF
 cat <<EOF
 
 De notes: $NOTES
-Taggen en publiceren (als xinix00, GH_TOKEN; dit script voert niets uit):
+Taggen en publiceren (als derekdhaas, GH_TOKEN; dit script voert niets uit):
 
   git tag -a v$VERSION -m "HopOS v$VERSION"
   git push origin v$VERSION
-  gh release create v$VERSION $OUT/* --repo xinix00/HopOS --title "HopOS v$VERSION" --notes-file $NOTES
-  gh release upload apps $OUT/*-arm64.elf $OUT/*-riscv64.elf$GO_ELFS --repo xinix00/HopOS --clobber
+  gh release create v$VERSION $OUT/* --repo hop-os/HopOS --title "HopOS v$VERSION" --notes-file $NOTES
+  gh release upload apps $OUT/*-arm64.elf $OUT/*-riscv64.elf$GO_ELFS --repo hop-os/HopOS --clobber
 EOF

@@ -30,10 +30,10 @@ command -v gh >/dev/null || [ "$PUBLISH" != "1" ] || { echo "FOUT: gh ontbreekt"
 # Mag dit token hier schrijven: de vraag per repo, niet `gh api user` (die gaf
 # tijdens de GitHub-storing van 17-08 als enige 503).
 if [ "$PUBLISH" = "1" ]; then
-	perm="$(gh api repos/xinix00/HopOS --jq .permissions.push 2>/dev/null || true)"
+	perm="$(gh api repos/hop-os/HopOS --jq .permissions.push 2>/dev/null || true)"
 	[ "$perm" = "true" ] || {
-		echo "FOUT: dit gh-token mag niet schrijven in xinix00/HopOS (push=${perm:-onbekend})." >&2
-		echo "      herstel: gh auth switch --user xinix00" >&2; exit 1; }
+		echo "FOUT: dit gh-token mag niet schrijven in hop-os/HopOS (push=${perm:-onbekend})." >&2
+		echo "      herstel: gh auth switch --user derekdhaas" >&2; exit 1; }
 fi
 
 # 1. cloudflared bouwt tegen een gepatchte kopie van zijn eigen module; zonder
@@ -92,7 +92,7 @@ echo "   alle $(echo $ELFS | wc -w | tr -d ' ') images schoon" >&2
 # 4. Publiceren naar HopOS/$TAG, naast de Rust-apps van tools/release.sh.
 PRE=""
 case "$TAG" in *beta*) PRE="--prerelease" ;; esac
-U="https://github.com/xinix00/HopOS/releases/download/$TAG"
+U="https://github.com/hop-os/HopOS/releases/download/$TAG"
 NOTES="Ready-to-run HopOS app images, canonically linked, so one artifact runs in any slot. Drop a URL in a jobspec and the node streams it straight onto a partition.
 
 The Go apps (\`*-tamago.elf\`) are built $STAMP with TamaGo against metal ${METAL:-as pinned in go.mod}, verified to link zero gVisor symbols.
@@ -108,11 +108,11 @@ The Go apps (\`*-tamago.elf\`) are built $STAMP with TamaGo against metal ${META
 
 echo ">> uploaden naar HopOS/$TAG" >&2
 # shellcheck disable=SC2086 # woordsplitsing over de elf-lijst is de bedoeling
-if gh release view "$TAG" --repo xinix00/HopOS >/dev/null 2>&1; then
-	gh release upload "$TAG" --repo xinix00/HopOS --clobber $ELFS >/dev/null
-	gh release edit "$TAG" --repo xinix00/HopOS --notes "$NOTES" >/dev/null
+if gh release view "$TAG" --repo hop-os/HopOS >/dev/null 2>&1; then
+	gh release upload "$TAG" --repo hop-os/HopOS --clobber $ELFS >/dev/null
+	gh release edit "$TAG" --repo hop-os/HopOS --notes "$NOTES" >/dev/null
 else
-	gh release create "$TAG" --repo xinix00/HopOS --latest=false $PRE \
+	gh release create "$TAG" --repo hop-os/HopOS --latest=false $PRE \
 		--title "HopOS app images${PRE:+ (beta)}" --notes "$NOTES" $ELFS >/dev/null
 fi
 

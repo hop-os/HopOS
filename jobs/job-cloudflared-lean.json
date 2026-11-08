@@ -12,7 +12,7 @@
  },
  "artifacts": [
   {
-   "url": "https://github.com/xinix00/hop/releases/latest/download/cloudflared-lean-arm64.elf",
+   "url": "https://github.com/hop-os/hop/releases/latest/download/cloudflared-lean-arm64.elf",
    "match": {
     "node.arch": "arm64"
    }

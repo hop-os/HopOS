@@ -54,7 +54,7 @@ import (
 	"github.com/cloudflare/cloudflared/token"
 	"github.com/cloudflare/cloudflared/tracing"
 
-	"github.com/xinix00/HopOS/apps/cloudflared/internal/cfd"
+	"github.com/hop-os/HopOS/apps/cloudflared/internal/cfd"
 )
 
 var version = "dev" // -ldflags "-X main.version=vX.Y.Z"

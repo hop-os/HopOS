@@ -3,7 +3,7 @@
  "driver": "hop",
  "artifacts": [
   {
-   "url": "https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-arm64-tamago.elf"
+   "url": "https://github.com/hop-os/HopOS/releases/download/apps/cloudflared-arm64-tamago.elf"
   }
  ],
  "memory_limit": 268435456,

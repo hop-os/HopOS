@@ -17,7 +17,7 @@ import (
 
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/tunnel"
 
-	"github.com/xinix00/HopOS/apps/cloudflared/internal/cfd"
+	"github.com/hop-os/HopOS/apps/cloudflared/internal/cfd"
 )
 
 // find zoekt een (sub)commando op naam.

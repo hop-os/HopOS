@@ -11,7 +11,7 @@
 //  2. urfave/cli en quic-go — cloudflared's EIGEN replaces. Replaces van een
 //     dependency gelden niet transitief, dus zonder deze twee bouwt zijn code
 //     niet (hij gebruikt API's die alleen in die forks bestaan).
-module github.com/xinix00/HopOS/apps/cloudflared
+module github.com/hop-os/HopOS/apps/cloudflared
 
 go 1.26.4
 

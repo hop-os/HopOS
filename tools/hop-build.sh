@@ -77,7 +77,7 @@ LEAN_TAG=$(sed -n 's#.*lean\.git", tag = "\(v[0-9][0-9A-Za-z.-]*\)".*#\1#p' "$DI
 	echo "hop-build: no lean tag in $DIR/applib/Cargo.toml" >&2
 	exit 1
 }
-find "$SRC" -name Cargo.toml -exec perl -pi -e 's#(xinix00/lean\.git"[^}]*?tag = ")v[0-9][0-9A-Za-z.-]*#${1}'"$LEAN_TAG"'#g' {} +
+find "$SRC" -name Cargo.toml -exec perl -pi -e 's#(haas-software/lean\.git"[^}]*?tag = ")v[0-9][0-9A-Za-z.-]*#${1}'"$LEAN_TAG"'#g' {} +
 rm -f "$SRC/Cargo.lock"
 # applib en abi uit deze werkboom, en sync erbij: Hop gebruikt sync ook
 # zelf, en twee sync's in één image (één van de tag, één van hier) is een
@@ -86,7 +86,7 @@ rm -f "$SRC/Cargo.lock"
 cat >"$SRC/.cargo/config.toml" <<EOF
 # Gezet door tools/hop-build.sh: Hop tegen de applib, abi en sync van
 # $DIR.
-[patch."https://github.com/xinix00/HopOS.git"]
+[patch."https://github.com/hop-os/HopOS.git"]
 applib = { path = "$DIR/applib" }
 abi = { path = "$DIR/abi" }
 sync = { path = "$DIR/sync" }

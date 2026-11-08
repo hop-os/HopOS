@@ -15,13 +15,13 @@
  },
  "artifacts": [
   {
-   "url": "https://github.com/xinix00/stulp/releases/download/apps/stulp-arm64-tamago.elf",
+   "url": "https://github.com/haas-software/stulp/releases/download/apps/stulp-arm64-tamago.elf",
    "match": {
     "node.arch": "arm64"
    }
   },
   {
-   "url": "https://github.com/xinix00/stulp/releases/download/apps/stulp-riscv64-tamago.elf",
+   "url": "https://github.com/haas-software/stulp/releases/download/apps/stulp-riscv64-tamago.elf",
    "match": {
     "node.arch": "riscv64"
    }

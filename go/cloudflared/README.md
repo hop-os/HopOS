@@ -179,7 +179,7 @@ breaks a test instead of a node.
   (arm64 only), so a job spec can point straight at it:
 
   ```
-  https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-arm64-tamago.elf
+  https://github.com/hop-os/HopOS/releases/download/apps/cloudflared-arm64-tamago.elf
   ```
 
   The script runs `tools/prepare-cloudflared.sh` itself before the tamago

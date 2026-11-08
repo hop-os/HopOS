@@ -11,11 +11,11 @@ curl -X POST -d @jobs/job-stulp.local.json http://NODE:9080/v1/jobs
 
 | Spec | Wat | Artifact |
 | --- | --- | --- |
-| `job-cloudflared.json` | cloudflared's eigen `tunnel run` als slot-app (30 MB, 256 MB partitie) | release `apps` van xinix00/HopOS, Go (`-tamago.elf`) |
-| `job-cloudflared-lean.json` | het tunnelprotocol zelf op lean, 4 MB; wijst naar welcome op `10.100.0.2:80` | release van xinix00/hop (`apps/cloudflared-lean`, arm64 en riscv64) |
-| `job-spin.json` | de Spin-server met zijn volume `/spin` | release `rolling` van xinix00/Spin |
-| `job-stulp.json` | Stulp, de huisautomatisering, poort 80 en de attach-poort 7000 | release `apps` van xinix00/stulp |
-| `job-stulp-plugins.json` | de plugins van Stulp (Matter op 5540), hangen aan Stulp | release `apps` van xinix00/stulp |
+| `job-cloudflared.json` | cloudflared's eigen `tunnel run` als slot-app (30 MB, 256 MB partitie) | release `apps` van hop-os/HopOS, Go (`-tamago.elf`) |
+| `job-cloudflared-lean.json` | het tunnelprotocol zelf op lean, 4 MB; wijst naar welcome op `10.100.0.2:80` | release van hop-os/hop (`apps/cloudflared-lean`, arm64 en riscv64) |
+| `job-spin.json` | de Spin-server met zijn volume `/spin` | release `rolling` van haas-software/Spin |
+| `job-stulp.json` | Stulp, de huisautomatisering, poort 80 en de attach-poort 7000 | release `apps` van haas-software/stulp |
+| `job-stulp-plugins.json` | de plugins van Stulp (Matter op 5540), hangen aan Stulp | release `apps` van haas-software/stulp |
 | `job-lumen.json` | Lumen, de media-app op de O6N, met de codec-firmware op `/firmware` | een lokale server, `http://192.168.1.208:8002` |
 | `job-webdav.json` | de WebDAV-server op de media-volumes | een lokale server, `http://10.100.0.1:8088` |
 | `hopos-media-o6n.cfg` | de config van de media-node: Lumen als init-job | (geen spec; `CFG=jobs/hopos-media-o6n.cfg MEDIA=1 BOARD=o6n sh image/uefi-run.sh`) |
@@ -33,11 +33,11 @@ op `hopos-1` (`affinity`, `hopos.node`).
 ## Het naamschema van de releases
 
 Elke app van deze boom staat in de rollende release `apps` van
-xinix00/HopOS als `<app>-<arch>.elf`, met `<arch>` de `node.arch` van Hop
+hop-os/HopOS als `<app>-<arch>.elf`, met `<arch>` de `node.arch` van Hop
 (`arm64`, `riscv64`):
 
 ```
-https://github.com/xinix00/HopOS/releases/download/apps/welcome-arm64.elf
+https://github.com/hop-os/HopOS/releases/download/apps/welcome-arm64.elf
 ```
 
 `tools/release.sh` bouwt ze (de lijst `APPS` in `tools/lib.sh` plus decode

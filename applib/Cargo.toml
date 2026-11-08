@@ -18,13 +18,13 @@ netdev = { path = "../netdev" }
 # De netstack (PORT.md §2.1), op een tag en nooit over een pad: lean is een
 # eigen repo met een eigen poort. Met de IPv6-baan (`Udp6Socket`,
 # `ipv6_addresses`; Stulp praat Matter over IPv6); de kern bouwt zonder.
-leannet = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc3", features = ["ipv6"] }
+leannet = { git = "https://github.com/haas-software/lean.git", tag = "v3.2.0-rc3", features = ["ipv6"] }
 # De codec-namen en -nummers (feature `media`, src/codec.rs): dezelfde
 # nummering als de kern, uit het contract zelf.
 driver-codec = { path = "../driver/codec", optional = true }
 # De brug naar leanhttp (feature `http`, src/tcp.rs): dezelfde tag als Hop,
 # zodat `hop-http` en de apps één `AsyncRead` kennen.
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.2.0-rc3", optional = true }
+leanhttp = { git = "https://github.com/haas-software/lean.git", tag = "v3.2.0-rc3", optional = true }
 
 [features]
 default = []

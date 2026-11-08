@@ -3,13 +3,13 @@
   "driver": "hop",
   "artifacts": [
     {
-      "url": "https://github.com/xinix00/Spin/releases/download/rolling/spin-server-arm64-tamago.elf",
+      "url": "https://github.com/haas-software/Spin/releases/download/rolling/spin-server-arm64-tamago.elf",
       "match": {
         "node.arch": "arm64"
       }
     },
     {
-      "url": "https://github.com/xinix00/Spin/releases/download/rolling/spin-server-riscv64-tamago.elf",
+      "url": "https://github.com/haas-software/Spin/releases/download/rolling/spin-server-riscv64-tamago.elf",
       "match": {
         "node.arch": "riscv64"
       }

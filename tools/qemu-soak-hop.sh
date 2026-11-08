@@ -2,7 +2,7 @@
 # De soak van de hoplb-kring op QEMU: N keer achter elkaar Hop op de
 # OS-core, welcome in een slot, hoplb in een tweede slot, en verkeer van de
 # host door de DNAT naar hoplb en van hoplb door de switch (hairpin op het
-# node-IP) naar welcome. De vorm van hop/hoplb/tools/qemu-test.sh, maar met
+# node-IP) naar welcome. De vorm van hop/hop/apps/hoplb/tools/qemu-test.sh, maar met
 # een waakhond op de hartslag van de kern in plaats van één toets: de kring
 # viel op 30-09 één run van de negentien stil (de console stopte na
 # HOPOS_TICK 10, `kicks` liep met ~420/s op, de eerste curl door hoplb kreeg
@@ -56,7 +56,7 @@
 #                                         verzoeken tegelijk door hoplb
 #   TIMEOUT=150                           seconden per run tot hoplb staat
 #   HOP_DIR=pad                           de hop-repo (standaard ../hop/hop)
-#   HOPLB_DIR=pad                         de hoplb-repo (standaard ../hop/hoplb)
+#   HOPLB_DIR=pad                         hoplb in de hop-repo (standaard ../hop/hop/apps/hoplb)
 #   KEEP_GOING=1                          niet stoppen bij rood, alleen tellen
 #   DISKLOAD=1                            een schrijver op de host (1 GB per
 #                                         ronde, F_FULLFSYNC per 64 MB) naast
@@ -87,7 +87,7 @@ KICKRUN="${KICKRUN:-2}"
 LOAD="${LOAD:-20}"
 TIMEOUT="${TIMEOUT:-150}"
 HOP_DIR="$(cd "${HOP_DIR:-$DIR/../hop/hop}" && pwd)"
-HOPLB_DIR="$(cd "${HOPLB_DIR:-$DIR/../hop/hoplb}" && pwd)"
+HOPLB_DIR="$(cd "${HOPLB_DIR:-$DIR/../hop/hop/apps/hoplb}" && pwd)"
 TARGET=aarch64-unknown-none-softfloat
 OUT="${OUT:-$(mktemp -d -t hopos-soak.XXXXXX)}"
 mkdir -p "$OUT"
@@ -119,7 +119,7 @@ echo "== bouwen: hopos (qemuvirt) en welcome hier, hoplb-hopos in $HOPLB_DIR, ag
 HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")" || exit 1
 KERN="$DIR/target/$TARGET/release/hopos"
 strip_elf "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
-strip_elf "$HOPLB_DIR/target/$TARGET/release/hoplb-hopos" "$ART/hoplb.elf"
+strip_elf "$HOPLB_DIR/../../target/$TARGET/release/hoplb-hopos" "$ART/hoplb.elf"
 ARTPORT="$(port 0)"
 (cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
 HPID=$!

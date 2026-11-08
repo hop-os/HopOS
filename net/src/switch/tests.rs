@@ -184,6 +184,77 @@ fn gateway_ip_gaat_lan_poort_nul_in() {
     assert!(h.host_bell.is_set(), "host-taak niet gewekt");
 }
 
+/// Een gepubliceerde poort is ook op 10.100.0.1 bereikbaar: slot 2 belt
+/// 10.100.0.1:8080 (gepubliceerd door slot 1 op :80), het antwoord komt
+/// terug van 10.100.0.1:8080. Een ongepubliceerde poort blijft de node-stack.
+/// De beller laat de L4-checksum leeg, zoals een app naar 10.100.0.1 doet
+/// (`link_trusted`); de dienst krijgt hem kloppend (M4 en QEMU, 08-11).
+#[test]
+fn gepubliceerde_poort_op_het_gateway_ip() {
+    let mut h = harness();
+    h.uplink();
+    let mut host = h.host();
+    let mut srv = h.attach(1);
+    let mut cli = h.attach(2);
+    h.sw.nat().publish(Proto::Tcp, 8080, 1, 80).unwrap();
+    let heen = mk_frame(
+        PROTO_TCP,
+        HOST_MAC,
+        port_mac(2),
+        port_ip4(2),
+        host_ip4(),
+        40000,
+        8080,
+        b"hoi",
+    );
+    let mut heen = heen;
+    put16(&mut heen, ETH_LEN + 20 + 16, 0);
+    h.forward_once(2, &heen);
+    assert!(
+        host.rx.frame().is_none(),
+        "gepubliceerde poort ging poort 0 in"
+    );
+    let got = srv.rx.frame().expect("niets bij de dienst");
+    check_frame(&got, "heen");
+    assert_eq!(
+        (be32(&got, ETH_LEN + 16), be16(&got, ETH_LEN + 22)),
+        (port_ip4(1), 80)
+    );
+    assert_eq!(be32(&got, ETH_LEN + 12), NODE_IP);
+    let masq = be16(&got, ETH_LEN + 20);
+
+    let terug = mk_frame(
+        PROTO_TCP,
+        HOST_MAC,
+        port_mac(1),
+        port_ip4(1),
+        NODE_IP,
+        80,
+        masq,
+        b"dag",
+    );
+    h.forward_once(1, &terug);
+    let got = cli.rx.frame().expect("niets bij de beller");
+    check_frame(&got, "terug");
+    assert_eq!(
+        (be32(&got, ETH_LEN + 12), be16(&got, ETH_LEN + 20)),
+        (host_ip4(), 8080)
+    );
+    assert_eq!(
+        (be32(&got, ETH_LEN + 16), be16(&got, ETH_LEN + 22)),
+        (port_ip4(2), 40000)
+    );
+    assert!(got.ends_with(b"dag") && h.sent().is_empty());
+
+    let mut dicht = heen.clone();
+    put16(&mut dicht, ETH_LEN + 22, 5555);
+    h.forward_once(2, &dicht);
+    assert!(
+        host.rx.frame().is_some(),
+        "ongepubliceerde poort niet naar poort 0"
+    );
+}
+
 #[test]
 fn ingress_framegrens_voor_lan_ringen() {
     let mut h = harness();

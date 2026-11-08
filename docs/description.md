@@ -318,7 +318,10 @@ applib.
   (naar een ander slot), forward (broadcast, ARP voor de gateway beantwoordt
   hij zelf), of de gateway: naar poort 0 voor 10.100.0.1, SNAT voor een
   antwoord van een gepubliceerde poort, hairpin voor het eigen node-IP, of
-  masquerade naar de uplink.
+  masquerade naar de uplink. Een gepubliceerde poort op 10.100.0.1 gaat
+  ook de hairpin in, net als op het node-IP gaat de publicatie vóór de
+  node-stack; het antwoord komt terug van 10.100.0.1. Zo vindt een app de
+  publieke poorten van de node zonder het node-IP te kennen.
 - **Poorten:** de poorten van een start, die van een jobspec en Hop's
   8080 en 9080 (in zijn `StartSpec`, sinds 110b945), via `Cage::publish`
   naar `Nat::publish` (tcp en udp), hoogstens 512.

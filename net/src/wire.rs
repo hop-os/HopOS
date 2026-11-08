@@ -153,6 +153,52 @@ pub(crate) fn fix_l4_ip(f: &mut [u8], l4: usize, proto: u8, old_ip: u32, new_ip:
     }
 }
 
+/// Rekent de L4-checksum van een TCP/UDP-frame helemaal uit, met de
+/// pseudo-header. Voor een frame dat een app naar 10.100.0.1 stuurt: het
+/// slot-LAN is vertrouwd (`link_trusted`), dus daar laat de app hem leeg,
+/// zoals Linux' `CHECKSUM_PARTIAL`. Gaat zo'n frame door de hairpin naar
+/// een buurslot, dan ziet die een afzender buiten het LAN en toetst hij;
+/// een incrementele update van een lege checksum is dan rommel.
+pub(crate) fn fill_l4_csum(f: &mut [u8], l4: usize, proto: u8) {
+    let c = l4 + l4_csum_off(proto);
+    let end = (ETH_LEN + usize::from(be16(f, ETH_LEN + 2))).min(f.len());
+    if end < c + 2 {
+        return;
+    }
+    put16(f, c, 0);
+    let pseudo = f.get(ETH_LEN + 12..ETH_LEN + 20).map_or(0, sum_words);
+    let seg = f.get(l4..end).map_or(0, sum_words);
+    let len = u32::try_from(end - l4).unwrap_or(0);
+    let mut v = !fold16(pseudo + u32::from(proto) + len + seg);
+    if proto == PROTO_UDP && v == 0 {
+        v = 0xffff;
+    }
+    put16(f, c, v);
+}
+
+/// De som van de 16-bit woorden van `b` (een oneven staart als hoge byte),
+/// ongevouwen.
+pub(crate) fn sum_words(b: &[u8]) -> u32 {
+    let mut it = b.chunks_exact(2);
+    let mut s: u32 = it
+        .by_ref()
+        .map(|w| u32::from(u16::from_be_bytes([w[0], w[1]])))
+        .sum();
+    if let [last] = it.remainder() {
+        s += u32::from(*last) << 8;
+    }
+    s
+}
+
+/// Vouwt een som naar 16 bits (de enen-complementsom).
+pub(crate) fn fold16(mut sum: u32) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    // Na het vouwen past de som in 16 bits.
+    (sum & 0xffff) as u16
+}
+
 /// Een IPv4-frame met TCP/UDP en een volledige L4-kop: de offsets die elk
 /// NAT-pad nodig heeft.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,25 +258,7 @@ pub(crate) mod testutil {
     //! ontvanger-checks.
     use super::*;
 
-    pub(crate) fn fold16(mut sum: u32) -> u16 {
-        while sum >> 16 != 0 {
-            sum = (sum & 0xffff) + (sum >> 16);
-        }
-        sum as u16
-    }
-
-    pub(crate) fn sum_words(b: &[u8]) -> u32 {
-        let mut s = 0u32;
-        let mut i = 0;
-        while i + 1 < b.len() {
-            s += u32::from(be16(b, i));
-            i += 2;
-        }
-        if b.len() % 2 == 1 {
-            s += u32::from(b[b.len() - 1]) << 8;
-        }
-        s
-    }
+    pub(crate) use super::{fold16, sum_words};
 
     /// De som over de hele IP-kop (checksum meegeteld) vouwt naar 0xFFFF.
     pub(crate) fn ip_valid(ip: &[u8]) -> bool {

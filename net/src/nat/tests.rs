@@ -341,6 +341,7 @@ fn alloc_port_slaat_bezet_over() {
             slot: 2,
             fin_fwd: false,
             fin_rev: false,
+            via_gw: false,
             slot_ip: port_ip4(2),
             dst_ip: EXT_IP,
             slot_port: 1,

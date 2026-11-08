@@ -54,6 +54,9 @@ pub(crate) struct Flow {
     pub(crate) fin_fwd: bool,
     /// Peer/dienst → client zag FIN.
     pub(crate) fin_rev: bool,
+    /// Een hairpin naar 10.100.0.1 in plaats van het node-IP: de reply
+    /// draagt dat adres weer als bron.
+    pub(crate) via_gw: bool,
     pub(crate) slot_ip: u32,
     pub(crate) dst_ip: u32,
     pub(crate) slot_port: u16,
@@ -352,6 +355,7 @@ mod tests {
             slot,
             fin_fwd: false,
             fin_rev: false,
+            via_gw: false,
             slot_ip: 0x0A64_0000 | (u32::from(slot) + 1),
             dst_ip: 0x5DB8_D822,
             slot_port: sport,

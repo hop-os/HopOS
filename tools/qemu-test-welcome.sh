@@ -19,6 +19,11 @@
 #               "slot 2: ... HOPOS_WELCOME_UP port=80";
 #   van buiten  GET http://127.0.0.1:$WEBPORT/ geeft 200 met de bunny
 #               ("( -.-)") en "slot 2", en GET /health geeft 200 "ok";
+#   10.100.0.1  een job "gw" met als artifact http://10.100.0.1:80/health:
+#               Hop haalt hem door de hairpin bij welcome (de publicatie op
+#               het gateway-adres) en weigert hem pas bij de plaatsing (geen
+#               ELF). De app laat de checksum naar 10.100.0.1 leeg
+#               (link_trusted): welcome toetst hem wel (08-11, M4);
 #   de stop     DELETE /v1/jobs/welcome: de kern trekt de poort in
 #               ("slot 2: ports withdrawn from the uplink
 #               HOPOS_SLOT_UNPUBLISH"), de app hoort de stopbel ("slot 2:
@@ -115,6 +120,16 @@ while alive && [ -z "$PAGE_OK" ]; do
 done
 [ -n "${KEEP_PAGE:-}" ] && [ -s "$PAGE" ] && cp "$PAGE" "$KEEP_PAGE"
 
+# 2b. Een gepubliceerde poort op 10.100.0.1: Hop haalt een "artifact" bij
+# welcome via het gateway-adres.
+GW_MARK="slot 1: .*job gw .*image ended before its program headers"
+if [ -n "$PAGE_OK" ]; then
+	P0="$POSTED"
+	post_job '{"name":"gw","driver":"hop","artifacts":[{"url":"http://10.100.0.1:80/health"}],"memory_limit":16777216,"max_restarts":0}' || true
+	POSTED="$P0"
+	while alive && ! grep -a -q -E "slot 1: .*job gw .*HOP_JOB_FAILED" "$LOG"; do step; done
+fi
+
 # 3. De stop: de job weg, de poort dicht.
 if [ -n "$PAGE_OK" ]; then
 	DELETED="$(curl -s -m 20 -w ' HTTP %{http_code}' -X DELETE \
@@ -135,7 +150,7 @@ fi
 qemu_stop
 
 fail=0
-marks "$BOOT_MARKS" "$PLACE_MARKS" "$STOP_MARKS"
+marks "$BOOT_MARKS" "$PLACE_MARKS" "$GW_MARK" "$STOP_MARKS"
 posted
 if [ -n "$PAGE_OK" ]; then
 	echo "   ok  GET http://127.0.0.1:$WEBPORT/: $PAGE_OK, met de bunny"

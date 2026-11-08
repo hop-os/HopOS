@@ -187,6 +187,8 @@ fn gateway_ip_gaat_lan_poort_nul_in() {
 /// Een gepubliceerde poort is ook op 10.100.0.1 bereikbaar: slot 2 belt
 /// 10.100.0.1:8080 (gepubliceerd door slot 1 op :80), het antwoord komt
 /// terug van 10.100.0.1:8080. Een ongepubliceerde poort blijft de node-stack.
+/// De beller laat de L4-checksum leeg, zoals een app naar 10.100.0.1 doet
+/// (`link_trusted`); de dienst krijgt hem kloppend (M4 en QEMU, 08-11).
 #[test]
 fn gepubliceerde_poort_op_het_gateway_ip() {
     let mut h = harness();
@@ -205,6 +207,8 @@ fn gepubliceerde_poort_op_het_gateway_ip() {
         8080,
         b"hoi",
     );
+    let mut heen = heen;
+    put16(&mut heen, ETH_LEN + 20 + 16, 0);
     h.forward_once(2, &heen);
     assert!(
         host.rx.frame().is_none(),

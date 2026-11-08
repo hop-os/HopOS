@@ -29,7 +29,7 @@ use crate::flows::{FKey, Flow, FlowTable, Id, MAX_FLOWS_PER_SLOT, RKey};
 use crate::plan::{HOST_MAC, host_ip4, port_ip4, port_mac};
 use crate::wire::{
     ETH_LEN, PROTO_TCP, PROTO_UDP, TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN, be16, be32, byte,
-    fix_csum32, ipv4_l4, mac_at, put_mac, put32, rewrite_l4,
+    fill_l4_csum, fix_csum32, ipv4_l4, mac_at, put_mac, put32, rewrite_l4,
 };
 use crate::{Error, Stats};
 use bounded::BoundedVec;
@@ -594,6 +594,9 @@ impl Nat {
             return true;
         };
         fl.via_gw = dst_ip != u.ip;
+        if fl.via_gw {
+            fill_l4_csum(f, l4, proto); // de app liet hem leeg: zie daar
+        }
         let np = fl.node_port;
         Self::snat_src(f, l4, proto, slot_ip, u.ip, sport, np);
         Self::dnat_to_slot(io, srv, f, l4, proto, dst_ip, srv_ip, dport, m.slot_port);

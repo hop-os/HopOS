@@ -114,19 +114,15 @@ static DISK_BELL: Signal = Signal::new();
 /// ontvangst van de mailbox en de NVMe; 0 = (nog) niet bedraad.
 static ANS_LINES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 
-/// Hoe lang een stille ANS stil moet blijven na het aanzetten van zijn
-/// lijnen: een lijn die dan al vuurt, is niet de onze.
-const QUIET_NS: u64 = 1_000_000;
-
 /// Zet de ANS op zijn lijnen: uit `/arm-io/ans` "interrupts", in de
 /// volgorde die Linux' devicetree van de M1 er ook heeft (t8103.dtsi): de
 /// vier van de mailbox (send-empty, send-not-empty, recv-empty,
 /// recv-not-empty) en daarna die van de NVMe. Wij nemen recv-not-empty
 /// (woord 3) en de laatste. Beide zijn level en alleen de driver laat ze
 /// zakken (de CQ-deurbel, de mailbox leeglezen): de dispatch houdt ze
-/// dicht tot [`AnsRtkit::service`]. De toets geldt de NVMe-lijn: een idle
-/// NVMe vuurt niet. De volgorde is die van de M1; op de M4 (08-11) gaf de
-/// ADT er vijf (1005 is woord 3, 1018 de laatste).
+/// dicht tot [`AnsRtkit::service`]. Geen stilte-toets (zie hieronder). De
+/// volgorde is die van de M1; op de M4 (08-11) gaf de ADT er vijf (1005 is
+/// woord 3, 1018 de laatste).
 fn wire_lines(ints: &[u8], disk: &mut Disk) -> Result<(), Error> {
     let word = |i: usize| {
         let w = ints.get(i * 4..i * 4 + 4)?;
@@ -139,29 +135,17 @@ fn wire_lines(ints: &[u8], disk: &mut Disk) -> Result<(), Error> {
     if n < 5 {
         return Err(Error::Irq("/arm-io/ans has fewer than five interrupts"));
     }
-    // Eerst de NVMe-lijn alleen: een NVMe zonder openstaande commando's
-    // vuurt niet, dus een lijn die dan al gaat, is niet de zijne. De
-    // mailbox mag wel vuren: RTKit stuurt uit zichzelf (syslog, ioreport,
-    // de buffers van zijn opstart), en recv-not-empty is dan gewoon werk
-    // (Linux' apple-mailbox). Op de M4 (08-11) ging de toets over beide
-    // lijnen samen daarop onderuit.
-    let enable = |slot: &AtomicU32, n: u32| {
+    // Beide lijnen aan, zonder stilte-toets: de ANS2 van de M4 laat de
+    // NVMe-lijn ook gaan zonder completion (08-11, op ijzer: 1018 vuurde op
+    // een idle ANS), en Linux eist dat ook niet (`apple_nvme_irq` kijkt in
+    // beide CQ's en geeft IRQ_NONE). Een loze bel wekt de wachter, die
+    // niets vindt en weer slaapt; een lijn die nooit komt, laat de queue op
+    // zijn termijn luid falen.
+    for (slot, n) in ANS_LINES.iter().zip([mbox, nvme]) {
         cpu::irq::enable_held(Line(n), &DISK_BELL)
             .map_err(|_| Error::Irq("the AIC refused an ANS line"))?;
         slot.store(n, Relaxed);
-        Ok::<(), Error>(())
-    };
-    let [mbox_slot, nvme_slot] = &ANS_LINES;
-    enable(nvme_slot, nvme)?;
-    let _ = DISK_BELL.take();
-    if crate::irq::hits_within(&DISK_BELL, QUIET_NS) > 0 {
-        println!(
-            "disk: ans NVMe line {nvme} (word {} of {n}) fires on an idle ANS HOPOS_ANS_IRQ",
-            n - 1
-        );
-        return Err(Error::Irq("the ANS NVMe line fires on an idle ANS"));
     }
-    enable(mbox_slot, mbox)?;
     disk.coprocessor().service().map_err(|e| {
         println!("disk: ans: {e}");
         Error::Disk("the ANS mailbox failed")

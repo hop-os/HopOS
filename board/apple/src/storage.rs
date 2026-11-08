@@ -124,9 +124,9 @@ const QUIET_NS: u64 = 1_000_000;
 /// recv-not-empty) en daarna die van de NVMe. Wij nemen recv-not-empty
 /// (woord 3) en de laatste. Beide zijn level en alleen de driver laat ze
 /// zakken (de CQ-deurbel, de mailbox leeglezen): de dispatch houdt ze
-/// dicht tot [`AnsRtkit::service`]. Daarna de toets: een idle ANS met een
-/// lege mailbox vuurt niet. ONGETOETST op ijzer: de volgorde is die van de
-/// M1, op de M4 niet gezien.
+/// dicht tot [`AnsRtkit::service`]. De toets geldt de NVMe-lijn: een idle
+/// NVMe vuurt niet. De volgorde is die van de M1; op de M4 (08-11) gaf de
+/// ADT er vijf (1005 is woord 3, 1018 de laatste).
 fn wire_lines(ints: &[u8], disk: &mut Disk) -> Result<(), Error> {
     let word = |i: usize| {
         let w = ints.get(i * 4..i * 4 + 4)?;
@@ -139,25 +139,33 @@ fn wire_lines(ints: &[u8], disk: &mut Disk) -> Result<(), Error> {
     if n < 5 {
         return Err(Error::Irq("/arm-io/ans has fewer than five interrupts"));
     }
-    for (slot, n) in ANS_LINES.iter().zip([mbox, nvme]) {
+    // Eerst de NVMe-lijn alleen: een NVMe zonder openstaande commando's
+    // vuurt niet, dus een lijn die dan al gaat, is niet de zijne. De
+    // mailbox mag wel vuren: RTKit stuurt uit zichzelf (syslog, ioreport,
+    // de buffers van zijn opstart), en recv-not-empty is dan gewoon werk
+    // (Linux' apple-mailbox). Op de M4 (08-11) ging de toets over beide
+    // lijnen samen daarop onderuit.
+    let enable = |slot: &AtomicU32, n: u32| {
         cpu::irq::enable_held(Line(n), &DISK_BELL)
             .map_err(|_| Error::Irq("the AIC refused an ANS line"))?;
         slot.store(n, Relaxed);
+        Ok::<(), Error>(())
+    };
+    let [mbox_slot, nvme_slot] = &ANS_LINES;
+    enable(nvme_slot, nvme)?;
+    let _ = DISK_BELL.take();
+    if crate::irq::hits_within(&DISK_BELL, QUIET_NS) > 0 {
+        println!(
+            "disk: ans NVMe line {nvme} (word {} of {n}) fires on an idle ANS HOPOS_ANS_IRQ",
+            n - 1
+        );
+        return Err(Error::Irq("the ANS NVMe line fires on an idle ANS"));
     }
+    enable(mbox_slot, mbox)?;
     disk.coprocessor().service().map_err(|e| {
         println!("disk: ans: {e}");
         Error::Disk("the ANS mailbox failed")
     })?;
-    let _ = DISK_BELL.take();
-    if crate::irq::hits_within(&DISK_BELL, QUIET_NS) > 0 {
-        println!(
-            "disk: ans lines {mbox} and {nvme} of {n}: one fires on an idle ANS HOPOS_ANS_IRQ"
-        );
-        return Err(Error::Irq("an ANS line fires on an idle ANS"));
-    }
-    disk.coprocessor()
-        .service()
-        .map_err(|_| Error::Disk("the ANS mailbox failed"))?;
     disk.set_irq(&DISK_BELL);
     println!(
         "disk: ans on AIC lines {mbox} (mailbox recv) and {nvme} (NVMe), words 3 and {} of {n} HOPOS_ANS_IRQ",

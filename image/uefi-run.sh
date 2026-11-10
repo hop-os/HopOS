@@ -146,7 +146,7 @@ NTPCFG=""
 if [ -z "${CFG:-}" ] && [ "$BOARD" != uefi ]; then
 	FLAVOR=headless
 	if [ "${GUI:-0}" = 1 ] || [ "${MEDIA:-0}" = 1 ]; then FLAVOR=headfull; fi
-	CFG="$DIR/image/cfg/$FLAVOR.cfg"
+	CFG="$DIR/image/cfg/$FLAVOR.cfg $DIR/image/cfg/$BOARD.cfg"
 fi
 if [ -n "${CFG:-}" ]; then
 	for f in $CFG; do

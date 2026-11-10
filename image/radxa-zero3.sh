@@ -116,7 +116,7 @@ print(f"hopos.img: {len(img)} bytes, image_size {mem_end - IMAGE_BASE:#x}, entry
 PYEOF
 # De config in het venster van de kern (board/src/cfgwin.rs), zoals op elk
 # board: hij wint van hopos.cfg in de initrd en van de APPEND.
-CFG="${CFG:-$DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg}"
+CFG="${CFG:-$DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg $DIR/image/cfg/radxa.cfg}"
 for f in $CFG; do
 	[ -f "$f" ] || { echo "FOUT: CFG: $f bestaat niet" >&2; exit 1; }
 done

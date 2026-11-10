@@ -74,7 +74,7 @@ fi
 # De toets: het parameterblok op 0x100 ("HOPASTUB", doel, grootte, entry)
 # moet kloppen met het ELF, de stub-ingang op 0x800 moet code zijn, en
 # 0xF000 (de plek van de loader) leeg: de linker legt er niets, head.rs.
-CFG="${CFG-$DIR/image/cfg/headless.cfg}"
+CFG="${CFG-$DIR/image/cfg/headless.cfg $DIR/image/cfg/apple.cfg}"
 for f in $CFG; do
 	[ -f "$f" ] || {
 		echo "apple-m4: CFG: $f does not exist" >&2

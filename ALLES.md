@@ -104,7 +104,7 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       paar vindt, dus pas met een 3.0.8-stick) en de nieuwe flip-ingang op
       de M4 en de Pi's (op de O6N gezien: O2 koud op met de doos van de
       toetskern, O2 warm naar main landt).
-- [ ] O6N met `hopos.oscore=small`: de verhuizing van de kern naar een
+- [ ] O6N met `hopos.system.core=small`: de verhuizing van de kern naar een
       kleine core is nog nooit op ijzer gelopen (viel tot 0f03544 terug op
       een big core); verwacht `HOPOS_OSCORE_MOVE` naar core 2 en in de tik
       `stack_kb` rond 156. De M4 met `small` net zo.

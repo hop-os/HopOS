@@ -141,7 +141,7 @@ pub(crate) fn new(plan: Plan) -> Result<SlotCage, el2::Error> {
     let installed = el2::install_switch_code(&plan, FLAVOR)?;
     el2::init_app_cores(&plan, &installed, false)?;
     // De boot-core, als de kern bij boot naar de OS-core verhuisde (main,
-    // `hopos.oscore`): nu is er een parkeerlus, en wordt hij een
+    // `hopos.system.core`): nu is er een parkeerlus, en wordt hij een
     // geparkeerde app-core, vóór de eerste dispatch.
     if let Some(m) = el2::held() {
         let phys = vboard::slots::core_of(m);

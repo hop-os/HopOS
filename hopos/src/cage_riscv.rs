@@ -120,7 +120,7 @@ pub(crate) struct Installed {
 pub(crate) struct Rv {
     installed: Installed,
     /// De ASID-bits van het hart van de kern (`oscore::asid_bits`), als de
-    /// rotatie daar ASID's gebruikt (`hopos.oscore.asid`); 0 = een flush per
+    /// rotatie daar ASID's gebruikt (`hopos.system.asid`); 0 = een flush per
     /// wissel. Alleen een bewoner van de OS-core krijgt er een: een app-hart
     /// flusht bij elke wissel.
     asid_bits: u32,

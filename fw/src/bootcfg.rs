@@ -147,9 +147,9 @@ mod tests {
     #[test]
     fn the_file_wins_over_the_bootargs() {
         let file = "hopos.stage=app\nhopos.cores=2\nhopos.init[]=b\n";
-        let args = "console=ttyAMA0 hopos.stage=hop hopos.oscore=big hopos.init[]=a";
+        let args = "console=ttyAMA0 hopos.stage=hop hopos.system.core=big hopos.init[]=a";
         assert_eq!(param(file, args, "hopos.stage"), "app");
-        assert_eq!(param(file, args, "hopos.oscore"), "big");
+        assert_eq!(param(file, args, "hopos.system.core"), "big");
         assert_eq!(param("", args, "hopos.stage"), "hop");
         assert_eq!(param(file, "", "hopos.cores"), "2");
         assert_eq!(param(file, args, "hopos.node"), "");

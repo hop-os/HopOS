@@ -30,3 +30,6 @@ default = []
 gui = ["board-raspi/gui"]
 # De VL805 als USB-host (usb.rs): de bouwsteen van gui en media.
 usb = ["board-raspi/usb", "dep:driver-brcmpcie"]
+
+[dev-dependencies]
+fw = { path = "../../fw" }

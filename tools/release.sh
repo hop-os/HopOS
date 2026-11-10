@@ -186,7 +186,7 @@ uefi() {
 	card "$ESP.img" "hopos-$1-$4.img"
 }
 apple() {
-	CFG="$DIR/image/cfg/headless.cfg" EMBED="$HOP_ELF" sh image/apple-m4.sh
+	CFG="$DIR/image/cfg/headless.cfg $DIR/image/cfg/apple.cfg" EMBED="$HOP_ELF" sh image/apple-m4.sh
 	# De stick: het bootobject, de installer en de uitleg op één FAT-partitie
 	# (LBA 2048, label HOPOS), zodat er in Recovery niets te typen valt behalve
 	# het pad naar install.sh; die zoekt het image naast zichzelf.
@@ -197,7 +197,7 @@ apple() {
 	flip apple headless 0 ""
 }
 licheerv() {
-	STAGE="$HOP_RV" CFG="$DIR/image/cfg/headless.cfg" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
+	STAGE="$HOP_RV" CFG="$DIR/image/cfg/headless.cfg $DIR/image/cfg/licheerv.cfg" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
 	card target/licheerv/hopos-licheerv.img hopos-licheerv-headless.img
 	# Ook de losse fip.bin: een kaart die al een HopOS-kaart is, krijgt zo een
 	# nieuwe versie door alleen dat bestand te vervangen (ook vanaf een
@@ -212,11 +212,11 @@ for FLAVOR in headless headfull; do
 		G=1
 	fi
 	for b in rpi4 rpi5; do
-		job "$b-$FLAVOR" pi "$b" "$G" "$DIR/image/cfg/$FLAVOR.cfg" "$FLAVOR"
+		job "$b-$FLAVOR" pi "$b" "$G" "$DIR/image/cfg/$FLAVOR.cfg $DIR/image/cfg/$b.cfg" "$FLAVOR"
 	done
-	job "radxa-$FLAVOR" radxa "$G" "$DIR/image/cfg/$FLAVOR.cfg" "$FLAVOR"
+	job "radxa-$FLAVOR" radxa "$G" "$DIR/image/cfg/$FLAVOR.cfg $DIR/image/cfg/radxa.cfg" "$FLAVOR"
 	for b in o6n altra; do
-		job "$b-$FLAVOR" uefi "$b" "$G" "$DIR/image/cfg/$FLAVOR.cfg" "$FLAVOR"
+		job "$b-$FLAVOR" uefi "$b" "$G" "$DIR/image/cfg/$FLAVOR.cfg $DIR/image/cfg/$b.cfg" "$FLAVOR"
 	done
 done
 job apple-headless apple
@@ -277,7 +277,7 @@ config in each image is one file per flavor from \`image/cfg\`:
 \`headfull.cfg\` (the same, and **welcome** on port 80). Where Hop lives is
 the board's default: the OS core on the Pis and the Radxa, a core of his
 own, a small one where the board has them, on the O6N, the Altra, the M4
-and the LicheeRV (\`hopos.hop.sharegroup\` and \`hopos.hop.core-class\`
+and the LicheeRV (\`hopos.hop.sharegroup\` and \`hopos.hop.coreclass\`
 override it). A node without \`hopos.node\` names itself after its board
 and the tail of its MAC (\`rpi4-4c54\`).
 

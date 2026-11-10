@@ -64,3 +64,25 @@ pub const OEM_ID: [u8; 6] = *b"CIXTEK";
 
 /// De naam, voor de bootlog.
 pub const NAME: &str = "o6n";
+
+/// Het blok van dit board in zijn image (image/cfg/o6n.cfg) zegt wat de
+/// code doet zonder die regels: de sharegroup van Hop en de klasse van zijn
+/// core. Zo lopen config en standaard niet uiteen.
+#[cfg(test)]
+mod cfg_block {
+    use board::Board;
+
+    #[test]
+    fn the_board_block_says_what_the_code_does() {
+        let t = include_str!("../../../image/cfg/o6n.cfg");
+        assert_eq!(
+            fw::bootcfg::get(t, "hopos.hop.sharegroup"),
+            <crate::Machine as Board>::HOP_GROUP
+        );
+        let class = <crate::Machine as Board>::HOP_CORE_CLASS.map(|c| format!("{c}"));
+        assert_eq!(
+            fw::bootcfg::get(t, "hopos.hop.coreclass"),
+            class.as_deref().unwrap_or("")
+        );
+    }
+}

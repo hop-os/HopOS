@@ -53,14 +53,14 @@ naam, `hop` op de O6N, de Altra, de M4 en de LicheeRV (een eigen app-core;
 jobs met `"tags":{"sharegroup":"hop"}` delen hem en krijgen op last hun
 deel van de beurten, zoals in elke sharegroup). Hop krijgt die naam als
 `HOPOS_HOP_GROUP` en telt haar vrij in zijn planning. Met een eigen groep
-kiest `hopos.hop.core-class=small|mid|big` de soort core (de standaard van
+kiest `hopos.hop.coreclass=small|mid|big` de soort core (de standaard van
 de O6N, de Altra en de M4 is `small`, de andere borden hebben er geen): de
 eerste core van de groep komt uit die klasse als er een vrij is, anders uit elke
 (`Placement::prefer` in `kern/src/pool.rs`; dezelfde namen als
 `tags.core-class` van een job). Op de M4 is small een E-core, op de O6N
 een A520; borden zonder klassen (de Pi's, de Radxa, de Altra, de LicheeRV)
 nemen de eerste vrije core, en op de OS-core (`system`) kiest
-`hopos.oscore` de core. Op de console: `HOPOS_HOP_GROUP`,
+`hopos.system.core` de core. Op de console: `HOPOS_HOP_GROUP`,
 `HOPOS_HOP_CLASS` en `class=` achteraan `HOPOS_HOP_START`.
 Een warme flip verplaatst Hop niet (`HOPOS_HOP_RESUMED`): de nieuwe kern
 neemt zijn groep en core over, de bootregel zegt `(carried over the flip)`,

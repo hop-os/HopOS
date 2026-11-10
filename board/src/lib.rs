@@ -122,7 +122,7 @@ impl fmt::Display for CoreClass {
     }
 }
 
-/// De OS-core bij de waarde `v` van `hopos.oscore` (`small`, `mid`, `big`
+/// De OS-core bij de waarde `v` van `hopos.system.core` (`small`, `mid`, `big`
 /// of een core-nummer) op een board met `cores` cores en klassen `class`:
 /// een klasse is de eerste core van die klasse. Zonder vraag de boot-core
 /// `boot`; een vraag die niet kan, geeft ook `boot`, met de reden.
@@ -404,7 +404,7 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
     const HOP_GROUP: &'static str = "system";
 
     /// De soort core die de groep van Hop als eerste zoekt zonder
-    /// `hopos.hop.core-class` in de config: geen voorkeur, of een zuinige
+    /// `hopos.hop.coreclass` in de config: geen voorkeur, of een zuinige
     /// waar het board klassen heeft. Op de OS-core doet hij niets.
     const HOP_CORE_CLASS: Option<CoreClass> = None;
 
@@ -522,9 +522,19 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
     /// De fysieke index van de core waar dit draait.
     fn this_core(&self) -> usize;
 
-    /// De OS-core die de config vraagt (`hopos.oscore=<small|mid|big|N>`),
-    /// met een reden als de vraag niet kon: dan de boot-core, luid.
+    /// De OS-core die de config vraagt ([`Board::system_core_ask`]), met een
+    /// reden als de vraag niet kon: dan de boot-core, luid.
     fn os_core(&self) -> (usize, Option<&'static str>);
+
+    /// Wat de config van de OS-core vraagt: `hopos.system.coreclass`
+    /// (`small`, `mid`, `big`: de eerste core van die klasse) als die gezet
+    /// is, anders `hopos.system.core` (een nummer); "" zonder beide.
+    fn system_core_ask(&self) -> &'static str {
+        match self.boot_param("hopos.system.coreclass") {
+            "" => self.boot_param("hopos.system.core"),
+            class => class,
+        }
+    }
 
     /// De kick van de OS-core voor de rotatie van `cpu::el2`: de SGI naar
     /// deze core, en de peek waarmee de kern na een terugkeer ziet of het

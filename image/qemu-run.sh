@@ -20,7 +20,7 @@
 #                                    app-core (PORT.md beslissing 2);
 #                                    standaard 4
 #   OSCORE=1 image/qemu-run.sh       de OS-core (bootparameter
-#                                    hopos.oscore=<small|mid|big|N> in de
+#                                    hopos.system.core=<small|mid|big|N> in de
 #                                    FDT-bootargs); de kern boot op core 0
 #                                    en verhuist er vóór de eerste bewoner
 #                                    heen. Standaard geen: de boot-core
@@ -209,7 +209,7 @@ fi
 # (tools/qemu-test-store.sh geeft er `hopos.s3.*` mee voor Hop). De laatste
 # waarde wint, dus een hopos.ntp in BOOTARGS gaat voor.
 [ -n "${NTPPORT:-}" ] || sntp
-[ -z "${OSCORE:-}" ] || BOOTARGS="hopos.oscore=$OSCORE${BOOTARGS:+ $BOOTARGS}"
+[ -z "${OSCORE:-}" ] || BOOTARGS="hopos.system.core=$OSCORE${BOOTARGS:+ $BOOTARGS}"
 
 # De schijf: ijl aangemaakt als hij er niet is (dd met seek schrijft niets).
 # Met DISKLAT een null-co met die latency per verzoek, zonder bestand.

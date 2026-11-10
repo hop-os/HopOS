@@ -107,7 +107,7 @@ ELF="$DIR/target/$TARGET/release/hopos"
 ENTRY="$(python3 -c 'import struct,sys; print(hex(struct.unpack_from("<Q", open(sys.argv[1],"rb").read(32), 24)[0]))' "$ELF")"
 [ "$ENTRY" = "$RUNADDR" ] || { echo "WEIGER: entry $ENTRY is niet RUNADDR $RUNADDR (linkscript?)" >&2; exit 1; }
 "$OBJCOPY" -O binary "$ELF" "$OUT/monitor.bin"
-CFG="${CFG-$DIR/image/cfg/headless.cfg}"
+CFG="${CFG-$DIR/image/cfg/headless.cfg $DIR/image/cfg/licheerv.cfg}"
 if [ -n "$CFG" ]; then
 	for f in $CFG; do
 		[ -f "$f" ] || { echo "config ontbreekt: $f" >&2; exit 1; }

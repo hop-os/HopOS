@@ -217,7 +217,7 @@ executor.
      handoff op de heap, en `discover` levert de cores en hun mpidr.
 4. `conport::here()`.
    - **Waarom:** op de M4 kent `this_core` de cores pas na de ADT (01-10).
-5. **`move_to_os_core`.** Wijst `hopos.oscore` een andere core aan:
+5. **`move_to_os_core`.** Wijst `hopos.system.core` een andere core aan:
    1. `cpu::smp::start_one` start die core met het levende regime (MAIR,
       TCR, TTBR0, HCR, VBAR, SCTLR) en een stack van 256 KiB uit de heap.
    2. De boot-core gaat in `cpu::el2::hold` en wacht tot de kooi-regio er is.
@@ -455,7 +455,7 @@ Hop is de bewoner van slot 1. De kern is zijn supervisor:
 2. **`spec`:**
    - De env uit `NodeCfg` plus de feiten van de kern: node-IP, DNS, cores,
      groep, koude flip, pool minus de codec-arena, `HOP_MEM`.
-   - De plaatsing: `Placement::hop` plus `hopos.hop.core-class` als
+   - De plaatsing: `Placement::hop` plus `hopos.hop.coreclass` als
      voorkeur.
 3. **`set_resident`** vóór de plaatsing.
    - **Waarom:** zodra de poort aan de switch hangt, mag de switch niet op

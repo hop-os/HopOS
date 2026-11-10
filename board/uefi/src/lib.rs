@@ -425,13 +425,13 @@ impl Uefi {
         Self
     }
 
-    /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`)
+    /// De OS-core die `hopos.cfg` vraagt (`hopos.system.core=<small|mid|big|N>`)
     /// met de klassen `class` van het board erboven: de O6N heeft een eigen
     /// indeling (de MPIDR-tabel), want zijn MADT zegt overal 0. Een reden
     /// als de vraag niet kon: dan de boot-core (0), luid.
     #[must_use]
     pub fn os_core_by(&self, class: impl Fn(usize) -> CoreClass) -> (usize, Option<&'static str>) {
-        board::os_core(self.boot_param("hopos.oscore"), self.cores(), class, 0)
+        board::os_core(self.system_core_ask(), self.cores(), class, 0)
     }
 
     /// Een ACPI-tabel met signature `sig` (de eerste; `DSDT` via de FADT),
@@ -890,7 +890,7 @@ impl Board for Uefi {
         }
     }
 
-    /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`),
+    /// De OS-core die `hopos.cfg` vraagt (`hopos.system.core=<small|mid|big|N>`),
     /// met een reden als de vraag niet kon: dan de boot-core (0), luid. Een
     /// klasse is de eerste core van die klasse (MADT-efficiëntieklasse).
     fn os_core(&self) -> (usize, Option<&'static str>) {

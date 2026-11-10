@@ -228,7 +228,7 @@ fn move_to_os_core(board: &'static Machine, el: u8) {
     let here = board.this_core();
     if let Some(why) = why {
         cpu::fatal!(
-            "oscore: hopos.oscore not honoured ({why}), the kern would stay on core {here}"
+            "oscore: hopos.system.core not honoured ({why}), the kern would stay on core {here}"
         );
     }
     if os == here {
@@ -422,7 +422,7 @@ fn setup(board: &'static Machine, el: u8, wd: watchdog::Armed) -> <Machine as Bo
     }
     conport::enable(kern::nodecfg::console_enabled(&node_cfg));
     TICK_LOG.store(node_cfg.one("hopos.tick") == "1", Relaxed);
-    OS_ASID.store(node_cfg.one("hopos.oscore.asid") != "0", Relaxed);
+    OS_ASID.store(node_cfg.one("hopos.system.asid") != "0", Relaxed);
 
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
     // de node-stack, de lease en de system-listener; met een overdracht de
@@ -660,7 +660,7 @@ const STACK_METER_SLACK: u64 = 16 * 1024;
 /// woorden per seconde; de schrijfslag alleen over wat de vorige tik vuil
 /// maakte.
 ///
-/// Na een verhuizing (`hopos.oscore`) draait de kern op de stack van
+/// Na een verhuizing (`hopos.system.core`) draait de kern op de stack van
 /// `cpu::smp::start_one` in de heap, en die meet hij dan. Staat de eigen
 /// stackpositie niet in de stack die hij meet, dan niets: tot 04-10 wiste
 /// de meter van de verhuisde kern van de boot-stack tot aan zijn eigen sp,
@@ -703,7 +703,7 @@ fn stack_high_water() -> u64 {
 /// de executor.
 /// `hopos.tick=1`: de tikregel elke seconde op de console, niet alleen de eerste drie.
 static TICK_LOG: AtomicBool = AtomicBool::new(false);
-/// `hopos.oscore.asid=0`: op riscv64 een TLB-flush bij elke wissel op de
+/// `hopos.system.asid=0`: op riscv64 een TLB-flush bij elke wissel op de
 /// OS-core in plaats van een ASID per bewoner (cpu/src/riscv/oscore.rs), de
 /// vergelijking op ijzer. Standaard aan; arm64 heeft zijn VMID altijd.
 #[cfg_attr(not(target_arch = "riscv64"), allow(dead_code))]

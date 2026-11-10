@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(c.of(&cs[3]), CoreClass::Big);
     }
 
-    /// `hopos.oscore` op de Cix P1 zoals de firmware hem geeft (MADT overal
+    /// `hopos.system.core` op de Cix P1 zoals de firmware hem geeft (MADT overal
     /// 0, geen `_CPC` hier) en in de MADT-volgorde van de O6N (de
     /// CPU_ON-regels op de console: core 0 is 0xa00, core 1 0xb00, core 2 tot
     /// 11 zijn 0x000 tot 0x900): de klasse komt uit de MPIDR-tabel, niet uit

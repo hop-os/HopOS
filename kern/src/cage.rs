@@ -31,8 +31,8 @@ use core::time::Duration;
 /// Een board met één soort core zegt overal [`CoreClass::Mid`] of `None`;
 /// een big.LITTLE-board zegt per core wat hij is. Hop-de-bewoner vraagt
 /// geen klasse ([`crate::pool::Placement::hop`]): op de OS-core kiest de
-/// bootparameter `hopos.oscore` de soort (PORT.md beslissing 2), en op een
-/// app-core is `hopos.hop.core-class` een voorkeur, geen eis.
+/// bootparameter `hopos.system.core` de soort (PORT.md beslissing 2), en op een
+/// app-core is `hopos.hop.coreclass` een voorkeur, geen eis.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum CoreClass {
     /// Zuinig (A55, E-core).

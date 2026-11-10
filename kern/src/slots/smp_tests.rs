@@ -21,6 +21,7 @@ fn group(name: &str) -> Placement {
         cores: 1,
         class: None,
         prefer: None,
+        pin: None,
     }
 }
 

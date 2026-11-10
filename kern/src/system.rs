@@ -2263,6 +2263,7 @@ fn placement(req: &StartReq<'_>) -> Result<Placement> {
             Wire::Big => Some(CoreClass::Big),
         },
         prefer: None,
+        pin: None,
     })
 }
 

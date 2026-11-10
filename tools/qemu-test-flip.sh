@@ -102,7 +102,7 @@
 #                                           doordraait (GET /tasks) en er geen
 #                                           sprong, geen bevriezing en geen
 #                                           landing op de console staat.
-#   OSCORE=1 tools/qemu-test-flip.sh        de kern op core 1 (hopos.oscore): de
+#   OSCORE=1 tools/qemu-test-flip.sh        de kern op core 1 (hopos.system.core): de
 #                                           flip springt vanaf core 1, en de
 #                                           nieuwe kern moet op een andere core
 #                                           dan 0 door `_start` (cpu::boot
@@ -303,7 +303,7 @@ if [ "$BOARD" = uefi ]; then
 	# De feature efi-rng (zoals de O6N): kern A zaait uit het EFI_RNG_PROTOCOL
 	# van EDK2 (de virtio-rng hieronder), kern B uit het zaad dat A meegaf.
 	printf 'hopos.insecure=1\n' >"$ART/hopos.cfg"
-	[ -n "${OSCORE:-}" ] && printf 'hopos.oscore=%s\n' "$OSCORE" >>"$ART/hopos.cfg"
+	[ -n "${OSCORE:-}" ] && printf 'hopos.system.core=%s\n' "$OSCORE" >>"$ART/hopos.cfg"
 	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_ELF" CFG="$ART/hopos.cfg" \
 		FEATURES="${FEATURES:+$FEATURES,}board-uefi/efi-rng" GUI=0 \
 		sh "$DIR/image/uefi-run.sh" 2>&1 | sed 's/^/   /'

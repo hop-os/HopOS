@@ -128,3 +128,23 @@ mod tests {
         assert_eq!((disk.bar, disk.win), (0x3000_0020_0000, 1));
     }
 }
+
+/// Het blok van dit board in zijn image (image/cfg/altra.cfg) zegt wat de
+/// code doet zonder die regels: de sharegroup van Hop, en zijn core. Zo
+/// lopen config en standaard niet uiteen.
+#[cfg(test)]
+mod cfg_block {
+    use board::Board;
+
+    #[test]
+    fn the_board_block_says_what_the_code_does() {
+        let t = include_str!("../../../image/cfg/altra.cfg");
+        assert_eq!(
+            fw::bootcfg::get(t, "hopos.hop.sharegroup"),
+            <crate::Machine as Board>::HOP_GROUP
+        );
+        // De Altra kent geen klassen (de voorkeur van de code doet hier
+        // niets): het blok noemt de core zelf.
+        assert_eq!(fw::bootcfg::get(t, "hopos.hop.core"), "1");
+    }
+}

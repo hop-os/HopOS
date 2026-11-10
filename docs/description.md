@@ -16,7 +16,7 @@ is. De volgorde in de tijd en de afwegingen per stap:
 ## 1. In één alinea
 
 HopOS is één statische binary die het hele OS is. Core 0 (of de core die
-`hopos.oscore` aanwijst) draait de kern op EL2 (riscv: machine mode). Elke
+`hopos.system.core` aanwijst) draait de kern op EL2 (riscv: machine mode). Elke
 app is een ELF in een eigen fysieke partitie achter een hardware-kooi
 (stage-2 op arm64, PMP plus Sv39 op riscv), op een eigen core of op een core
 die hij expliciet deelt. Er is geen shell, geen libc, geen proces: een app
@@ -95,7 +95,7 @@ hem bij stroom aan opnieuw, zonder handoff: een koude boot is een boot
 zonder handoff. riscv64 flipt niet en heeft geen pagina.
 
 `kmain` doet console, privilegetoets (EL2 of M-mode, anders parkeren), heap,
-`discover`, en `move_to_os_core`: wijst `hopos.oscore` een andere core aan,
+`discover`, en `move_to_os_core`: wijst `hopos.system.core` een andere core aan,
 dan start `cpu::smp::start_one` die core en wordt de boot-core een app-core
 (`cpu::el2::hold`). Daarna `setup` en `exec.run`.
 
@@ -624,7 +624,7 @@ staat erbij als open of bewust.
 
 Nagelopen op 04-10; wat een fout was, is gerepareerd.
 
-- **O6N: `hopos.oscore=small` viel terug.** `BOARD.os_core()` kwam via
+- **O6N: `hopos.system.core=small` viel terug.** `BOARD.os_core()` kwam via
   `Deref` bij `Uefi::os_core` met de MADT-klassen (op de Cix allemaal 0,
   dus alles big). Nu kiest `board_uefi::On::os_core` (de O6N en de Altra
   zijn sinds a0eaeb0 `On<Cix>` en `On<Ampere>`) via `Uefi::os_core_by` met

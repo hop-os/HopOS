@@ -2160,6 +2160,7 @@ pub(crate) mod tests {
             cores,
             class: None,
             prefer: None,
+            pin: None,
         }
     }
 

@@ -524,9 +524,19 @@ impl Board for LicheeRv {
         HART_BIG
     }
 
-    /// De OS-core: het hart van de kern. Een `hopos.oscore` is er niet.
+    /// De OS-core: het hart van de kern, de C906B (core 0). `hopos.system.core`
+    /// kan alleen 0 zijn: de FSBL start de kern op de C906B, en de C906L is
+    /// het app-hart (zonder machine mode voor de kern).
     fn os_core(&self) -> (usize, Option<&'static str>) {
-        (self.this_core(), None)
+        match self.system_core_ask() {
+            "" | "0" => (self.this_core(), None),
+            _ => (
+                self.this_core(),
+                Some(
+                    "the LicheeRV keeps the OS on core 0, the C906B (the FSBL starts the kernel there)",
+                ),
+            ),
+        }
     }
 
     /// De bel van de arm64-rotatie: een stub, zie `board-qemuvirt-riscv`.
@@ -579,5 +589,27 @@ mod tests {
         assert!(b.app_hart(HART_LITTLE).resettable);
         assert!(!b.app_hart(HART_BIG).resettable);
         assert_eq!(b.clint_hart(), 0);
+    }
+}
+
+/// Het blok van dit board in zijn image (image/cfg/licheerv.cfg) zegt wat de
+/// code doet zonder die regels: de sharegroup van Hop en de klasse van zijn
+/// core. Zo lopen config en standaard niet uiteen.
+#[cfg(test)]
+mod cfg_block {
+    use board::Board;
+
+    #[test]
+    fn the_board_block_says_what_the_code_does() {
+        let t = include_str!("../../../image/cfg/licheerv.cfg");
+        assert_eq!(
+            fw::bootcfg::get(t, "hopos.hop.sharegroup"),
+            <crate::LicheeRv as Board>::HOP_GROUP
+        );
+        let class = <crate::LicheeRv as Board>::HOP_CORE_CLASS.map(|c| format!("{c}"));
+        assert_eq!(
+            fw::bootcfg::get(t, "hopos.hop.coreclass"),
+            class.as_deref().unwrap_or("")
+        );
     }
 }

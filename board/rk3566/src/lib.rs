@@ -742,12 +742,12 @@ impl Board for Rk3566 {
         slots::core_of(cpu::mpidr())
     }
 
-    /// De OS-core die de bootargs vragen (`hopos.oscore=N`), met een reden
+    /// De OS-core die de bootargs vragen (`hopos.system.core=N`), met een reden
     /// als de vraag niet kon: dan de boot-core (0). Homogene A55's, dus
     /// `big` is core 0 en `small` of `mid` valt terug.
     fn os_core(&self) -> (usize, Option<&'static str>) {
         board::os_core(
-            self.boot_param("hopos.oscore"),
+            self.system_core_ask(),
             self.cores(),
             |c| self.core_class(c),
             0,
@@ -785,5 +785,27 @@ impl Board for Rk3566 {
 
     fn map_tail_normal(&self, pa: u64, size: u64) -> Option<Result<(), board::TailError>> {
         Some(map_tail_normal(pa, size).map_err(board::TailError::Attr))
+    }
+}
+
+/// Het blok van dit board in zijn image (image/cfg/radxa.cfg) zegt wat de
+/// code doet zonder die regels: de sharegroup van Hop en de klasse van zijn
+/// core. Zo lopen config en standaard niet uiteen.
+#[cfg(test)]
+mod cfg_block {
+    use board::Board;
+
+    #[test]
+    fn the_board_block_says_what_the_code_does() {
+        let t = include_str!("../../../image/cfg/radxa.cfg");
+        assert_eq!(
+            fw::bootcfg::get(t, "hopos.hop.sharegroup"),
+            <crate::Rk3566 as Board>::HOP_GROUP
+        );
+        let class = <crate::Rk3566 as Board>::HOP_CORE_CLASS.map(|c| format!("{c}"));
+        assert_eq!(
+            fw::bootcfg::get(t, "hopos.hop.coreclass"),
+            class.as_deref().unwrap_or("")
+        );
     }
 }

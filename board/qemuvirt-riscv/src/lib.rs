@@ -456,10 +456,10 @@ impl Board for QemuVirtRiscv {
     }
 
     /// De OS-core: op riscv64 altijd het boot-hart (0). Een
-    /// `hopos.oscore`-vraag wordt luid genegeerd: de verhuizing bestaat hier
+    /// `hopos.system.core`-vraag wordt luid genegeerd: de verhuizing bestaat hier
     /// niet.
     fn os_core(&self) -> (usize, Option<&'static str>) {
-        let asked = !self.boot_param("hopos.oscore").is_empty();
+        let asked = !self.system_core_ask().is_empty();
         (
             0,
             asked.then_some("the riscv64 kern stays on its boot hart"),

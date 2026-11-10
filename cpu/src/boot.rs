@@ -142,7 +142,7 @@ pub unsafe fn guard_page(l2_entry: dev::Pa, l3: dev::Pa, guard: u64) -> bool {
 /// Bij stroom aan alleen de core met affiniteit 0: een firmware die alle
 /// cores op de ingang loslaat, krijgt zo één kern en een parkeerlus. Een
 /// geflipte kern springt vanaf de OS-core, en die is niet per se core 0
-/// (`hopos.oscore`, PORT.md beslissing 2), met x0 = de feitenpagina (O6,
+/// (`hopos.system.core`, PORT.md beslissing 2), met x0 = de feitenpagina (O6,
 /// `docs/flip.md`): dat adres geeft geen firmware (het Linux-bootprotocol
 /// zet daar de DTB, of 0), dus elke core met dat adres mag door. Er komt er
 /// ook maar één, want de app-cores draaien in de switch-code in de

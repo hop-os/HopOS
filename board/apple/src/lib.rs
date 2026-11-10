@@ -530,7 +530,7 @@ impl Board for Apple {
         slots::core_of(cpu::mpidr())
     }
 
-    /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`),
+    /// De OS-core die `hopos.cfg` vraagt (`hopos.system.core=<small|mid|big|N>`),
     /// met een reden als de kern er niet heen kan. De firmware levert ons af
     /// op een P-core (cpu 6); `small` is de zuinige core die HopOS hoort te
     /// bewonen (Go: "de hop", 29-08). De verhuizing start die core via
@@ -543,7 +543,7 @@ impl Board for Apple {
     /// (`HOPOS_OS_SELFTEST_FAIL`), fataal: blijf op de boot-core.
     fn os_core(&self) -> (usize, Option<&'static str>) {
         board::os_core(
-            self.boot_param("hopos.oscore"),
+            self.system_core_ask(),
             self.cores(),
             |c| self.core_class(c),
             self.this_core(),
@@ -728,5 +728,27 @@ mod tests {
         let a = Apple::new();
         assert_eq!(a.cores(), 1);
         assert_eq!(a.core_class(0), CoreClass::Big);
+    }
+}
+
+/// Het blok van dit board in zijn image (image/cfg/apple.cfg) zegt wat de
+/// code doet zonder die regels: de sharegroup van Hop en de klasse van zijn
+/// core. Zo lopen config en standaard niet uiteen.
+#[cfg(test)]
+mod cfg_block {
+    use board::Board;
+
+    #[test]
+    fn the_board_block_says_what_the_code_does() {
+        let t = include_str!("../../../image/cfg/apple.cfg");
+        assert_eq!(
+            fw::bootcfg::get(t, "hopos.hop.sharegroup"),
+            <crate::Apple as Board>::HOP_GROUP
+        );
+        let class = <crate::Apple as Board>::HOP_CORE_CLASS.map(|c| format!("{c}"));
+        assert_eq!(
+            fw::bootcfg::get(t, "hopos.hop.coreclass"),
+            class.as_deref().unwrap_or("")
+        );
     }
 }

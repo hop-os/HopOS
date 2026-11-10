@@ -66,7 +66,7 @@ het script zet `CFG=` (standaard `image/cfg/headless.cfg`, of met `GUI=1`
 `headfull.cfg`) erin. Hop woont op de OS-core naast de kern (groep `system`,
 de standaard van het board).
 `cmdline.txt` draagt `EXTRA=` (een gestaged image is Hop, er is geen rol
-meer, 01-11); daar mogen ook `hopos.cores=N` en `hopos.oscore=` (op de Pi altijd core 0), maar
+meer, 01-11); daar mogen ook `hopos.cores=N` en `hopos.system.core=` (op de Pi altijd core 0), maar
 een sleutel in het venster wint.
 
 UART: Pi 4 op de header (pin 8 TXD, 10 RXD, 6 GND, 3V3), `screen

@@ -548,14 +548,14 @@ impl<S: Soc> Board for Raspi<S> {
         S::core_of(cpu::mpidr())
     }
 
-    /// De OS-core die de bootargs vragen (`hopos.oscore=`), met een reden
+    /// De OS-core die de bootargs vragen (`hopos.system.core=`), met een reden
     /// als het niet kan. Op de Pi blijft de kern op de boot-core: de cores
     /// zijn homogeen (elke vraag om een klasse is core 0 al), en een
     /// verhuizing zou de SPI-route van de GIC-400 (ITARGETSR wijst naar de
     /// core die `enable` riep) en de stop van de boot-core op ijzer vragen,
     /// en die zijn hier niet bewezen.
     fn os_core(&self) -> (usize, Option<&'static str>) {
-        match self.boot_param("hopos.oscore") {
+        match self.system_core_ask() {
             "" | "0" | "small" | "mid" | "big" => (0, None),
             _ => (0, Some("the Pi keeps the OS on core 0 (GIC-400 SPI route)")),
         }

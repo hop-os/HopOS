@@ -301,6 +301,7 @@ pub(crate) fn start(
     let carried = adopt
         .as_ref()
         .and_then(|(v, _)| v.iter().find(|st| st.slot == HOP_SLOT));
+    init_system_group(&cfg);
     init_hop_group(&cfg, carried);
     let hop_core = carried.map(|st| st.core);
     let plan = match os_plan() {
@@ -1139,14 +1140,14 @@ async fn wait_uplink() -> Option<core::net::Ipv4Addr> {
 }
 
 /// `Placement::hop`: de sharegroup van Hop, op de OS-core met de kern als
-/// die groep `system` is (de klasse van die core koos `hopos.oscore`), en
-/// anders een eigen app-core, met `hopos.hop.core-class` als voorkeur voor
+/// die groep `system` is (de klasse van die core koos `hopos.system.core`), en
+/// anders een eigen app-core, met `hopos.hop.coreclass` als voorkeur voor
 /// de eerste core van de groep (`Placement::prefer`); zonder sleutel die
 /// van het board (`Board::HOP_CORE_CLASS`).
 fn hop_placement(plan: &abi::layout::Plan, cfg: &NodeCfg<'_>) -> kern::Result<Placement> {
     let mut at = Placement::hop()?;
     let class = kern::nodecfg::hop_core_class(cfg);
-    let want = cfg.one("hopos.hop.core-class");
+    let want = cfg.one("hopos.hop.coreclass");
     if hop_on_os() {
         println!(
             "slots: Hop shares the OS core (cpu {}) with the kern, {} app core(s) stay free HOPOS_HOP_OS_CORE",
@@ -1155,16 +1156,42 @@ fn hop_placement(plan: &abi::layout::Plan, cfg: &NodeCfg<'_>) -> kern::Result<Pl
         );
         if !want.is_empty() {
             println!(
-                "slots: hopos.hop.core-class={want} not used: Hop is on the OS core (hopos.oscore picks it) HOPOS_HOP_CLASS"
+                "slots: hopos.hop.coreclass={want} not used: Hop is on the OS core (hopos.system.core picks it) HOPOS_HOP_CLASS"
+            );
+        }
+        if !cfg.one("hopos.hop.core").is_empty() {
+            println!(
+                "slots: hopos.hop.core={} not used: Hop is on the OS core (hopos.system.core picks it) HOPOS_HOP_CORE",
+                cfg.one("hopos.hop.core")
             );
         }
         return Ok(at);
+    }
+    match kern::nodecfg::hop_core(cfg) {
+        Ok(None) => {}
+        Ok(Some(cpu)) => match plan
+            .logical_core(cpu)
+            .and_then(|c| kern::Core::new(c.get()))
+            .filter(|c| c.get() != 0)
+        {
+            Some(core) => {
+                at.pin = Some(core);
+                println!("slots: Hop's group on cpu {cpu} (hopos.hop.core) HOPOS_HOP_CORE");
+            }
+            None => println!(
+                "slots: hopos.hop.core={cpu} is not an app core of this node (the OS core is cpu {}), ignored HOPOS_HOP_CORE",
+                plan.os_core()
+            ),
+        },
+        Err(v) => {
+            println!("slots: hopos.hop.core={v} is not a core number, ignored HOPOS_HOP_CORE")
+        }
     }
     match class {
         Ok(Some(c)) => {
             at.prefer = Some(c);
             println!(
-                "slots: Hop prefers a {want} core for his group (hopos.hop.core-class) HOPOS_HOP_CLASS"
+                "slots: Hop prefers a {want} core for his group (hopos.hop.coreclass) HOPOS_HOP_CLASS"
             );
         }
         Ok(None) => {
@@ -1176,7 +1203,7 @@ fn hop_placement(plan: &abi::layout::Plan, cfg: &NodeCfg<'_>) -> kern::Result<Pl
             }
         }
         Err(v) => println!(
-            "slots: hopos.hop.core-class={v} is not small, mid or big, ignored HOPOS_HOP_CLASS"
+            "slots: hopos.hop.coreclass={v} is not small, mid or big, ignored HOPOS_HOP_CLASS"
         ),
     }
     Ok(at)
@@ -1200,10 +1227,31 @@ pub(crate) fn os_plan() -> abi::Result<abi::layout::Plan> {
     vslots::plan(board.cores(), board.this_core())
 }
 
-/// Woont Hop op de OS-core? Ja als zijn groep `system` is
-/// (`hopos.hop.sharegroup`, [`init_hop_group`]).
+/// Woont Hop op de OS-core? Ja als zijn groep die van de OS-core is
+/// (`hopos.hop.sharegroup` gelijk aan `hopos.system.sharegroup`,
+/// [`init_hop_group`]).
 fn hop_on_os() -> bool {
-    kern::pool::hop_group().as_slice() == kern::pool::SYSTEM_GROUP
+    kern::pool::hop_group().as_slice() == kern::pool::system_group().as_slice()
+}
+
+/// De naam van de groep op de OS-core (`hopos.system.sharegroup`, zonder
+/// sleutel `system`): jobs met die tag delen de core van de kern. Eén keer,
+/// vóór de pool ([`os_places`]) en de groep van Hop.
+fn init_system_group(cfg: &NodeCfg<'_>) {
+    let want = cfg.one("hopos.system.sharegroup");
+    let (name, why) = match want {
+        "" => (kern::pool::SYSTEM_GROUP, "the default"),
+        w => (w.as_bytes(), "hopos.system.sharegroup"),
+    };
+    match kern::pool::set_system_group(name) {
+        Ok(()) => println!(
+            "slots: the OS core is the sharegroup {} ({why}) HOPOS_SYSTEM_GROUP",
+            core::str::from_utf8(name).unwrap_or("?")
+        ),
+        Err(e) => println!(
+            "slots: hopos.system.sharegroup: {e}, the OS core is the sharegroup system HOPOS_SYSTEM_GROUP"
+        ),
+    }
 }
 
 /// De sharegroup van Hop uit de config (`hopos.hop.sharegroup`): `system`
@@ -1219,16 +1267,20 @@ fn hop_on_os() -> bool {
 /// pas bij een koude start geldt.
 fn init_hop_group(cfg: &NodeCfg<'_>, carried: Option<&kern::slots::SlotState>) {
     let want = cfg.one("hopos.hop.sharegroup");
-    let (cfg_name, cfg_why): (&[u8], &str) = match want {
-        "" => (
-            <crate::Machine as Board>::HOP_GROUP.as_bytes(),
-            "the board's default",
-        ),
-        "system" if !arch::SHARES_OS_CORE => (
+    let system = kern::pool::system_group();
+    // De standaard van het board noemt de OS-core `system`; heet die groep
+    // in de config anders, dan is dat dezelfde plek.
+    let board = match <crate::Machine as Board>::HOP_GROUP.as_bytes() {
+        b if b == kern::pool::SYSTEM_GROUP => system.as_slice(),
+        b => b,
+    };
+    let (cfg_name, cfg_why): (&[u8], &str) = match want.as_bytes() {
+        b"" => (board, "the board's default"),
+        w if w == system.as_slice() && !arch::SHARES_OS_CORE => (
             kern::pool::HOP_GROUP,
-            "hopos.hop.sharegroup=system refused: this board does not share the OS core",
+            "hopos.hop.sharegroup on the OS core refused: this board does not share the OS core",
         ),
-        other => (other.as_bytes(), "hopos.hop.sharegroup"),
+        other => (other, "hopos.hop.sharegroup"),
     };
     let (name, why) = carried.map_or((cfg_name, cfg_why), |st| {
         (st.share_group.as_slice(), "carried over the flip")
@@ -1256,8 +1308,9 @@ fn init_hop_group(cfg: &NodeCfg<'_>, carried: Option<&kern::slots::SlotState>) {
 /// (Apple's EL2-smaak), dan krijgt Hop een app-core zoals vóór 30-09.
 fn os_places() -> Places {
     let mut pool = Places::new();
+    let system = kern::pool::system_group();
     let groups: &[&[u8]] = if arch::SHARES_OS_CORE {
-        &[kern::pool::SYSTEM_GROUP]
+        &[system.as_slice()]
     } else {
         &[]
     };

@@ -31,3 +31,6 @@ gui = ["board-raspi/gui"]
 # De twee xHCI's van de RP1 als USB-hosts (usb.rs): de bouwsteen van gui
 # en media.
 usb = ["board-raspi/usb"]
+
+[dev-dependencies]
+fw = { path = "../../fw" }

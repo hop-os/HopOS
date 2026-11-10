@@ -141,7 +141,10 @@ fi
 # stonden dezelfde bytes.
 CFG="${CFG-}"
 case "$CFG" in
-headless | headfull) CFG="$DIR/image/cfg/$CFG.cfg" ;;
+headless | headfull)
+	CFG="$DIR/image/cfg/$CFG.cfg"
+	[ ! -f "$DIR/image/cfg/$BOARD.cfg" ] || CFG="$CFG $DIR/image/cfg/$BOARD.cfg"
+	;;
 esac
 if [ -n "$CFG" ]; then
 	for f in $CFG; do

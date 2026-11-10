@@ -54,52 +54,99 @@ pub struct Placement {
     /// De gevraagde klasse, of `None` voor elke klasse.
     pub class: Option<CoreClass>,
     /// Een voorkeur, geen eis: een NIEUWE groep neemt eerst vrije cores van
-    /// deze klasse, en pas daarna andere (Hop met `hopos.hop.core-class`).
+    /// deze klasse, en pas daarna andere (Hop met `hopos.hop.coreclass`).
     /// Wie bij een bestaande groep komt, krijgt de cores die er al zijn.
     pub prefer: Option<CoreClass>,
+    /// Een eis: een NIEUWE groep krijgt precies deze logische core, of de
+    /// plaatsing faalt (Hop met `hopos.hop.core`).
+    pub pin: Option<Core>,
 }
 
 /// De naam van Hops sharegroup als de config er geen noemt
 /// (`hopos.hop.sharegroup`): een eigen core, gedeeld met jobs in `hop`.
 pub const HOP_GROUP: &[u8] = b"hop";
 
-/// De groep die Hop echt kreeg (`hopos.hop.sharegroup`): `system` is de
-/// OS-core bij de kern, elke andere naam een eigen core die jobs met
-/// dezelfde tag delen. Eén keer gezet bij boot, daarna gelezen door de
-/// plaatsing van Hop, van een flipbundel en door de core-reclaim. Een rij
-/// atomics (de kern kent geen unsafe): eerst de bytes, dan de lengte.
-static HOP_GROUP_BYTES: [core::sync::atomic::AtomicU8; MAX_GROUP_NAME] =
-    [const { core::sync::atomic::AtomicU8::new(0) }; MAX_GROUP_NAME];
-static HOP_GROUP_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// De naam van de groep op de OS-core als de config er geen noemt
+/// (`hopos.system.sharegroup`).
+pub const SYSTEM_GROUP: &[u8] = b"system";
+
+/// Een groepsnaam die bij boot één keer uit de config komt en daarna
+/// alleen gelezen wordt: een rij atomics (de kern kent geen unsafe), eerst
+/// de bytes, dan de lengte; leeg is de standaard die de lezer meegeeft.
+/// Geen pointer erin: een static met een pointer staat na de relocatie in
+/// `.data.rel.ro`, read-only, en de eerste schrijf is een data-abort (10-11,
+/// QEMU).
+struct BootName {
+    bytes: [core::sync::atomic::AtomicU8; MAX_GROUP_NAME],
+    len: core::sync::atomic::AtomicUsize,
+}
+
+impl BootName {
+    const fn new() -> Self {
+        Self {
+            bytes: [const { core::sync::atomic::AtomicU8::new(0) }; MAX_GROUP_NAME],
+            len: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn set(&self, name: &[u8]) -> Result {
+        group_name(name)?;
+        self.len.store(0, core::sync::atomic::Ordering::Release);
+        for (slot, b) in self.bytes.iter().zip(name) {
+            slot.store(*b, core::sync::atomic::Ordering::Relaxed);
+        }
+        self.len
+            .store(name.len(), core::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    fn get(&self, default: &[u8]) -> GroupName {
+        let n = self.len.load(core::sync::atomic::Ordering::Acquire);
+        let mut g = GroupName::new();
+        let src: &[u8] = if n == 0 { default } else { &[] };
+        for b in src {
+            let _ = g.push(*b);
+        }
+        for slot in self.bytes.iter().take(n) {
+            let _ = g.push(slot.load(core::sync::atomic::Ordering::Relaxed));
+        }
+        g
+    }
+}
+
+/// De groep die Hop echt kreeg (`hopos.hop.sharegroup`): de groep van de
+/// OS-core ([`system_group`]) is de OS-core bij de kern, elke andere naam
+/// een eigen core die jobs met dezelfde tag delen. Gelezen door de
+/// plaatsing van Hop, van een flipbundel en door de core-reclaim.
+static HOP: BootName = BootName::new();
+
+/// De groep van de OS-core (`hopos.system.sharegroup`): wie hierin plaatst,
+/// deelt de core van de kern ([`Places::share_os_core`] bij boot, op elk
+/// board dat het kan).
+static SYSTEM: BootName = BootName::new();
 
 /// Zet de groep van Hop; de naam blijft voor de rest van de boot staan.
 pub fn set_hop_group(name: &[u8]) -> Result {
-    group_name(name)?;
-    HOP_GROUP_LEN.store(0, core::sync::atomic::Ordering::Release);
-    for (slot, b) in HOP_GROUP_BYTES.iter().zip(name) {
-        slot.store(*b, core::sync::atomic::Ordering::Relaxed);
-    }
-    HOP_GROUP_LEN.store(name.len(), core::sync::atomic::Ordering::Release);
-    Ok(())
+    HOP.set(name)
 }
 
 /// De groep van Hop: wat [`set_hop_group`] zette, anders [`HOP_GROUP`].
 #[must_use]
 pub fn hop_group() -> GroupName {
-    let n = HOP_GROUP_LEN.load(core::sync::atomic::Ordering::Acquire);
-    let mut g = GroupName::new();
-    let src: &[u8] = if n == 0 { HOP_GROUP } else { &[] };
-    for b in src {
-        let _ = g.push(*b);
-    }
-    for slot in HOP_GROUP_BYTES.iter().take(n) {
-        let _ = g.push(slot.load(core::sync::atomic::Ordering::Relaxed));
-    }
-    g
+    HOP.get(HOP_GROUP)
 }
-/// De groep van de OS-core zelf: wie hierin plaatst, deelt de core van de
-/// kern ([`Places::share_os_core`] bij boot, op elk board dat het kan).
-pub const SYSTEM_GROUP: &[u8] = b"system";
+
+/// Zet de naam van de groep op de OS-core; één keer, vóór de pool.
+pub fn set_system_group(name: &[u8]) -> Result {
+    SYSTEM.set(name)
+}
+
+/// De groep van de OS-core: wat [`set_system_group`] zette, anders
+/// [`SYSTEM_GROUP`].
+#[must_use]
+pub fn system_group() -> GroupName {
+    SYSTEM.get(SYSTEM_GROUP)
+}
 
 /// `name` als [`GroupName`].
 pub(crate) fn group_name(name: &[u8]) -> Result<GroupName> {
@@ -119,8 +166,8 @@ impl Placement {
     /// het die; anders een app-core, zoals vóór 30-09.
     ///
     /// Geen klasse als eis: op de OS-core kiest de bootparameter
-    /// (`hopos.oscore`) de klasse, en op een app-core is
-    /// `hopos.hop.core-class` een voorkeur ([`Placement::prefer`]) die de
+    /// (`hopos.system.core`) de klasse, en op een app-core is
+    /// `hopos.hop.coreclass` een voorkeur ([`Placement::prefer`]) die de
     /// boot-plaatsing van Hop zelf zet. Een flipbundel komt zonder voorkeur
     /// bij de groep die er al is.
     pub fn hop() -> Result<Placement> {
@@ -130,6 +177,7 @@ impl Placement {
             cores: 1,
             class: None,
             prefer: None,
+            pin: None,
         })
     }
 }
@@ -364,16 +412,17 @@ impl Places {
         if spec.group.is_some()
             || spec.cores.max(1) > 1
             || spec.class.is_some_and(|w| cores.class(Core::OS) != Some(w))
-            || !self.os_group(SYSTEM_GROUP)
+            || !self.os_group(system_group().as_slice())
         {
             return Err(err);
         }
         let sys = Placement {
-            group: Some(group_name(SYSTEM_GROUP)?),
+            group: Some(system_group()),
             pool_cores: 1,
             cores: 1,
             class: spec.class,
             prefer: None,
+            pin: None,
         };
         self.place(cores, slot, &sys).map(|c| (c, true))
     }
@@ -398,6 +447,15 @@ impl Places {
             .position(Option::is_none)
             .ok_or(Error::Full { cap: MAX_GROUPS })?;
         let mut members: BoundedVec<Core, MAX_GROUP_CORES> = BoundedVec::new();
+        if let Some(core) = spec.pin {
+            let c = core.get();
+            if pool_cores != 1 || !self.core_free(c) || !Self::class_ok(cores, c, spec.class) {
+                return Err(Error::NoCores { cores: pool_cores });
+            }
+            members.push(core).map_err(|_| Error::Full {
+                cap: MAX_GROUP_CORES,
+            })?;
+        }
         // Eerst de voorkeur, dan elke core die de eis toelaat.
         for want in [spec.prefer, None] {
             for c in 1..=cores.app_cores().min(CORE_CAP) {
@@ -609,6 +667,7 @@ pub(crate) mod tests {
             cores,
             class,
             prefer: None,
+            pin: None,
         }
     }
 
@@ -619,6 +678,7 @@ pub(crate) mod tests {
             cores: 1,
             class,
             prefer: None,
+            pin: None,
         }
     }
 
@@ -634,6 +694,22 @@ pub(crate) mod tests {
         }
         // Geen stille terugval naar delen: dat is een vertrouwensbeslissing.
         assert!(p.place(&b, s(5), &ded(1, None)).is_err());
+    }
+
+    /// Hop met `hopos.hop.core`: zijn groep krijgt precies die core; een
+    /// core die al bezet is, is een fout en geen andere core.
+    #[test]
+    fn a_pinned_group_gets_its_core_or_nothing() {
+        let b = FakeCores::new(4);
+        let mut p = Places::new();
+        let mut hop = shared("hop", 1, None);
+        hop.pin = Core::new(3);
+        assert_eq!(p.place(&b, s(1), &hop).unwrap().get(), 3);
+        // Een tweede bewoner van de groep komt erbij, op dezelfde core.
+        assert_eq!(p.place(&b, s(2), &hop).unwrap().get(), 3);
+        let mut other = shared("web", 1, None);
+        other.pin = Core::new(3);
+        assert!(p.place(&b, s(3), &other).is_err());
     }
 
     #[test]
@@ -877,7 +953,7 @@ pub(crate) mod tests {
         assert_eq!(p.place(&b, s(3), &ded(1, Some(Small))).unwrap().get(), 3);
     }
 
-    // `hopos.hop.core-class` (04-10): de eerste core van de groep van Hop
+    // `hopos.hop.coreclass` (04-10): de eerste core van de groep van Hop
     // komt uit de gevraagde klasse, ook als er eerder een andere vrij is;
     // is er geen vrij (of kent het board geen klassen), dan elke vrije core.
     // Een buur in de groep krijgt Hop's core, wat zijn klasse ook is.

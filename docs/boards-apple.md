@@ -62,7 +62,7 @@ Debug-USB-device vast: dicht voor je begint (29-08). De loader springt met
 `P_VECTOR` naar offset 0x800 met x0 = het échte boot_args-blok: dezelfde
 overdracht als na `kmutil configure-boot --raw --entry-point 2048`.
 
-`hopos.cfg`-sleutels van dit board: `hopos.oscore=small|big|N`,
+`hopos.cfg`-sleutels van dit board: `hopos.system.core=small|big|N`,
 `hopos.pstate=off|E,P` (het plafond per cluster, standaard 5,6),
 `hopos.disk=off`, `hopos.smc=1`. Kooien zijn er altijd (`hopos.cages` en
 de voorproef zijn weg, 10-11): de zelftest van de kern,
@@ -132,7 +132,7 @@ ok`). Op de M4 zelf heeft het nog niet gedraaid: dat is de checklist.
    zonder apps door.
 5. **De keuze van de slaap per core** (onveranderd): het board meet de
    timer-FIQ (`HOPOS_APPLE_IDLE`) en kiest WFI of WFE. Een OS-core die de
-   kern zelf opbracht (`hopos.oscore=small`), krijgt op t8132 geen
+   kern zelf opbracht (`hopos.system.core=small`), krijgt op t8132 geen
    timer-FIQ (29-08): daar zakt de voorproef op de timer-beurt, en dat is
    de bedoeling.
 6. **`cpu::idle::ArmSleeper::new` onder E2H = 1** vervangt in CNTHCTL_EL2
@@ -190,13 +190,13 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
    `smc: die 41.5 C at boot HOPOS_APPLE_TEMP`; `HOPOS_APPLE_SMC_FAIL` of een
    `smc: ...`-fout is de meting van 31-08 opnieuw (geen shmem-adres), en
    dan hoort de boot gewoon door te gaan (hooguit ~8 s later).
-6. **Met `hopos.oscore=small`**: `oscore: moving the kern from core 6 to
+6. **Met `hopos.system.core=small`**: `oscore: moving the kern from core 6 to
    core 0 ... HOPOS_OSCORE_MOVE`, dan `oscore: the kern runs on core 0
    HOPOS_OSCORE_UP`. Stil daarna: de nieuwe core kwam niet uit m1n1's
    spin-table of niet door `hopos_smp_entry` (SCTLR-wis, dan het regime);
    een `cores: cpu 0 ... not started` zegt waarom. Een "address size fault,
    level 0" in het lage DRAM op die core is het open raadsel van 29-08
-   (alleen onder m1n1; opnieuw na de installatie). Zonder `hopos.oscore`
+   (alleen onder m1n1; opnieuw na de installatie). Zonder `hopos.system.core`
    blijft de kern op core 6 en is er geen regel.
 7. `boot: HopOS v3.0.0 on apple-m4, EL2, 10 cores (big), 24576 MB DRAM
    HOPOS_BOOT`.

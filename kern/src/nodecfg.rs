@@ -27,11 +27,16 @@
 //! (de kern deelt zijn core als groep `system`), `HOPOS_MEMORY` en `DNS`
 //! (de server uit de lease, voor de resolver van applib).
 //!
-//! Twee sleutels zijn voor de kern zelf, de plaatsing van Hop:
-//! `hopos.hop.sharegroup` (zijn groep, `HOPOS_HOP_GROUP` in de env) en
-//! `hopos.hop.core-class` ([`hop_core_class`]: de soort core die die groep
-//! als eerste krijgt). Zonder sleutel geldt de standaard van het board
-//! (`board::Board`, `HOP_GROUP` en `HOP_CORE_CLASS`, 07-11).
+//! De OS-core kiest `hopos.system.core` (een nummer) of
+//! `hopos.system.coreclass` (een klasse, het board leest ze), en
+//! `hopos.system.sharegroup` noemt zijn groep (standaard `system`). Drie
+//! sleutels zijn voor de kern zelf, de plaatsing van Hop:
+//! `hopos.hop.sharegroup` (zijn groep, `HOPOS_HOP_GROUP` in de env),
+//! `hopos.hop.core` ([`hop_core`]: de vaste core van die groep) en
+//! `hopos.hop.coreclass` ([`hop_core_class`]: de soort core die die groep
+//! als eerste krijgt). Het image van elk board draagt ze in zijn blok
+//! (`image/cfg/<board>.cfg`, 10-11); zonder sleutel geldt de standaard van
+//! het board (`board::Board`, `HOP_GROUP` en `HOP_CORE_CLASS`).
 //!
 //! # Per board twee bronnen
 //!
@@ -285,24 +290,40 @@ impl fmt::Display for EnvError {
     }
 }
 
-/// `hopos.hop.core-class`: de soort core waar de groep van Hop haar eerste
+/// `hopos.hop.coreclass`: de soort core waar de groep van Hop haar eerste
 /// core zoekt, met de namen van `tags.core-class` van een job (`small`,
 /// `mid`, `big`). Een voorkeur, geen eis (`pool::Placement::prefer`): is er
 /// geen vrije core van die klasse, of kent het board geen klassen (de Pi's,
 /// de Radxa, de Altra, de LicheeRV), dan een andere. Op de OS-core (groep
-/// `system`) doet hij niets: daar kiest `hopos.oscore` de core.
+/// `system`) doet hij niets: daar kiest `hopos.system.core` de core.
 ///
 /// # Errors
 ///
 /// De waarde zelf als het geen klasse is; `Ok(None)` zonder sleutel (dan
 /// geldt die van het board, `board::Board::HOP_CORE_CLASS`).
 pub fn hop_core_class<'a>(cfg: &NodeCfg<'a>) -> Result<Option<CoreClass>, &'a str> {
-    match cfg.one("hopos.hop.core-class") {
+    match cfg.one("hopos.hop.coreclass") {
         "" => Ok(None),
         "small" => Ok(Some(CoreClass::Small)),
         "mid" => Ok(Some(CoreClass::Mid)),
         "big" => Ok(Some(CoreClass::Big)),
         other => Err(other),
+    }
+}
+
+/// `hopos.hop.core`: de fysieke core (het nummer van `hopos.system.core` en van
+/// `cpu=` op de console) van de eigen groep van Hop. Een eis, geen voorkeur:
+/// de groep krijgt precies die core. Op de OS-core (groep `system`) doet hij
+/// niets.
+///
+/// # Errors
+///
+/// De waarde zelf als het geen getal is; `Ok(None)` zonder sleutel (dan
+/// kiest de pool, met `hopos.hop.coreclass` als voorkeur).
+pub fn hop_core<'a>(cfg: &NodeCfg<'a>) -> Result<Option<usize>, &'a str> {
+    match cfg.one("hopos.hop.core") {
+        "" => Ok(None),
+        v => v.parse().map(Some).map_err(|_| v),
     }
 }
 
@@ -549,7 +570,7 @@ mod tests {
         assert_eq!(cfg.one("hopos.hop.sharegroup"), "");
         assert_eq!(hop_core_class(&cfg), Ok(None));
         // Een eigen regel erachter wint.
-        let own = format!("{less}hopos.hop.sharegroup=system\nhopos.hop.core-class=big\n");
+        let own = format!("{less}hopos.hop.sharegroup=system\nhopos.hop.coreclass=big\n");
         let cfg = NodeCfg::parse(&own);
         assert_eq!(cfg.one("hopos.hop.sharegroup"), "system");
         assert_eq!(hop_core_class(&cfg), Ok(Some(CoreClass::Big)));
@@ -567,6 +588,11 @@ mod tests {
                 .unwrap()
                 .contains(r#""name":"welcome""#)
         );
+        // De core van Hop is een getal of niets.
+        for (v, want) in [("1", Ok(Some(1))), ("", Ok(None)), ("een", Err("een"))] {
+            let t = format!("hopos.hop.core={v}\n");
+            assert_eq!(hop_core(&NodeCfg::parse(&t)), want, "{v}");
+        }
         // De sleutel is een klasse of niets.
         for (v, want) in [
             ("small", Ok(Some(CoreClass::Small))),
@@ -575,7 +601,7 @@ mod tests {
             ("", Ok(None)),
             ("e-core", Err("e-core")),
         ] {
-            let t = format!("hopos.hop.core-class={v}\n");
+            let t = format!("hopos.hop.coreclass={v}\n");
             assert_eq!(hop_core_class(&NodeCfg::parse(&t)), want, "{v}");
         }
     }

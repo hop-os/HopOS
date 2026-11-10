@@ -121,7 +121,7 @@ EOF
 # De config: in het venster van de kern (board/src/cfgwin.rs), zoals op
 # elk board; de kern leest eerst het venster en dan /chosen/bootargs
 # (cmdline.txt: alleen EXTRA).
-CFG="${CFG:-$DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg}"
+CFG="${CFG:-$DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg $DIR/image/cfg/$B.cfg}"
 for f in $CFG; do
 	[ -f "$f" ] || {
 		echo "$B: CFG: $f does not exist" >&2

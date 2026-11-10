@@ -169,7 +169,7 @@ except Exception as e:
     boot_cpu = 0xFFFF
 
 # De hop van de Go-kern (cpuinit.s verhuisde vóór de eerste Go-instructie)
-# bestaat in v3 niet in de loader: de keuze is `hopos.oscore=small` in de
+# bestaat in v3 niet in de loader: de keuze is `hopos.system.core=small` in de
 # config, en de kern verhuist zelf (docs/boards-apple.md). De velden blijven
 # leeg, zodat het blok byte voor byte versie 5 is.
 hop_cpu, hop_mpidr, hop_rel = 0xFFFF, 0, 0

@@ -21,19 +21,30 @@ per board, de init-jobs, S3, de cluster, de tijd; 10-11):
 | zonder glas | `image/cfg/headless.cfg` | `hopos.cluster=hopos`, `hopos.insecure=1` (open op het eigen LAN; de console over TCP volgt die vlag), `hopos.storage=stateless` (een device begint schoon en vergeet alles; `stateful` in een eigen regel laadt de boom van de schijf en laat Hop's staat op `/hop/` een herstart overleven; `HOPOS_FS_STATELESS` op de console zegt dat de boot leeg begon) |
 | met glas (`GUI=1`, `MEDIA=1`) | `image/cfg/headfull.cfg` | hetzelfde, plus welcome op poort 80 van de release `apps` als init-job, en de display-app als regel met een hekje; de media-smaak van de O6N is headfull |
 
-Waar Hop woont, is de standaard van het board in de code (`board::Board`,
-`HOP_GROUP` en `HOP_CORE_CLASS`), niet van de config:
+Waar de kern en Hop draaien, staat per board in `image/cfg/<board>.cfg`
+(10-11): het image-script zet dat blok achter de smaak, in het image van
+dat board, met actieve regels en uitleg (de cores van het board, de
+sharegroups `system` en `hop`, en de nummers):
 
-| Board | Groep | Klasse |
+| Board | `hopos.system.core` (groep `system`) | Hop |
 | --- | --- | --- |
-| de Pi's, de Radxa, QEMU virt (arm64 en riscv64), QEMU onder EDK2 | `system`: de OS-core naast de kern (een storm van RPC's van apps kan Hop daar uithongeren) | geen |
-| de O6N, de Altra, de M4 | `hop`: een eigen app-core | `small`: de A520 op de O6N, een E-core op de M4; de Altra kent geen klassen en neemt de eerste vrije |
-| de LicheeRV | `hop`: de C906L | geen (het bord kent geen klassen) |
+| de Pi 4 en 5 (`rpi4.cfg`, `rpi5.cfg`) | `0` (vast: de GIC-400) | `hopos.hop.sharegroup=system`, op de OS-core |
+| de Radxa (`radxa.cfg`) | `0` | `system`, op de OS-core |
+| de O6N (`o6n.cfg`) | `0` | `hop`, `hopos.hop.coreclass=small` (een A520) |
+| de Altra (`altra.cfg`) | `0` | `hop`, `hopos.hop.core=1` |
+| de M4 (`apple.cfg`) | `6` (de P-core waar de firmware hem afzet) | `hop`, `small` (een E-core); de M4 deelt de OS-core niet |
+| de LicheeRV (`licheerv.cfg`) | `0` (vast: de C906B, waar de FSBL hem start) | `hop`, `hopos.hop.core=1` (de C906L) |
 
-`hopos.hop.sharegroup` en `hopos.hop.core-class` in de config overschrijven
-dat; de regel `HOPOS_HOP_GROUP` op de console zegt waar de groep vandaan
-kwam (`the board's default` of `hopos.hop.sharegroup`), en
-`HOPOS_HOP_CLASS` de klasse.
+`hopos.system.core=N` of `hopos.system.coreclass=small|mid|big` kiest de
+OS-core, `hopos.system.sharegroup` de naam van zijn groep (standaard
+`system`, `HOPOS_SYSTEM_GROUP`); Hop in dezelfde groep woont naast de kern.
+`hopos.hop.core=N` (fysiek, zoals `cpu=` op de console) geeft Hop's groep
+precies die core (`HOPOS_HOP_CORE`); `hopos.hop.coreclass` is een voorkeur
+(`HOPOS_HOP_CLASS`). Zonder de regels (een eigen config die het blok
+weglaat) doet de code hetzelfde (`board::Board`, `HOP_GROUP` en
+`HOP_CORE_CLASS`; de test `cfg_block` van elk board toetst dat blok en code
+gelijk zijn); `HOPOS_HOP_GROUP` op de console zegt waar de groep vandaan
+kwam (`the board's default` of `hopos.hop.sharegroup`).
 
 Elk image-script kiest de smaak zelf (`GUI=1` of `MEDIA=1` is headfull),
 `tools/release.sh` per board en smaak, en
@@ -254,7 +265,7 @@ op de deadline zet; ze wisselen elkaar af op dezelfde core.
 **Bewezen op QEMU, niet op de A720.** `FEATURES=vhe CPU=neoverse-n1 sh
 tools/qemu-uefi-test.sh` (EDK2, 4 cores, de hele appspike-keten in twee
 slots en de toetsen van buiten) is drie keer groen, ook met de kern
-verhuisd naar core 2 (`hopos.oscore=2`), en `FEATURES=vhe CPU=neoverse-n1
+verhuisd naar core 2 (`hopos.system.core=2`), en `FEATURES=vhe CPU=neoverse-n1
 BOARD=uefi sh tools/qemu-test-flip.sh` (Hop als bewoner van de OS-core, de flip
 met de som over de vhe-blobs) is groen. De kale nVHE-weg (`sh
 tools/qemu-uefi-test.sh`, cortex-a57) is ongewijzigd. Het kernvenster van

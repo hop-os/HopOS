@@ -462,13 +462,13 @@ impl Board for QemuVirt {
         slots::core_of(cpu::mpidr())
     }
 
-    /// De OS-core die de config vraagt (`hopos.oscore=<small|mid|big|N>`,
+    /// De OS-core die de config vraagt (`hopos.system.core=<small|mid|big|N>`,
     /// het venster in het image en dan de bootargs, `Board::boot_param`), met
     /// een reden als de vraag niet kon: dan de boot-core (0), luid. Op
     /// QEMU virt zijn alle cores big, dus `small` en `mid` vallen terug.
     fn os_core(&self) -> (usize, Option<&'static str>) {
         board::os_core(
-            self.boot_param("hopos.oscore"),
+            self.system_core_ask(),
             self.cores(),
             |c| self.core_class(c),
             0,

@@ -214,7 +214,7 @@ pub fn mpidr() -> u64 {
 
 /// Start precies één core op het EL2-regime van deze core, met een verse
 /// stack en `main`: de verhuizing van de kern naar de OS-core bij boot
-/// (PORT.md beslissing 2, `hopos.oscore`). De aanroeper geeft daarna zijn
+/// (PORT.md beslissing 2, `hopos.system.core`). De aanroeper geeft daarna zijn
 /// eigen core op (`cpu::el2::hold`).
 pub fn start_one(core: usize, target: u64, main: CoreMain) -> Result {
     let regime = arch::regime();

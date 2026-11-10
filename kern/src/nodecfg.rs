@@ -17,7 +17,7 @@
 //! | `hopos.insecure=1` | `HOPOS_INSECURE=1` |
 //! | `hopos.s3.endpoint`, `.bucket`, `.region`, `.key`, `.secret`, `.pathstyle` | `HOPOS_S3_ENDPOINT` enzovoort |
 //! | `hopos.ntp` (`host` of `host:poort`) | `HOPOS_NTP` (anders `pool.ntp.org`) |
-//! | `hopos.lock.type` (`hoplockserver` of `s3`), `.url`, `.key`, `.apikey` | `HOPOS_LOCK_TYPE` enzovoort: de lease van het cluster; zonder blijft de node standalone leader |
+//! | `hopos.lock.type` (`s3`), `hopos.lock.key` | `HOPOS_LOCK_TYPE`, `HOPOS_LOCK_KEY`: de lease van het cluster in de bucket van `hopos.s3.*`; zonder blijft de node standalone leader |
 //! | `hopos.lease_ttl` (seconden, minstens 15) | `HOPOS_LEASE_TTL` |
 //! | `hopos.advertise` (`host:poort`) | `HOPOS_ADVERTISE`: het adres dat de andere nodes zien, achter een NAT |
 //! | `hopos.init[]` (herhaald) | `HOPOS_INIT_JOBS`: één JSON-array |
@@ -86,7 +86,7 @@ pub const QEMU_CFG: &str = "hopos.node=hopos-qemu\nhopos.cluster=hopos\nhopos.in
 const DEFAULT_CLUSTER: &str = "hopos";
 
 /// De env-sleutels waarvan de waarde nooit op de console komt.
-const SECRETS: [&str; 3] = ["HOPOS_APIKEY", "HOPOS_S3_SECRET", "HOPOS_LOCK_APIKEY"];
+const SECRETS: [&str; 2] = ["HOPOS_APIKEY", "HOPOS_S3_SECRET"];
 
 /// De S3-sleutels: `hopos.cfg` links, de env rechts.
 const S3_KEYS: [(&str, &str); 6] = [
@@ -105,11 +105,9 @@ const S3_KEYS: [(&str, &str); 6] = [
 /// `hopos.cfg` links, de env rechts. Zonder `hopos.lock.type` blijft de node
 /// standalone leader; de S3-sleutels alleen maken geen cluster, want die zijn
 /// ook de object-store van de apps.
-const CLUSTER_KEYS: [(&str, &str); 7] = [
+const CLUSTER_KEYS: [(&str, &str); 5] = [
     ("hopos.lock.type", "HOPOS_LOCK_TYPE"),
-    ("hopos.lock.url", "HOPOS_LOCK_URL"),
     ("hopos.lock.key", "HOPOS_LOCK_KEY"),
-    ("hopos.lock.apikey", "HOPOS_LOCK_APIKEY"),
     ("hopos.lease_ttl", "HOPOS_LEASE_TTL"),
     ("hopos.advertise", "HOPOS_ADVERTISE"),
     ("hopos.ntp", "HOPOS_NTP"),
@@ -559,13 +557,7 @@ mod tests {
         // sleutels als headless.
         assert_eq!(NodeCfg::parse(less).all("hopos.init[]").count(), 0);
         let full = NodeCfg::parse(flavor("headfull"));
-        for k in [
-            "hopos.cluster",
-            "hopos.insecure",
-            "hopos.console",
-            "hopos.cages",
-            "hopos.storage",
-        ] {
+        for k in ["hopos.cluster", "hopos.insecure", "hopos.storage"] {
             assert_eq!(full.one(k), NodeCfg::parse(less).one(k), "{k}");
         }
         let b = build(&full, &FACTS).unwrap();

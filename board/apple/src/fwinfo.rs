@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(config_of(&w, false), ("", CfgSource::None));
         assert_eq!(config_of(&w, true), ("", CfgSource::None));
         // De loader schrijft platte tekst: alleen geldig mét param-blok.
-        let t = b"hopos.cages=on\n";
+        let t = b"hopos.smc=1\n";
         w[..t.len()].copy_from_slice(t);
         assert_eq!(config_of(&w, false), ("", CfgSource::None));
         assert_eq!(config_of(&w, true).1, CfgSource::Loader);

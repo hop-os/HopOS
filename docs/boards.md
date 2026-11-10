@@ -11,11 +11,14 @@ een v3-board is pas klaar als het op elk gemeten punt minstens doet wat v2 deed.
 ## De config (alle boards)
 
 De config van een node is één bestand per smaak uit `image/cfg`, compleet
-(07-11, geen lagen meer), in het venster van de kern:
+(07-11, geen lagen meer), in het venster van de kern. Elk bestand noemt
+elke sleutel die een gebruiker zet, met een uitgecommentarieerd voorbeeld
+(de node en zijn MAC, de toegang met `hopos.apikey`, de opslag, de cores
+per board, de init-jobs, S3, de cluster, de tijd; 10-11):
 
 | Smaak | Bestand | Wat erin staat |
 | --- | --- | --- |
-| zonder glas | `image/cfg/headless.cfg` | `hopos.cluster=hopos`, `hopos.insecure=1` en `hopos.console=1` (open op het eigen LAN), `hopos.cages=on`, `hopos.storage=stateless` (een device begint schoon en vergeet alles; `stateful` in een eigen regel laadt de boom van de schijf en laat Hop's staat op `/hop/` een herstart overleven; `HOPOS_FS_STATELESS` op de console zegt dat de boot leeg begon) |
+| zonder glas | `image/cfg/headless.cfg` | `hopos.cluster=hopos`, `hopos.insecure=1` (open op het eigen LAN; de console over TCP volgt die vlag), `hopos.storage=stateless` (een device begint schoon en vergeet alles; `stateful` in een eigen regel laadt de boom van de schijf en laat Hop's staat op `/hop/` een herstart overleven; `HOPOS_FS_STATELESS` op de console zegt dat de boot leeg begon) |
 | met glas (`GUI=1`, `MEDIA=1`) | `image/cfg/headfull.cfg` | hetzelfde, plus welcome op poort 80 van de release `apps` als init-job, en de display-app als regel met een hekje; de media-smaak van de O6N is headfull |
 
 Waar Hop woont, is de standaard van het board in de code (`board::Board`,

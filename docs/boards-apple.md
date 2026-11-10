@@ -20,7 +20,7 @@ niets ervan heeft in v3 op ijzer gedraaid. De gedateerde lessen (28-08 tot
 | RTKit-mailbox (ASC) en de SART v3 | `driver/rtkit` | 16 host-tests tegen een nep-coprocessor |
 | SMC: sleutels, floats, sensoren, de warmste | `driver/smc` | 7 host-tests |
 | ANS-NVMe: het ANS-transport onder de NVMe-core (lineaire SQ, TCB's, NVMMU, coprocessor), de GPT als capaciteit, het schrijfvenster, nette shutdown | `driver/nvme/src/apple.rs` | 7 host-tests op de nep-controller van de core: de vier ANS-lessen, secure-bar, CID en TCB per slot met de invalidatie, weigering buiten of zonder venster, 512-naar-4K, een omgevallen coprocessor; tickets en read-ahead in de core-toetsen |
-| Board: bootstub, VHE-ingang, 48-bit-map met PXN, console, boot_args en ADT, cores met klasse, de CPU_ON-haak, AIC, timer-FIQ, fast IPI, PCIe-bring-up, tg3 met zijn INTx-lijn, ANS, SMC, watchdogs, p-states en hun wachter, het config-venster, slot-plan met voorproef | `board/apple` | 22 host-tests (map en PXN, plan, pool uit het contract, tunables, os-core-keuze, config-venster, watchdog-alarm, p-state-plafond, `hopos.cages`) |
+| Board: bootstub, VHE-ingang, 48-bit-map met PXN, console, boot_args en ADT, cores met klasse, de CPU_ON-haak, AIC, timer-FIQ, fast IPI, PCIe-bring-up, tg3 met zijn INTx-lijn, ANS, SMC, watchdogs, p-states en hun wachter, het config-venster, slot-plan | `board/apple` | host-tests (map en PXN, plan, pool uit het contract, tunables, os-core-keuze, config-venster, watchdog-alarm, p-state-plafond) |
 | OS-core-rotatie voor `AppleVhe`: de fast IPI als bel, de ack op EL2, de FIQ als `Back::Timer`/`Back::Ipi`; de Apple-kick in de switcher; de CPU_ON-haak en de SCTLR-wis in `cpu::smp`; de VHE-bewuste event-stream | `cpu/src/el2`, `cpu/src/smp.rs`, `cpu/src/idle.rs` | host-tests (het kick-woord, de vectorindex, de haak, de stream-bits); de gedeelde paden op QEMU (virt, UEFI, UEFI+VHE) |
 | Linkscript: raw image op 0x101_0000_0000, stub op 0, kern op 0x10000 | `hopos/link-apple.ld` | link-asserties; `image/apple-m4.sh` toetst het parameterblok |
 | Loader (m1n1-proxy), meetcyclus, console, installer | `image/apple/` | de meetbank |
@@ -64,8 +64,9 @@ overdracht als na `kmutil configure-boot --raw --entry-point 2048`.
 
 `hopos.cfg`-sleutels van dit board: `hopos.oscore=small|big|N`,
 `hopos.pstate=off|E,P` (het plafond per cluster, standaard 5,6),
-`hopos.disk=off`, `hopos.smc=1`, `hopos.cages=on|off` (zonder waarde:
-kooien als de voorproef slaagt).
+`hopos.disk=off`, `hopos.smc=1`. Kooien zijn er altijd (`hopos.cages` en
+de voorproef zijn weg, 10-11): de zelftest van de kern,
+`HOPOS_OS_SELFTEST`, toetst de rotatie en is fataal als hij zakt.
 
 De config reist in het image, in het venster van elke kern
 ([boards.md](boards.md), "Het config-venster"): `CFG=hopos-m4.cfg sh
@@ -123,14 +124,12 @@ ok`). Op de M4 zelf heeft het nog niet gedraaid: dat is de checklist.
    de Apple-switcher) zetten eerst DAIF dicht en SCTLR_EL2.M/C/I uit, zonder
    set/way-onderhoud: m1n1 roept een vrijgegeven core aan als functie met
    zijn MMU nog aan (29-08).
-4. **De voorproef.** Het slot-plan (`board_apple::slots::plan`) draait bij
-   zijn eerste aanroep, op de OS-core en vóór er één kooi bestaat, dezelfde
-   drie beurten als de zelftest van de kern (de CNTHP, een yield, de fast
-   IPI naar zichzelf): `slots: OS-core preflight ... HOPOS_APPLE_PREFLIGHT
-   ok`. Rood (`HOPOS_APPLE_PREFLIGHT_FAIL`) = het plan weigert luid
-   (`HOPOS_SLOT_PLAN`) en de node draait door zonder kooien, zoals vóór
-   29-09. `hopos.cages=on` slaat de voorproef over, `hopos.cages=off`
-   weigert altijd. De `hopos.cages=on`-rem van vóór 29-09 is weg.
+4. **De rotatie.** Kooien zijn er altijd. De zelftest van de kern (de
+   CNTHP, een yield, de fast IPI naar zichzelf) toetst de rotatie van de
+   OS-core: `oscore: cpu N self-test ... HOPOS_OS_SELFTEST ok`, en een rode
+   beurt is fataal. De eigen voorproef van Apple en `hopos.cages` zijn weg
+   (10-11): ze deden hetzelfde, en een node zonder kooien draaide stil
+   zonder apps door.
 5. **De keuze van de slaap per core** (onveranderd): het board meet de
    timer-FIQ (`HOPOS_APPLE_IDLE`) en kiest WFI of WFE. Een OS-core die de
    kern zelf opbracht (`hopos.oscore=small`), krijgt op t8132 geen
@@ -243,9 +242,7 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
 12. **DHCP** (`HOPOS_NET_UP`) en de tik: `HOPOS_TICK n sleeps=...`.
     Wekken per seconde rond 954 (29-08): `HOPOS_APPLE_IDLE` moet dan `Wfi`
     zeggen. Veel meer: WFE op de event-stream; controleer EVNTIS (ECV).
-13. **De voorproef en de kooien**: `slots: OS-core preflight on mpidr
-    0x80010100: timer=Some(Timer) yield=Some(Yield) kick=Some(Ipi)
-    HOPOS_APPLE_PREFLIGHT ok`, dan `slots: cage up HOPOS_CAGE_UP ...` en
+13. **De kooien**: `slots: cage up HOPOS_CAGE_UP ...` en
     `oscore: cpu 6 self-test timer=... yield=... kick=... HOPOS_OS_SELFTEST
     ok`. Wat een rode beurt betekent:
     - `timer=Some(Yield)`: de CNTHP-FIQ bereikte deze core niet (de spinner

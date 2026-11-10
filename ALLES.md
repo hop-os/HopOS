@@ -188,7 +188,7 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       NOT_SUPPORTED, 03-10) en het EFI_RNG_PROTOCOL hing er in juli; blijft
       jitter tot iemand efi-rng daar met een tijdslimiet durft te proberen.
 - [ ] Hop op de host: SIGTERM; de S3-lock met twee HopOS-nodes op ijzer.
-- [ ] De plugins als node (hop-gui, hoplb, hopdns, hopprom, hoplockserver,
+- [ ] De plugins als node (hoplb, hopdns, hopprom,
       cloudflared-lean met een echt token) en Replica (`sqlite-persist`).
 
 ## Het plafond: Linux of macOS op dezelfde M4 tegen HopOS (01-10 avond, M33)

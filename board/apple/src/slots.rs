@@ -21,9 +21,6 @@ use crate::{ADMIN, LOADER, RAM_BASE, WINDOW_END, fwinfo};
 use abi::Region;
 use abi::layout::{Plan, PlanSpec, Pool, carve_pool};
 use board::stage;
-use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
-use cpu::el2::{Back, Bell, OsCore};
-use cpu::println;
 use dev::Pa;
 
 /// De control-pages van de eigen cores van de kern: het begin van het
@@ -117,119 +114,18 @@ fn pool_of(phys: u64, size: u64, top: u64) -> (Pool, bool) {
     }
 }
 
-/// Wat `hopos.cages` vraagt.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Cages {
-    /// Geen waarde: kooien als de voorproef slaagt.
-    Auto,
-    /// `on`: kooien, ook zonder voorproef (de rem van vóór 29-09 eraf).
-    On,
-    /// `off`: geen kooien, luid.
-    Off,
-}
-
-fn cages(v: &str) -> Cages {
-    match v {
-        "on" => Cages::On,
-        "off" => Cages::Off,
-        _ => Cages::Auto,
-    }
-}
-
-/// De uitkomst van de voorproef: 0 = nog niet gedaan, 1 = geslaagd, 2 =
-/// gezakt. Eén keer per boot, op de OS-core (de eerste `plan`).
-static PREFLIGHT: AtomicU8 = AtomicU8::new(0);
-
-/// De voorproef van de OS-core-rotatie: dezelfde drie beurten als de
-/// zelftest van de kern (hopos `slots::os_core`: de CNTHP, een yield, de
-/// fast IPI naar zichzelf), maar vóór er één kooi, partitie of bewoner
-/// bestaat. Waarom hier en niet pas in de kern: op dit silicium is elke
-/// stap nieuw (niets van de Rust-kern draaide hier ooit), en een kern die
-/// zijn kooien opbouwt terwijl de CNTHP deze core niet bereikt, geeft Hop
-/// een core die nooit terugkomt. Een spinner die de CNTHP niet ziet, yieldt
-/// na twee termijnen zelf (`OsCore::selftest`): rood, geen hang.
-///
-/// Waar het kan misgaan (docs/boards-apple.md, stap 11): een OS-core die de
-/// kern zelf opbracht (`hopos.oscore=small`) krijgt op t8132 geen timer-FIQ
-/// (29-08), en dan zakt de timer-beurt.
-fn preflight(plan: &Plan) -> bool {
-    match PREFLIGHT.load(Relaxed) {
-        1 => return true,
-        2 => return false,
-        _ => {}
-    }
-    let here = cpu::mpidr();
-    // Het EL2-regime zoals iBoot of m1n1 het achterliet en de kern het
-    // zette, teruggelezen zoals Go's el2Apple (30-09: onder kmutil gaf de
-    // voorproef drie keer Fault, en zonder deze regel is dat blind).
-    println!(
-        "slots: el2 regime hcr={:#x} cnthctl={:#x} cptr={:#x} sctlr_el2={:#x} HOPOS_APPLE_EL2",
-        crate::arch::hcr(),
-        crate::arch::cnthctl(),
-        crate::arch::cptr(),
-        crate::arch::sctlr_el2()
-    );
-    crate::serror_check("everything before the preflight");
-    let ok = match OsCore::new(plan, crate::FLAVOR, Some(Bell::apple(here))) {
-        Ok(mut os) => {
-            let ms = cpu::idle::freq() / 1000;
-            let t = os.selftest(false, ms, &|| {});
-            let y = os.selftest(true, 100 * ms, &|| {});
-            let k = os.selftest(false, 100 * ms, &|| crate::cores::kick(here));
-            let back = |r: Option<cpu::el2::Probe>| r.map(|p| p.back);
-            let ok = back(t) == Some(Back::Timer)
-                && back(y) == Some(Back::Yield)
-                && back(k) == Some(Back::Ipi);
-            println!(
-                "slots: OS-core preflight on mpidr {here:#x}: timer={:?} yield={:?} kick={:?} {}",
-                back(t),
-                back(y),
-                back(k),
-                if ok {
-                    "HOPOS_APPLE_PREFLIGHT ok"
-                } else {
-                    "HOPOS_APPLE_PREFLIGHT_FAIL"
-                }
-            );
-            if [back(t), back(y), back(k)].contains(&Some(Back::Fault)) {
-                let (esr, far, pc, vec) = cpu::el2::last_fault();
-                println!(
-                    "slots: preflight fault: esr={esr:#x} far={far:#x} pc={pc:#x} vec={vec} HOPOS_APPLE_PREFLIGHT_FAULT"
-                );
-            }
-            ok
-        }
-        Err(e) => {
-            println!("slots: OS-core preflight: {e} HOPOS_APPLE_PREFLIGHT_FAIL");
-            false
-        }
-    };
-    PREFLIGHT.store(if ok { 1 } else { 2 }, Relaxed);
-    ok
-}
-
 /// Het PA-plan voor een node met `cores` cores en de kern op fysieke core
 /// `os_core`: elke andere core is een app-core met één kooi, en de OS-core
 /// draagt er één bij.
 ///
-/// Sinds 29-09 staat het plan standaard AAN, mits de voorproef van de
-/// OS-core slaagt ([`preflight`]): de kooi-lijm installeert `AppleVhe`, de
-/// rotatie kent de fast IPI, en een koude core start via
-/// [`crate::cores::cpu_on_mpidr`] (m1n1's spin-table of PMGR) in plaats van
-/// PSCI. Zakt de voorproef, dan weigert het plan luid (`HOPOS_SLOT_PLAN`)
-/// en draait de node zonder kooien door, zoals vóór 29-09. `hopos.cages=on`
-/// slaat de voorproef over (de zelftest van de kern meldt het dan nog
-/// steeds), `hopos.cages=off` weigert altijd.
+/// De kooi-lijm installeert `AppleVhe`, de rotatie kent de fast IPI, en een
+/// koude core start via [`crate::cores::cpu_on_mpidr`] (m1n1's spin-table of
+/// PMGR) in plaats van PSCI. Kooien zijn er altijd; of de rotatie van de
+/// OS-core werkt, toetst de zelftest van de kern (`HOPOS_OS_SELFTEST`,
+/// fataal als hij zakt), zoals op elk board.
 pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
-    let want = cages(board::Board::boot_param(
-        &crate::Apple::new(),
-        "hopos.cages",
-    ));
-    if want == Cages::Off {
-        return Err(abi::Error::Missing("cages: hopos.cages=off"));
-    }
     let app_cores = cores.saturating_sub(1).max(1);
-    let plan = Plan::new(PlanSpec {
+    Plan::new(PlanSpec {
         node_ctrl_pa: NODE_CTRL_PA,
         cage_pa: CAGE_PA,
         boot_scratch_pa: BOOT_SCRATCH_PA,
@@ -240,13 +136,7 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         app_cores,
         os_core,
         ..PlanSpec::default()
-    })?;
-    if want == Cages::Auto && !preflight(&plan) {
-        return Err(abi::Error::Missing(
-            "cages: the OS-core preflight failed (HOPOS_APPLE_PREFLIGHT; hopos.cages=on forces them)",
-        ));
-    }
-    Ok(plan)
+    })
 }
 
 /// Het MPIDR van core `core`: 0x8000_0000, aff2 op de P-cores, en aff1:aff0
@@ -292,38 +182,6 @@ pub fn staged_image() -> Option<&'static [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_cages_knob() {
-        assert_eq!(cages(""), Cages::Auto);
-        assert_eq!(cages("on"), Cages::On);
-        assert_eq!(cages("off"), Cages::Off);
-        assert_eq!(cages("yes"), Cages::Auto);
-    }
-
-    /// Op de host keert elke beurt terug op een IRQ: de voorproef zakt, en
-    /// dat onthoudt hij (één keer per boot).
-    #[test]
-    fn a_red_preflight_refuses_and_stays_red() {
-        let plan = Plan::new(PlanSpec {
-            node_ctrl_pa: NODE_CTRL_PA,
-            cage_pa: CAGE_PA,
-            boot_scratch_pa: BOOT_SCRATCH_PA,
-            black_box: BLACK_BOX,
-            net_dma_pa: crate::NET_DMA.base.0,
-            ram_base: crate::DRAM_BASE,
-            pool: pool_of(0, 0, 0).0,
-            app_cores: 1,
-            os_core: 0,
-            ..PlanSpec::default()
-        });
-        // De plan-regio ligt op zijn ijzeradres; `OsCore::new` schrijft
-        // daar, dus op de host alleen de weigering zonder plan.
-        assert!(plan.is_ok());
-        PREFLIGHT.store(2, Relaxed);
-        assert!(!preflight(&plan.unwrap()));
-        PREFLIGHT.store(0, Relaxed);
-    }
 
     /// Het RAM-contract van de M4 (GEMETEN 29-08).
     #[test]

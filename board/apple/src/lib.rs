@@ -539,8 +539,8 @@ impl Board for Apple {
     ///
     /// Let op (29-08): een core die de kern zelf opbracht, krijgt op t8132
     /// geen timer-FIQ. De kern draait daar dan in WFE (`sleeper` meet het
-    /// opnieuw) en de voorproef van de kooien zakt op de timer-beurt
-    /// (`HOPOS_APPLE_PREFLIGHT_FAIL`): de verhuizing kost de kooien, luid.
+    /// opnieuw) en de zelftest van de rotatie zakt op de timer-beurt
+    /// (`HOPOS_OS_SELFTEST_FAIL`), fataal: blijf op de boot-core.
     fn os_core(&self) -> (usize, Option<&'static str>) {
         board::os_core(
             self.boot_param("hopos.oscore"),
@@ -683,38 +683,6 @@ pub(crate) fn serror_check(stage: &'static str) -> bool {
 mod arch {
     use core::arch::asm;
 
-    /// HCR_EL2 zoals hij nu staat (de teruglezing van Go's el2Apple).
-    pub(super) fn hcr() -> u64 {
-        let v: u64;
-        // SAFETY: HCR_EL2 lezen heeft geen neveneffect.
-        unsafe { asm!("mrs {}, hcr_el2", out(reg) v, options(nomem, nostack)) };
-        v
-    }
-
-    /// CNTHCTL_EL2 zoals hij nu staat.
-    pub(super) fn cnthctl() -> u64 {
-        let v: u64;
-        // SAFETY: CNTHCTL_EL2 lezen heeft geen neveneffect.
-        unsafe { asm!("mrs {}, cnthctl_el2", out(reg) v, options(nomem, nostack)) };
-        v
-    }
-
-    /// CPTR_EL2 zoals hij nu staat.
-    pub(super) fn cptr() -> u64 {
-        let v: u64;
-        // SAFETY: CPTR_EL2 lezen heeft geen neveneffect.
-        unsafe { asm!("mrs {}, cptr_el2", out(reg) v, options(nomem, nostack)) };
-        v
-    }
-
-    /// SCTLR_EL2 zoals hij nu staat.
-    pub(super) fn sctlr_el2() -> u64 {
-        let v: u64;
-        // SAFETY: SCTLR_EL2 lezen heeft geen neveneffect.
-        unsafe { asm!("mrs {}, sctlr_el2", out(reg) v, options(nomem, nostack)) };
-        v
-    }
-
     /// De L2C-foutregisters: STS (s3_3_c15_c8_0), ADR (s3_3_c15_c9_0) en
     /// INF (s3_3_c15_c10_0), zoals m1n1 ze bij elke exception drukt.
     pub(super) fn l2c_err() -> (u64, u64, u64) {
@@ -743,18 +711,6 @@ mod arch {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 mod arch {
     //! Host-stubs.
-    pub(super) fn hcr() -> u64 {
-        0
-    }
-    pub(super) fn cnthctl() -> u64 {
-        0
-    }
-    pub(super) fn cptr() -> u64 {
-        0
-    }
-    pub(super) fn sctlr_el2() -> u64 {
-        0
-    }
     pub(super) fn l2c_err() -> (u64, u64, u64) {
         (0, 0, 0)
     }

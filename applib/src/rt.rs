@@ -41,7 +41,11 @@ use sync::Local;
 /// wat de app zelf spawnt.
 pub const TASKS: usize = 64;
 
-/// Gelijktijdige timers op de app-core.
+/// De beginmaat van de timertabel van de app-core: zoveel timers passen
+/// zonder dat de tabel groeit. Geen plafond meer (tot 21-11 wel, en een
+/// timer zonder plaats spinde, `HOPOS_TIMER_OVERFLOW`): de tabel verdubbelt
+/// op het koude pad tot [`executor::TIMER_CEILING`], en de hoogste stand
+/// staat in `Stats::timers_peak` (de heartbeat meldt hem, [`watch`]).
 pub const TIMERS: usize = 32;
 
 /// De executor van een app-core.
@@ -97,6 +101,58 @@ mod tests {
         assert_eq!(w.tick(&app, t0 + 2_499_999_999, 0), Tick::Alive);
         assert_eq!(w.tick(&app, t0 + 2_500_000_000, 0), Tick::Forced);
         assert_eq!(app.ctrl().get(CTRL_HEARTBEAT), 4);
+    }
+
+    /// De executor van een app-core met duizend timers tegelijk: geen
+    /// overloop, en ze vuren op hun deadline.
+    #[test]
+    fn the_app_executor_holds_a_thousand_timers() {
+        use core::pin::Pin;
+        use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+        use core::task::{Context, Waker};
+        static CLOCK: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            CLOCK.load(SeqCst)
+        }
+        let e: &'static Exec = Box::leak(Box::new(Exec::new()));
+        e.set_clock(clock);
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut held: alloc::vec::Vec<_> = (0..1_000u64)
+            .map(|i| e.after(Duration::from_millis(1 + i % 100)))
+            .collect();
+        for t in &mut held {
+            assert!(Pin::new(t).poll(&mut cx).is_pending());
+        }
+        assert_eq!(e.live_timers(), 1_000);
+        assert_eq!(e.stats.timer_overflows.load(SeqCst), 0);
+        assert_eq!(e.stats.timers_peak.load(SeqCst), 1_000);
+        assert_eq!(e.next_deadline(), Some(1_000_000));
+        CLOCK.store(50_000_000, SeqCst);
+        e.step();
+        assert_eq!(e.live_timers(), 500);
+        CLOCK.store(100_000_000, SeqCst);
+        e.step();
+        assert_eq!(e.live_timers(), 0);
+        for t in &mut held {
+            assert!(Pin::new(t).poll(&mut cx).is_ready());
+        }
+    }
+
+    #[test]
+    fn the_timer_peak_is_told_when_it_passes_the_start_and_each_doubling() {
+        let s = executor::Stats::default();
+        let mut l = Losses::default();
+        s.timers_peak.store(TIMERS as u64, Relaxed);
+        assert_eq!(l.check(&s).peak, None, "within the start size: quiet");
+        s.timers_peak.store(TIMERS as u64 + 1, Relaxed);
+        assert_eq!(l.check(&s).peak, Some(TIMERS as u64 + 1));
+        s.timers_peak.store(2 * TIMERS as u64, Relaxed);
+        assert_eq!(l.check(&s).peak, None);
+        s.timers_peak.store(2 * TIMERS as u64 + 5, Relaxed);
+        assert_eq!(l.check(&s).peak, Some(2 * TIMERS as u64 + 5));
+        s.timers_peak.store(1_000, Relaxed);
+        assert_eq!(l.check(&s).peak, Some(1_000));
+        assert_eq!(l.check(&s).peak, None);
     }
 
     #[test]
@@ -163,15 +219,19 @@ impl Watch {
 }
 
 /// Wat de heartbeat al meldde van de executor van de primaire: taken die
-/// geen plaats kregen terwijl `spawn` Ok gaf, en timers zonder slot. De kern
-/// meldt het eerste in zijn tik (`HOPOS_TASK_DROPPED`); een app meldde tot
-/// 24-10 geen van beide, dus zo'n taak verdween stil (F15).
+/// geen plaats kregen terwijl `spawn` Ok gaf, timers zonder plaats (sinds
+/// 21-11 alleen nog bij een volle heap of het plafond), en de hoogste stand
+/// van de timers. De kern meldt het eerste in zijn tik
+/// (`HOPOS_TASK_DROPPED`); een app meldde tot 24-10 geen van beide, dus zo'n
+/// taak verdween stil (F15).
 #[derive(Default)]
 struct Losses {
     dropped: u64,
     overflows: u64,
     /// De vorige slag zag de overloop van de timers ook groeien.
     overflowing: bool,
+    /// De hoogste stand die al gemeld is (0: nog niets).
+    peak: u64,
 }
 
 /// Wat één slag nieuw zag.
@@ -183,6 +243,11 @@ struct Lost {
     /// een timer zonder slot telt bij elke poll zolang hij spint, en dat is
     /// één melding waard, niet één per slag.
     overflows: Option<u64>,
+    /// De nieuwe hoogste stand van de timers, als hij boven de beginmaat
+    /// [`TIMERS`] komt en daarna telkens als hij verdubbelt sinds de vorige
+    /// melding: zo zegt de console wat een app echt nodig heeft, in een
+    /// handvol regels per leven.
+    peak: Option<u64>,
 }
 
 impl Losses {
@@ -195,7 +260,22 @@ impl Losses {
         let overflows = (grew && !self.overflowing).then_some(o);
         self.overflows = o;
         self.overflowing = grew;
-        Lost { dropped, overflows }
+        let p = s.timers_peak.load(Relaxed);
+        let start = u64::try_from(TIMERS).unwrap_or(u64::MAX);
+        let bar = if self.peak == 0 {
+            start
+        } else {
+            self.peak.saturating_mul(2)
+        };
+        let peak = (p > bar).then_some(p);
+        if let Some(p) = peak {
+            self.peak = p;
+        }
+        Lost {
+            dropped,
+            overflows,
+            peak,
+        }
     }
 }
 
@@ -205,7 +285,9 @@ impl Losses {
 /// uit `main` terug te keren (de main-schil doet dan het net-afscheid en de
 /// exit); is hij dan nog niet terug, dan doet de heartbeat dat afscheid
 /// zelf. Elke slag meldt ook wat de executor verloor ([`Losses`]): één
-/// regel per gedropte reeks taken, één per reeks timers zonder slot. Tot
+/// regel per gedropte reeks taken, één per reeks timers zonder plaats, en
+/// de hoogste stand van de timers als die de beginmaat passeert of
+/// verdubbelt (`HOPOS_TIMERS_PEAK`). Tot
 /// 05-10 was dit een kale `exit` op de slag die de vlag zag: geen
 /// afscheid, en niets dicht (SIGTERM, dan SIGKILL; wij deden alleen KILL).
 pub async fn watch(app: &'static App) {
@@ -222,7 +304,14 @@ pub async fn watch(app: &'static App) {
         }
         if let Some(n) = lost.overflows {
             crate::log!(
-                "applib: the timer table is full, a timer spins without a slot ({n} spins so far) HOPOS_TIMER_OVERFLOW"
+                "applib: no room for a timer (heap full or {} timers), it spins without a slot ({n} spins so far) HOPOS_TIMER_OVERFLOW",
+                executor::TIMER_CEILING
+            );
+        }
+        if let Some(n) = lost.peak {
+            crate::log!(
+                "applib: timers peak={n} capacity={} start={TIMERS} HOPOS_TIMERS_PEAK",
+                exec.timer_capacity()
             );
         }
         if w.tick(app, exec.now(), HEAP.used()) == Tick::Forced {

@@ -386,9 +386,14 @@ werkers bezet zijn, is een 502 voor de browser. Een rij ervoor is beter,
 maar niet langer dan de klant zelf wacht: de tunnel geeft na 95 s zonder
 antwoordkop op, dus Stulp sluit wat langer dan 90 s in de rij lag.
 
-**Timers zijn schaars.** Een executor heeft er 32 (`applib::rt`, `TIMERS`).
-Een acceptor of werker die altijd een timer open heeft, eet daarvan; gebruik
-er alleen een zolang er iets te bewaken is.
+**Timers groeien, maar kosten.** De timertabel van een executor begint met
+32 plaatsen (`applib::rt`, `TIMERS`) en verdubbelt op het koude pad tot
+`executor::TIMER_CEILING` (sinds 21-11; tot dan spinde een timer zonder
+plaats, `HOPOS_TIMER_OVERFLOW`, en dat zie je nu alleen nog bij een volle
+heap). De hoogste stand staat in `Stats::timers_peak` en de heartbeat meldt
+hem (`HOPOS_TIMERS_PEAK`). Een acceptor of werker die altijd een timer open
+heeft, kost toch een plaats en een wek; gebruik er alleen een zolang er
+iets te bewaken is.
 
 **Een sluitrace is geen fout.** Een write of close voor een stream die al
 weg is, is normaal na een herverbinding. Stulp maakte daar een fatale fout

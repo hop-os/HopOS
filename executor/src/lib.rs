@@ -9,12 +9,12 @@
 //! Een ronde kost wat er klaar staat, niet de grootte van de tabel: de
 //! bits staan in acht woorden, en een ronde leest die en pollt alleen wat
 //! erin staat (de ready-bitmap van een RTOS-scheduler, Linux'
-//! `sched_find_first_bit`); de timerscans stoppen bij de hoogste bezette
-//! plaats. Tot 03-10 vroeg elke ronde 512 slots af met een atomaire swap,
-//! elke slaap 512 met een acquire-load (op RISC-V een `fence` per slot) en
-//! elke ronde 256 timerplaatsen: op de OS-core, waar de kern tussen elke
-//! twee beurten van zijn bewoners rondes draait, was dat twee derde van een
-//! rtt tussen twee bewoners (QEMU virt met `-icount shift=0`, één instructie
+//! `sched_find_first_bit`); de timers staan in een min-heap, dus een ronde
+//! kijkt naar de vroegste en niet naar de rest. Tot 03-10 vroeg elke ronde
+//! 512 slots af met een atomaire swap, elke slaap 512 met een acquire-load
+//! (op RISC-V een `fence` per slot) en elke ronde 256 timerplaatsen: op de
+//! OS-core, waar de kern tussen elke twee beurten van zijn bewoners rondes
+//! draait, was dat twee derde van een rtt tussen twee bewoners (QEMU virt met `-icount shift=0`, één instructie
 //! per ns: riscv64 359 naar 108 us, arm64 252 naar 85 us).
 //!
 //! De ronde ([`Executor::step`]): eerst de gespawnde taken een plaats
@@ -29,6 +29,11 @@
 //! hem een plaats, en is de tabel dan vol, dan gaat hij weg en telt
 //! [`Stats::dropped`] (de kern zegt dat op zijn tik, `HOPOS_TASK_DROPPED`).
 //! Het aantal taken staat dus niet bij de compiler, alleen het plafond.
+//!
+//! De timers ([`timers`]) hebben geen vast plafond meer: `TIMERS` is de
+//! beginmaat, de tabel verdubbelt op het koude pad tot [`TIMER_CEILING`] en
+//! krimpt nooit. [`Stats::timers_peak`] is de hoogste stand. Tot 21-11 was
+//! `TIMERS` een vaste tabel en spinde een timer zonder plaats.
 //!
 //! Wat hier niet staat: prioriteiten, werk-stelen, een tweede core. Elke
 //! core heeft zijn eigen executor en zijn eigen taken; tussen cores gaan
@@ -47,6 +52,8 @@
 
 extern crate alloc;
 
+mod timers;
+
 use alloc::boxed::Box;
 use core::alloc::Layout;
 use core::cell::{Cell, RefCell};
@@ -60,6 +67,14 @@ use core::sync::atomic::{
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
 use sync::mpsc::Mailbox;
+use timers::{Handle, Timers};
+
+/// Het plafond van de timers van één executor: zoveel lopende timers tegelijk
+/// en niet meer (een plaats kost ongeveer 64 bytes, met de heaps erbij; dit
+/// is dus ruim 4 MiB). Het houdt een lek (een taak die timers stapelt) uit
+/// de heap; een timer erboven spint als voorheen en telt
+/// [`Stats::timer_overflows`].
+pub const TIMER_CEILING: usize = 1 << 16;
 
 /// Een taak: een `'static` future die niets teruggeeft. Gespawnd op de
 /// executor van de core waar hij leeft, en daar blijft hij: taken verhuizen
@@ -113,8 +128,16 @@ pub struct Stats {
     /// Taken die geen slot kregen (gedropt): `spawn` gaf `Ok`, maar de
     /// tabel was vol toen de ronde hem een plaats wilde geven.
     pub dropped: AtomicU64,
-    /// Timers die geen slot kregen (de wachter spint op ronde-korrel).
+    /// Polls van een timer die geen plaats kreeg: de heap kon de tabel niet
+    /// laten groeien, of [`TIMER_CEILING`] is bereikt. De wachter spint dan
+    /// op ronde-korrel, zoals tot 21-11 bij elke volle tabel van `TIMERS`.
     pub timer_overflows: AtomicU64,
+    /// De hoogste stand van lopende timers tegelijk (de "high-water"): wat
+    /// een app echt nodig heeft, los van de beginmaat `TIMERS`.
+    pub timers_peak: AtomicU64,
+    /// Keren dat de timertabel groeide: elke keer één allocatie (handboek
+    /// §6: de meetlat telt allocaties). In de vaste toestand staat hij stil.
+    pub timer_grows: AtomicU64,
     /// Nanoseconden in de slaper (handboek §4: de slaaptijd). Wat een tik
     /// daar niet van heeft, was werk: zo is "de core zit vol" een getal.
     pub slept_ns: AtomicU64,
@@ -175,23 +198,12 @@ unsafe fn wake(p: *const ()) {
 
 unsafe fn drop_waker(_: *const ()) {}
 
-/// Eén plaats in het timerwiel.
-struct Timer {
-    /// De deadline, in nanoseconden op de klok.
-    at: u64,
-    /// De generatie van de registratie (zie `Executor::timer_gen`).
-    owner: u32,
-    /// Uitstelbaar: telt niet mee voor de slaap (zie
-    /// [`Executor::after_deferrable`]).
-    deferrable: bool,
-    waker: Waker,
-}
-
 /// De woorden van [`Executor::ready`]: plaats voor 512 taken, de
 /// standaard van de kern.
 const READY_WORDS: usize = 8;
 
-/// Een executor met plaats voor `TASKS` taken en `TIMERS` lopende timers.
+/// Een executor met plaats voor `TASKS` taken, en een timertabel die met
+/// plaats voor `TIMERS` timers begint en groeit (tot [`TIMER_CEILING`]).
 ///
 /// Leeft voor altijd: in de kern een `static` in een [`sync::Local`], in
 /// een test een gelekte `Box`. Wakers wijzen naar zijn slots.
@@ -204,22 +216,14 @@ pub struct Executor<const TASKS: usize = 512, const TIMERS: usize = 256> {
     /// (03-10, de eerste v3-boot: bus van 64 vol, "first placement not
     /// spawned: Full", geen Hop).
     spawn: Mailbox<Task, TASKS>,
-    timers: RefCell<[Option<Timer>; TIMERS]>,
-    /// Eén voorbij de hoogste bezette plaats in `timers`: de scans van een
-    /// ronde stoppen daar. Een plaats wordt van onderen af genomen, dus dit
-    /// is de handvol timers die echt loopt, niet de hele tabel.
-    timers_hi: Cell<usize>,
-    /// De vroegste deadline in het wiel, of eerder (een `After` die vóór
-    /// zijn tijd gedropt is, laat hem staan): een ronde scant het wiel
-    /// alleen als die verstreken is. 03-10: elke ronde scande, en op de
-    /// OS-core draait de kern tussen twee beurten van zijn bewoners een
-    /// paar rondes zonder dat er iets verloopt.
-    timers_at: Cell<u64>,
-    /// De generatie van de volgende registratie: elke plaats in het wiel
-    /// draagt de generatie van zijn huidige bewoner, zodat een `After` die
-    /// zijn plaats al kwijt is (verlopen, hergebruikt) nooit die van een
-    /// ander wist.
-    timer_gen: Cell<u32>,
+    /// De timers: twee min-heaps op een tabel die groeit ([`timers`]). Een
+    /// ronde kijkt alleen naar de vroegste (03-10: elke ronde scande de
+    /// hele tabel, en op de OS-core draait de kern tussen twee beurten van
+    /// zijn bewoners een paar rondes zonder dat er iets verloopt). Elke
+    /// registratie draagt een generatie, zodat een `After` die zijn plaats
+    /// al kwijt is (verlopen, hergebruikt) nooit die van een ander wist.
+    /// De lening duurt nooit over een wek of een drop van een waker.
+    timers: RefCell<Timers>,
     /// De gereed-bits van het woord dat de lopende ronde afwerkt en die
     /// nog aan de beurt komen: de ronde haalt een woord in één swap leeg,
     /// dus zonder dit ziet [`Self::has_ready`] vanuit een taak niet dat er
@@ -272,10 +276,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
             slots: [const { Slot::new() }; TASKS],
             ready: [const { AtomicU64::new(0) }; READY_WORDS],
             spawn: Mailbox::new(),
-            timers: RefCell::new([const { None }; TIMERS]),
-            timers_hi: Cell::new(0),
-            timers_at: Cell::new(u64::MAX),
-            timer_gen: Cell::new(0),
+            timers: RefCell::new(Timers::new()),
             rest: AtomicU64::new(0),
             clock: Cell::new(None),
             stats: Stats {
@@ -284,6 +285,8 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
                 sleeps: AtomicU64::new(0),
                 dropped: AtomicU64::new(0),
                 timer_overflows: AtomicU64::new(0),
+                timers_peak: AtomicU64::new(0),
+                timer_grows: AtomicU64::new(0),
                 slept_ns: AtomicU64::new(0),
             },
         }
@@ -306,7 +309,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         self.spawn.try_send(task).map_err(|_| SpawnError::Full)
     }
 
-    /// Slaapt `d` lang op het timerwiel.
+    /// Slaapt `d` lang op de timers van de executor.
     pub fn after(&'static self, d: Duration) -> After<TASKS, TIMERS> {
         let ns = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
         self.until(self.now().saturating_add(ns))
@@ -353,14 +356,20 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
     /// (dus niet de [uitstelbare](Self::after_deferrable)).
     #[must_use]
     pub fn next_deadline(&self) -> Option<u64> {
-        self.timers
-            .borrow()
-            .iter()
-            .take(self.timers_hi.get())
-            .flatten()
-            .filter(|t| !t.deferrable)
-            .map(|t| t.at)
-            .min()
+        self.timers.borrow().next_wake()
+    }
+
+    /// Hoeveel timers nu lopen.
+    #[must_use]
+    pub fn live_timers(&self) -> usize {
+        self.timers.borrow().live()
+    }
+
+    /// Voor hoeveel timers de tabel nu plaats heeft (de beginmaat `TIMERS`,
+    /// of wat hij daarna groeide).
+    #[must_use]
+    pub fn timer_capacity(&self) -> usize {
+        self.timers.borrow().capacity()
     }
 
     fn waker(slot: &'static Slot) -> Waker {
@@ -394,28 +403,17 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
     }
 
     fn expire_timers(&self, now: u64) -> bool {
-        if now < self.timers_at.get() {
-            return false;
-        }
         let mut worked = false;
-        let mut hi = 0;
-        let mut at = u64::MAX;
-        let mut timers = self.timers.borrow_mut();
-        for (i, entry) in timers.iter_mut().enumerate().take(self.timers_hi.get()) {
-            if entry.as_ref().is_some_and(|t| t.at <= now)
-                && let Some(t) = entry.take()
-            {
-                t.waker.wake();
-                worked = true;
-            }
-            if let Some(t) = entry {
-                hi = i + 1;
-                at = at.min(t.at);
-            }
+        // Eén lening per timer, en de wek erbuiten: een waker die zelf een
+        // timer zet (een vreemde executor, een test) vindt de tabel vrij.
+        loop {
+            let due = self.timers.borrow_mut().pop_due(now);
+            let Some(waker) = due else {
+                return worked;
+            };
+            waker.wake();
+            worked = true;
         }
-        self.timers_hi.set(hi);
-        self.timers_at.set(at);
-        worked
     }
 
     /// Eén ronde: spawns plaatsen, verstreken timers wekken, gereed taken
@@ -499,8 +497,8 @@ pub struct After<const TASKS: usize, const TIMERS: usize> {
     exec: &'static Executor<TASKS, TIMERS>,
     deadline: u64,
     deferrable: bool,
-    /// De plaats in het wiel en de generatie waarmee wij hem namen.
-    slot: Option<(usize, u32)>,
+    /// Onze registratie: de plaats en de generatie waarmee wij hem namen.
+    slot: Option<Handle>,
 }
 
 impl<const TASKS: usize, const TIMERS: usize> Future for After<TASKS, TIMERS> {
@@ -511,39 +509,39 @@ impl<const TASKS: usize, const TIMERS: usize> Future for After<TASKS, TIMERS> {
         if this.exec.now() >= this.deadline {
             return Poll::Ready(());
         }
-        let mut timers = this.exec.timers.borrow_mut();
-        // Een plaats die wij eerder namen kan verlopen en hergebruikt zijn:
-        // dan is de generatie erin niet meer de onze en zoeken we opnieuw.
-        if let Some((i, g)) = this.slot
-            && timers[i].as_ref().is_none_or(|t| t.owner != g)
+        let exec = this.exec;
+        let mut timers = exec.timers.borrow_mut();
+        // Nog onze registratie: alleen de waker vernieuwen. Een plaats die
+        // wij eerder namen kan verlopen en hergebruikt zijn: dan is de
+        // generatie erin niet meer de onze en registreren we opnieuw.
+        if let Some(h) = this.slot
+            && timers.refresh(h, cx.waker())
         {
-            this.slot = None;
+            return Poll::Pending;
         }
-        if this.slot.is_none()
-            && let Some(i) = timers.iter().position(Option::is_none)
-        {
-            let g = this.exec.timer_gen.get().wrapping_add(1);
-            this.exec.timer_gen.set(g);
-            this.slot = Some((i, g));
-        }
-        match this.slot {
-            Some((i, g)) => {
-                if i >= this.exec.timers_hi.get() {
-                    this.exec.timers_hi.set(i + 1);
+        this.slot = None;
+        let added = timers.add(
+            this.deadline,
+            this.deferrable,
+            cx.waker(),
+            TIMERS,
+            TIMER_CEILING,
+        );
+        let live = timers.live();
+        drop(timers);
+        match added {
+            Ok((h, grew)) => {
+                this.slot = Some(h);
+                if grew {
+                    exec.stats.timer_grows.fetch_add(1, Relaxed);
                 }
-                this.exec
-                    .timers_at
-                    .set(this.exec.timers_at.get().min(this.deadline));
-                timers[i] = Some(Timer {
-                    at: this.deadline,
-                    owner: g,
-                    deferrable: this.deferrable,
-                    waker: cx.waker().clone(),
-                });
+                let live = u64::try_from(live).unwrap_or(u64::MAX);
+                exec.stats.timers_peak.fetch_max(live, Relaxed);
             }
-            None => {
-                // Geen timerslot: spin op ronde-korrel, en tel het.
-                this.exec.stats.timer_overflows.fetch_add(1, Relaxed);
+            Err(timers::NoRoom) => {
+                // Geen plaats (heap vol of plafond): spin op ronde-korrel, en
+                // tel het.
+                exec.stats.timer_overflows.fetch_add(1, Relaxed);
                 cx.waker().wake_by_ref();
             }
         }
@@ -559,11 +557,10 @@ impl<const TASKS: usize, const TIMERS: usize> Drop for After<TASKS, TIMERS> {
         // altijd slapen (gemeten 29-09 op QEMU virt: met een tik per lees van
         // elke system-verbinding hing zo in vijf van vijf runs een servicer
         // of de slot-keten).
-        if let Some((i, g)) = self.slot.take() {
-            let mut timers = self.exec.timers.borrow_mut();
-            if timers[i].as_ref().is_some_and(|t| t.owner == g) {
-                timers[i] = None;
-            }
+        if let Some(h) = self.slot.take() {
+            // De waker gaat pas buiten de lening weg.
+            let waker = self.exec.timers.borrow_mut().remove(h);
+            drop(waker);
         }
     }
 }
@@ -804,6 +801,180 @@ mod tests {
         while e.step() {}
         assert_eq!(FIRED.load(SeqCst), 2);
         assert_eq!(e.live_tasks(), 0);
+    }
+
+    /// Een waker die zijn nummer opschrijft.
+    struct Mark(usize, std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
+    impl std::task::Wake for Mark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.1.lock().unwrap().push(self.0);
+        }
+    }
+
+    fn marks() -> std::sync::Arc<std::sync::Mutex<Vec<usize>>> {
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))
+    }
+
+    /// Vijfduizend timers tegelijk op een executor die met plaats voor vier
+    /// begint: geen overloop, elke timer wekt in de eerste ronde waarin de
+    /// klok zijn deadline passeert en niet eerder, de geannuleerde nooit, en
+    /// de hoogste stand staat in de meetlat.
+    #[test]
+    fn thousands_of_timers_fire_on_time_and_cancelled_ones_never() {
+        static CLOCK: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            CLOCK.load(SeqCst)
+        }
+        const N: usize = 5_000;
+        let e: &'static Executor<8, 4> = Box::leak(Box::new(Executor::new()));
+        e.set_clock(clock);
+        CLOCK.store(1_000, SeqCst);
+        let log = marks();
+        let mut timers = Vec::new();
+        let mut deadline = Vec::new();
+        for i in 0..N {
+            // Deadlines door elkaar: 1_001 ..= 1_000 + 997, met herhalingen.
+            let d = u64::try_from((i * 7_919) % 997 + 1).unwrap();
+            let mut a = e.after(Duration::from_nanos(d));
+            let w = Waker::from(std::sync::Arc::new(Mark(i, log.clone())));
+            assert!(
+                Pin::new(&mut a)
+                    .poll(&mut Context::from_waker(&w))
+                    .is_pending()
+            );
+            timers.push(Some(a));
+            deadline.push(1_000 + d);
+        }
+        assert_eq!(e.stats.timer_overflows.load(SeqCst), 0);
+        assert_eq!(e.live_timers(), N);
+        assert_eq!(e.stats.timers_peak.load(SeqCst), N as u64);
+        let grows = e.stats.timer_grows.load(SeqCst);
+        assert!(grows <= 12, "doubling, not one per timer: {grows}");
+        // Annuleer elke derde.
+        for (i, t) in timers.iter_mut().enumerate() {
+            if i % 3 == 0 {
+                *t = None;
+            }
+        }
+        let live = N - N.div_ceil(3);
+        assert_eq!(e.live_timers(), live);
+        assert_eq!(
+            e.timer_capacity(),
+            e.timer_capacity().max(N),
+            "never shrinks"
+        );
+        // De klok in stappen van één: wat wekt, wekt op zijn eigen deadline.
+        let mut fired = 0;
+        for now in 1_001..=2_000 {
+            CLOCK.store(now, SeqCst);
+            e.expire_timers(now);
+            let woke: Vec<usize> = log.lock().unwrap().drain(..).collect();
+            for i in &woke {
+                assert_eq!(deadline[*i], now, "timer {i} woke at {now}");
+                assert_ne!(i % 3, 0, "a cancelled timer woke");
+            }
+            fired += woke.len();
+            let next = e.next_deadline();
+            assert!(next.is_none_or(|n| n > now));
+        }
+        assert_eq!(fired, live);
+        assert_eq!(e.live_timers(), 0);
+        // De verlopen futures zijn klaar en hun drop raakt niets.
+        for t in timers.iter_mut().flatten() {
+            assert!(
+                Pin::new(t)
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_ready()
+            );
+        }
+        drop(timers);
+        // Opnieuw evenveel: de tabel heeft de plaats al, geen allocatie meer.
+        let again: Vec<_> = (0..N)
+            .map(|_| {
+                let mut a = e.after(Duration::from_secs(1));
+                assert!(
+                    Pin::new(&mut a)
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+                a
+            })
+            .collect();
+        assert_eq!(
+            e.stats.timer_grows.load(SeqCst),
+            grows,
+            "steady state allocates"
+        );
+        drop(again);
+        assert_eq!(e.live_timers(), 0);
+        assert_eq!(e.next_deadline(), None);
+    }
+
+    /// Een timer die opnieuw gepolld wordt (een `select` die om iets anders
+    /// wakker werd) houdt één registratie, en de nieuwste waker wekt.
+    #[test]
+    fn a_repoll_keeps_one_registration_and_the_newest_waker() {
+        static CLOCK: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            CLOCK.load(SeqCst)
+        }
+        let e: &'static Executor<8, 4> = Box::leak(Box::new(Executor::new()));
+        e.set_clock(clock);
+        let log = marks();
+        let mut a = e.after(Duration::from_nanos(50));
+        for i in 0..10 {
+            let w = Waker::from(std::sync::Arc::new(Mark(i, log.clone())));
+            assert!(
+                Pin::new(&mut a)
+                    .poll(&mut Context::from_waker(&w))
+                    .is_pending()
+            );
+            assert_eq!(e.live_timers(), 1);
+        }
+        CLOCK.store(50, SeqCst);
+        assert!(e.expire_timers(50));
+        assert_eq!(*log.lock().unwrap(), vec![9]);
+        assert!(
+            Pin::new(&mut a)
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
+    }
+
+    /// Duizend taken die elk een paar keer slapen, door de echte ronde: ze
+    /// komen allemaal aan, en een gewone timer bepaalt de slaap, een
+    /// uitstelbare niet.
+    #[test]
+    fn a_thousand_sleeping_tasks_through_step() {
+        static CLOCK: AtomicU64 = AtomicU64::new(0);
+        static DONE: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            CLOCK.load(SeqCst)
+        }
+        // 512 taken (de standaard van de kern), elk twee timers in een rij.
+        let e: &'static Executor<512, 16> = Box::leak(Box::new(Executor::new()));
+        e.set_clock(clock);
+        for i in 0..512u64 {
+            e.spawn(async move {
+                e.after(Duration::from_nanos(10 + i)).await;
+                e.after_deferrable(Duration::from_nanos(1_000)).await;
+                DONE.fetch_add(1, SeqCst);
+            })
+            .unwrap();
+        }
+        assert!(e.step());
+        assert_eq!(e.live_timers(), 512);
+        assert_eq!(e.next_deadline(), Some(10));
+        CLOCK.store(600, SeqCst);
+        while e.step() {}
+        assert_eq!(e.live_timers(), 512, "each now on its deferrable timer");
+        assert_eq!(e.next_deadline(), None, "deferrable timers set the sleep");
+        CLOCK.store(10_000, SeqCst);
+        while e.step() {}
+        assert_eq!(DONE.load(SeqCst), 512);
+        assert_eq!(e.live_tasks(), 0);
+        assert_eq!(e.stats.timer_overflows.load(SeqCst), 0);
+        assert_eq!(e.stats.timers_peak.load(SeqCst), 512);
     }
 
     #[test]

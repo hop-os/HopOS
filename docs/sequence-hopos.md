@@ -1608,6 +1608,9 @@ Uit de leesronde. Per stuk eerst een grep op gebruikers, dan pas weghalen.
   `staffed` weer weg.
 - De melding van `timer_overflows` in applib (F15, `Losses`/`Lost` in
   `applib/src/rt.rs`) is meer dan gevraagd. De regel voor `dropped` volstaat.
+  (21-11: de timertabel groeit nu, dus de overloop komt alleen nog bij een
+  volle heap of het plafond; de heartbeat meldt daarnaast de hoogste stand,
+  `HOPOS_TIMERS_PEAK`.)
 
 ### 13.9 Vragen die ik niet zelf kan beslissen
 

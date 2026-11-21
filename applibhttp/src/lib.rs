@@ -14,7 +14,8 @@
 //! de stilte zelf af op 5 s, `with_read_cap`). Hier wacht een stille
 //! verbinding in het park van de acceptor: geen taak en geen timer per
 //! verbinding (handboek §2, docs/apps.md "Pools, geen taak per
-//! verbinding"; een app-core heeft `rt::TIMERS` = 32). Het park wacht op
+//! verbinding"; een timer per stille verbinding kost een plaats in de
+//! timertabel en een wek voor niets). Het park wacht op
 //! `TcpConn::readable`, dat niets verbruikt, en houdt één timer voor de
 //! vroegste stilte.
 //!

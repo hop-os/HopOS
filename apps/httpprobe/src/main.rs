@@ -161,7 +161,7 @@ async fn report(exec: &'static Exec, pool: bool) {
         let inn = st.tcp_segs_in.saturating_sub(in0);
         (calls0, out0, in0) = (s.calls, st.tcp_segs_out, st.tcp_segs_in);
         log!(
-            "httpprobe: HTTPPROBE_STATS mode={} parked={} idle_closed={} park_full={} closed={} errors={} last_error={:?} back_full={} hijacked={} calls={} timer_overflows={} segs_out_per_call_x100={} segs_in_per_call_x100={} pump_bell={} pump_timer={} tx_waits={} tx_drops={} kicks={} retrans={} fast_retrans={} zero_win={} drop_reply_full={} refused_no_budget={}",
+            "httpprobe: HTTPPROBE_STATS mode={} parked={} idle_closed={} park_full={} closed={} errors={} last_error={:?} back_full={} hijacked={} calls={} timer_overflows={} timers_peak={} segs_out_per_call_x100={} segs_in_per_call_x100={} pump_bell={} pump_timer={} tx_waits={} tx_drops={} kicks={} retrans={} fast_retrans={} zero_win={} drop_reply_full={} refused_no_budget={}",
             if pool { "pool" } else { "park" },
             s.parked,
             s.idle_closed,
@@ -173,6 +173,7 @@ async fn report(exec: &'static Exec, pool: bool) {
             s.hijacked,
             s.calls,
             exec.stats.timer_overflows.load(Relaxed),
+            exec.stats.timers_peak.load(Relaxed),
             u64::try_from(out).unwrap_or(0) * 100 / calls,
             u64::try_from(inn).unwrap_or(0) * 100 / calls,
             applib::net::PUMP_EARLY.load(Relaxed),

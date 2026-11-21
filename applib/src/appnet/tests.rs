@@ -274,6 +274,140 @@ fn bulk_both_ways_then_close() {
     assert_eq!(st.refused_no_budget, 0);
 }
 
+/// Een echo op poort 7 van de kern: leest en schrijft terug tot EOF, sluit.
+fn spawn_echo(p: &Pair) {
+    let l = p.kern.tcp_listen(7).unwrap();
+    p.exec
+        .spawn(async move {
+            let mut c = l.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let n = c.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                c.write_all(&buf[..n]).await.unwrap();
+            }
+            c.close().unwrap();
+        })
+        .unwrap();
+}
+
+/// Wat een verbinding van de app zag: de ringen vers, na de bulk, en na
+/// het sluiten; plus de pot ervoor en tijdens.
+#[derive(Debug)]
+struct Growth {
+    fresh: TcpBuffers,
+    fresh_grown: bool,
+    bulk: TcpBuffers,
+    bulk_grown: bool,
+    closed: Result<TcpBuffers>,
+    closed_grown: bool,
+    pot_open: PotStats,
+}
+
+/// Verbindt met de echo, stuurt `rounds` keer 8 KiB heen en terug en sluit.
+fn grow_over_echo(p: &Pair, rounds: usize) -> Growth {
+    const CHUNK: usize = 8 << 10;
+    spawn_echo(p);
+    let result = slot();
+    let app = p.app;
+    p.exec
+        .spawn(async move {
+            let mut c = app.tcp_connect_timeout(HOST, 7, DIAL).await.unwrap();
+            let (fresh, fresh_grown) = (c.buffers().unwrap(), c.has_grown());
+            let pot_open = app.pot().unwrap();
+            let out = vec![0x5a; CHUNK];
+            let mut back = vec![0u8; CHUNK];
+            for _ in 0..rounds {
+                c.write_all(&out).await.unwrap();
+                c.read_exact(&mut back).await.unwrap();
+            }
+            let (bulk, bulk_grown) = (c.buffers().unwrap(), c.has_grown());
+            // Een kopie van het handvat: de stroom zelf is na close weg.
+            let ghost = TcpStream {
+                net: c.net,
+                h: c.h,
+                deadline: None,
+                slot: None,
+            };
+            c.close().unwrap();
+            let closed = ghost.buffers();
+            let closed_grown = ghost.has_grown();
+            core::mem::forget(ghost);
+            *result.borrow_mut() = Some(Growth {
+                fresh,
+                fresh_grown,
+                bulk,
+                bulk_grown,
+                closed,
+                closed_grown,
+                pot_open,
+            });
+        })
+        .unwrap();
+    p.run_until(|| result.borrow().is_some());
+    result.borrow_mut().take().unwrap()
+}
+
+#[test]
+fn a_bulk_connection_has_grown_and_a_closed_one_has_not() {
+    let p = pair();
+    let before = p.app.pot().unwrap();
+    assert_eq!(
+        (before.total, before.used, before.free),
+        (BUDGET, 0, BUDGET)
+    );
+    let g = grow_over_echo(&p, 40);
+    // Vers: precies op de vloer, dus niet gegroeid.
+    assert_eq!(
+        (g.fresh.rx, g.fresh.tx),
+        (TcpBuffers::RX_FLOOR, TcpBuffers::TX_FLOOR)
+    );
+    assert!(!g.fresh_grown);
+    assert!(g.pot_open.used >= TcpBuffers::RX_FLOOR + TcpBuffers::TX_FLOOR);
+    assert_eq!(g.pot_open.free, BUDGET - g.pot_open.used);
+    // 320 KiB heen en terug laat een ring groeien.
+    assert!(g.bulk_grown && g.bulk.grown(), "{:?}", g.bulk);
+    // Dicht: de stack kent het handvat niet meer, en dat is niet gegroeid.
+    assert_eq!(g.closed, Err(NetError::Stack(StackError::Closed)));
+    assert!(!g.closed_grown);
+    assert_eq!(p.app.pot().unwrap().refused_no_budget, 0);
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn a_grown_stream_says_so_through_the_leanhttp_bridge() {
+    use crate::tcp::TcpConn;
+    use leanhttp::Close;
+    let p = pair();
+    spawn_echo(&p);
+    let result = slot();
+    let (app, exec) = (p.app, p.exec);
+    p.exec
+        .spawn(async move {
+            let c = app.tcp_connect_timeout(HOST, 7, DIAL).await.unwrap();
+            let mut conn = TcpConn::new(c, exec);
+            let fresh = conn.has_grown();
+            let mut back = vec![0u8; 8 << 10];
+            for _ in 0..40 {
+                leanhttp::write_all(&mut conn, &[0x5a; 8 << 10])
+                    .await
+                    .unwrap();
+                let mut got = 0;
+                while got < back.len() {
+                    got += leanhttp::read(&mut conn, &mut back[got..]).await.unwrap();
+                }
+            }
+            let grown = conn.has_grown();
+            leanhttp::close(&mut conn).await.unwrap();
+            *result.borrow_mut() = Some((fresh, grown, conn.has_grown()));
+        })
+        .unwrap();
+    p.run_until(|| result.borrow().is_some());
+    assert_eq!(result.borrow_mut().take(), Some((false, true, false)));
+}
+
 #[test]
 fn a_small_answer_carries_the_ack_in_the_same_frame() {
     // De rondreis van `bench ping` (03-10, hop-cost5): op de OS-core is elk

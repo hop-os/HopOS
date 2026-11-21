@@ -19,6 +19,8 @@
 //! Namen buiten het slot-LAN lost [`resolve`] op: één A-vraag per keer over
 //! UDP naar die server ([`dns`]). Het bufferbudget is een achtste van de
 //! RAM-declaratie, geklemd op 1 tot 16 MiB (`NET_BUDGET` in de env wint).
+//! Wat de pot nog vrij heeft en hoeveel verbindingen hij weigerde, leest
+//! de app met [`pot`].
 //!
 //! Deadlines lopen op het timerwiel van de executor (`Exec::until`), niet in
 //! de stack: een handvat met een deadline racet zijn op tegen een timer, en
@@ -54,7 +56,9 @@ use sync::{Local, Signal, yield_now};
 pub mod dns;
 
 pub use dns::DnsError;
-pub use leannet::{Endpoint, Endpoint6, Error as StackError, Stats, TcpState};
+pub use leannet::{
+    Endpoint, Endpoint6, Error as StackError, PotStats, Stats, TcpBuffers, TcpState,
+};
 
 /// Het adres van de kern op het slot-LAN (de gateway).
 pub const HOST: [u8; 4] = abi::layout::HOST_IP4.to_be_bytes();
@@ -227,6 +231,12 @@ pub async fn resolve(host: &str) -> Result<[u8; 4]> {
 /// ([`Net::join_group`]).
 pub fn join_group(group: [u8; 4]) -> Result {
     net().ok_or(NetError::NotUp)?.join_group(group)
+}
+
+/// De pot van de stack van deze app ([`Net::pot`]): vrij, bezet en
+/// weigeringen. In O(1), dus ook per verzoek of per logregel te lezen.
+pub fn pot() -> Result<PotStats> {
+    net().ok_or(NetError::NotUp)?.pot()
 }
 
 /// Het budget: `env` (bytes, of met `k`/`m`) als die er is en klopt, anders
@@ -481,6 +491,11 @@ impl Net {
     /// De tellers van de stack.
     pub fn stats(&self) -> Result<Stats> {
         self.with(|st| st.stats())
+    }
+
+    /// De pot: vrij, bezet en weigeringen (leannet, O(1)).
+    pub fn pot(&self) -> Result<PotStats> {
+        self.with(|st| st.pot())
     }
 
     /// Nu, in nanoseconden op de klok van de stack.
@@ -1317,6 +1332,20 @@ impl TcpStream {
         core::mem::forget(self);
         let now = net.now();
         Ok(net.with(|st| st.tcp_close(h, now))??)
+    }
+
+    /// De ringmaten van deze verbinding (leannet): rx en tx in bytes.
+    pub fn buffers(&self) -> Result<TcpBuffers> {
+        let h = self.h;
+        Ok(self.net.with(|st| st.tcp_buffers(h))??)
+    }
+
+    /// Staat een van de ringen boven zijn vloer ([`TcpBuffers::grown`])? Een
+    /// verbinding die al dicht is of die de stack niet kan lenen, is niet
+    /// gegroeid: haar ringen zijn terug of de volgende vraag ziet ze.
+    #[must_use]
+    pub fn has_grown(&self) -> bool {
+        matches!(self.buffers(), Ok(b) if b.grown())
     }
 
     /// De toestand van de TCP-machine.

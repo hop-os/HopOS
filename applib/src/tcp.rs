@@ -18,6 +18,10 @@
 //! Eén brug, één plek voor een fix. Achter een feature, want niet elke app
 //! praat HTTP en leanhttp hoort dan niet in zijn image.
 //!
+//! Een gegroeide stroom (een ring boven zijn vloer) meldt zich via
+//! `Close::has_grown`: leanhttp houdt haar dan niet open na haar verzoek
+//! en een pool bewaart haar niet, zodat haar ringen terug in de pot gaan.
+//!
 //! Daarnaast de [`Dialer`] voor leanhttp als client (decode, vitals).
 //!
 //! Wat hier niet staat: de server zelf (leanhttp), de stack (`appnet`).
@@ -50,6 +54,12 @@ pub trait Stream {
     fn readable(&mut self) -> impl Future<Output = Result<(), NetError>> {
         core::future::ready(Ok(()))
     }
+
+    /// Staat een van de ringen van de stroom boven zijn vloer? De standaard
+    /// is nee: een nep-stroom heeft geen ringen.
+    fn has_grown(&self) -> bool {
+        false
+    }
 }
 
 impl Stream for TcpStream {
@@ -67,6 +77,10 @@ impl Stream for TcpStream {
 
     fn readable(&mut self) -> impl Future<Output = Result<(), NetError>> {
         TcpStream::readable(self)
+    }
+
+    fn has_grown(&self) -> bool {
+        TcpStream::has_grown(self)
     }
 }
 
@@ -305,6 +319,16 @@ impl<S: Stream> Close for TcpConn<S> {
             Some(s) => Poll::Ready(s.close().map_err(io_error)),
             None => Poll::Ready(Ok(())),
         }
+    }
+
+    /// Of de stroom gegroeid is (een ring boven zijn vloer, leannet). Zo ja,
+    /// dan sluit leanhttp's server haar na het verzoek en neemt een pool
+    /// haar niet aan: een stille keep-alive-verbinding met een bulkvenster
+    /// hield anders haar ringen uit de pot vast (21-11-2026: een
+    /// EasyFlor-instance verloor ruim 30 minuten elke uitgaande dial). Na
+    /// het sluiten is er niets meer gegroeid.
+    fn has_grown(&self) -> bool {
+        self.stream.as_ref().is_some_and(Stream::has_grown)
     }
 }
 

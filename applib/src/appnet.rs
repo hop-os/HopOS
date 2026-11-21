@@ -19,6 +19,10 @@
 //! Namen buiten het slot-LAN lost [`resolve`] op: één A-vraag per keer over
 //! UDP naar die server ([`dns`]). Het bufferbudget is een achtste van de
 //! RAM-declaratie, geklemd op 1 tot 16 MiB (`NET_BUDGET` in de env wint).
+//! Eén ring groeit hooguit tot de frame-ring van het slot ([`MAX_BUF`];
+//! `NET_MAX_BUF` in de env klemt lager). Wat de pot nog vrij heeft, of hij
+//! onder druk staat en hoeveel verbindingen hij weigerde, leest de app met
+//! [`pot`].
 //!
 //! Deadlines lopen op het timerwiel van de executor (`Exec::until`), niet in
 //! de stack: een handvat met een deadline racet zijn op tegen een timer, en
@@ -54,7 +58,9 @@ use sync::{Local, Signal, yield_now};
 pub mod dns;
 
 pub use dns::DnsError;
-pub use leannet::{Endpoint, Endpoint6, Error as StackError, Stats, TcpState};
+pub use leannet::{
+    Endpoint, Endpoint6, Error as StackError, PotStats, Stats, TcpBuffers, TcpState,
+};
 
 /// Het adres van de kern op het slot-LAN (de gateway).
 pub const HOST: [u8; 4] = abi::layout::HOST_IP4.to_be_bytes();
@@ -229,6 +235,31 @@ pub fn join_group(group: [u8; 4]) -> Result {
     net().ok_or(NetError::NotUp)?.join_group(group)
 }
 
+/// De pot van de stack van deze app ([`Net::pot`]): vrij, bezet, druk en
+/// weigeringen. In O(1), dus ook per verzoek of per logregel te lezen.
+pub fn pot() -> Result<PotStats> {
+    net().ok_or(NetError::NotUp)?.pot()
+}
+
+/// Het plafond van één ring zonder env: de frame-ring van het slot min
+/// twee frames ([`slot_config`] zegt waarom).
+pub const MAX_BUF: usize = (NET_RING_DATA_CAP - 2 * FRAME_ROOM) as usize;
+
+/// Het plafond van één ring: `env` (`NET_MAX_BUF`, bytes of met `k`/`m`)
+/// als die er is en klopt, nooit boven [`MAX_BUF`]; anders [`MAX_BUF`].
+/// leannet klemt een te klein getal zelf op zijn vloer (16 KiB rx plus
+/// 4 KiB tx).
+///
+/// Waarom een knop: een app met veel tenants en weinig bulk (EasyFlor) wil
+/// dat één verbinding de pot niet in een paar grote vensters opdeelt; een
+/// app met één bulkstroom (bench) wil het hele venster.
+#[must_use]
+pub fn max_buf_for(env: Option<&str>) -> usize {
+    env.and_then(parse_size)
+        .filter(|&n| n > 0)
+        .map_or(MAX_BUF, |n| n.min(MAX_BUF))
+}
+
 /// Het budget: `env` (bytes, of met `k`/`m`) als die er is en klopt, anders
 /// een achtste van `ram_size`, geklemd op [`BUDGET_MIN`]..[`BUDGET_MAX`].
 #[must_use]
@@ -289,7 +320,8 @@ pub fn slot_config(slot: u64, budget: usize) -> Config {
         // stroom 1434, met dit venster 1749 MB/s). Veel verbindingen tegelijk
         // vullen de ring ook met de halve ring al (04-09: 128x rx-full bij
         // vier hameraars); TCP herstelt een drop.
-        max_buf_per_conn: usize::try_from(NET_RING_DATA_CAP - 2 * FRAME_ROOM).unwrap_or(usize::MAX),
+        // `NET_MAX_BUF` klemt lager ([`max_buf_for`], in [`up`]).
+        max_buf_per_conn: MAX_BUF,
         adv_ws: ws_shift_for(budget as u64 / 4),
         mtu: NET_MTU,
         // Het slot-LAN is geheugen, geen draad: geen checksums. De kern-kant
@@ -317,8 +349,12 @@ pub fn up(app: &'static App) -> Result<&'static Net> {
     // levensduur een vers geheim, dus na een flip geen hergebruikt tupel.
     let secret = crate::rand::Rng::open(app).array::<16>();
     let dns = app.env("DNS").or(app.env("HOP_DNS")).and_then(parse_ip4);
-    let fresh =
-        Net::new(slot_config(app.slot(), budget), secret, exec, clock::now_ns)?.with_dns(dns);
+    let max_buf = max_buf_for(app.env("NET_MAX_BUF"));
+    let cfg = Config {
+        max_buf_per_conn: max_buf,
+        ..slot_config(app.slot(), budget)
+    };
+    let fresh = Net::new(cfg, secret, exec, clock::now_ns)?.with_dns(dns);
     fresh.seed_neighbor(host_ip(), mac_of(0).0)?;
     let buf = frame_buf(fresh.frame_len())?;
     if NET.get().set(fresh).is_err() {
@@ -340,7 +376,7 @@ pub fn up(app: &'static App) -> Result<&'static Net> {
         crate::ring::Coherence::Maintained => "maintained",
     };
     log!(
-        "appnet: up ip={a}.{b}.{c}.{d} budget={budget} mtu={NET_MTU} rings={rings} HOPOS_APPNET_UP"
+        "appnet: up ip={a}.{b}.{c}.{d} budget={budget} max_buf={max_buf} mtu={NET_MTU} rings={rings} HOPOS_APPNET_UP"
     );
     Ok(net)
 }
@@ -481,6 +517,11 @@ impl Net {
     /// De tellers van de stack.
     pub fn stats(&self) -> Result<Stats> {
         self.with(|st| st.stats())
+    }
+
+    /// De pot: vrij, bezet, druk en weigeringen (leannet, O(1)).
+    pub fn pot(&self) -> Result<PotStats> {
+        self.with(|st| st.pot())
     }
 
     /// Nu, in nanoseconden op de klok van de stack.
@@ -790,20 +831,51 @@ impl Net {
         timeout: Duration,
     ) -> Result<TcpStream> {
         let at = self.now().saturating_add(nanos(timeout));
-        self.tcp_connect_until(ip, port, at).await
+        self.tcp_connect_until(ip, port, at, false).await
     }
 
-    /// Verbindt met `ip:port` vóór `deadline`. Het handvat zit vanaf de SYN
-    /// in een [`TcpStream`], zodat een afgebroken dial via `Drop` opruimt.
+    /// Als [`Net::tcp_connect_timeout`], voor een verbinding die er moet
+    /// komen: past ze niet in de pot, ook niet nadat de lege ringen onder
+    /// druk krompen, dan breekt de stack inkomende verbindingen af (RST,
+    /// de grootste met lege ringen eerst) tot ze past
+    /// (`leannet::Stack::tcp_connect_forced`). Een dial wordt nooit
+    /// opgeofferd; zonder inkomende verbinding faalt hij als een gewone dial
+    /// (`NoBudget`). Elk slachtoffer telt in [`PotStats::forced_evictions`].
+    ///
+    /// Alleen voor de paar verbindingen zonder welke de app niet verder kan
+    /// (een leasevernieuwing, een hartslag), nooit als gewone dial: wie hem
+    /// overal gebruikt, laat een vloed van zijn eigen dials zijn bezoekers
+    /// weggooien. Geen enkele dial van applib doet dit vanzelf.
+    pub async fn tcp_connect_forced_timeout(
+        &'static self,
+        ip: [u8; 4],
+        port: u16,
+        timeout: Duration,
+    ) -> Result<TcpStream> {
+        let at = self.now().saturating_add(nanos(timeout));
+        self.tcp_connect_until(ip, port, at, true).await
+    }
+
+    /// Verbindt met `ip:port` vóór `deadline`, `forced` als een verbinding
+    /// die er moet komen ([`Net::tcp_connect_forced_timeout`]). Het handvat
+    /// zit vanaf de SYN in een [`TcpStream`], zodat een afgebroken dial via
+    /// `Drop` opruimt.
     async fn tcp_connect_until(
         &'static self,
         ip: [u8; 4],
         port: u16,
         deadline: u64,
+        forced: bool,
     ) -> Result<TcpStream> {
         self.admit()?;
         let now = self.now();
-        let h = self.with(|st| st.tcp_connect(ip, port, deadline, now))??;
+        let h = self.with(|st| {
+            if forced {
+                st.tcp_connect_forced(ip, port, deadline, now)
+            } else {
+                st.tcp_connect(ip, port, deadline, now)
+            }
+        })??;
         let s = self.stream(h);
         self.wait(
             Some(deadline),
@@ -1183,6 +1255,16 @@ impl TcpStream {
             .await
     }
 
+    /// Verbindt met `ip:port` als verbinding die er moet komen; zie
+    /// [`Net::tcp_connect_forced_timeout`] (alleen voor een leasevernieuwing
+    /// of een hartslag, nooit als gewone dial).
+    pub async fn connect_forced_timeout(ip: [u8; 4], port: u16, timeout: Duration) -> Result<Self> {
+        net()
+            .ok_or(NetError::NotUp)?
+            .tcp_connect_forced_timeout(ip, port, timeout)
+            .await
+    }
+
     /// Zet de deadline van elke volgende read en write, als tijdstip op de
     /// klok van de stack; `None` wist hem.
     pub fn set_deadline(&mut self, at: Option<u64>) {
@@ -1317,6 +1399,20 @@ impl TcpStream {
         core::mem::forget(self);
         let now = net.now();
         Ok(net.with(|st| st.tcp_close(h, now))??)
+    }
+
+    /// De ringmaten van deze verbinding (leannet): rx en tx in bytes.
+    pub fn buffers(&self) -> Result<TcpBuffers> {
+        let h = self.h;
+        Ok(self.net.with(|st| st.tcp_buffers(h))??)
+    }
+
+    /// Staat een van de ringen boven zijn vloer ([`TcpBuffers::grown`])? Een
+    /// verbinding die al dicht is of die de stack niet kan lenen, is niet
+    /// gegroeid: haar ringen zijn terug of de volgende vraag ziet ze.
+    #[must_use]
+    pub fn has_grown(&self) -> bool {
+        matches!(self.buffers(), Ok(b) if b.grown())
     }
 
     /// De toestand van de TCP-machine.

@@ -18,6 +18,10 @@
 //! Eén brug, één plek voor een fix. Achter een feature, want niet elke app
 //! praat HTTP en leanhttp hoort dan niet in zijn image.
 //!
+//! Een gegroeide stroom (een ring boven zijn vloer) meldt zich via
+//! `Close::has_grown`: leanhttp houdt haar dan niet open na haar verzoek
+//! en een pool bewaart haar niet, zodat haar ringen terug in de pot gaan.
+//!
 //! Daarnaast de [`Dialer`] voor leanhttp als client (decode, vitals).
 //!
 //! Wat hier niet staat: de server zelf (leanhttp), de stack (`appnet`).
@@ -50,6 +54,12 @@ pub trait Stream {
     fn readable(&mut self) -> impl Future<Output = Result<(), NetError>> {
         core::future::ready(Ok(()))
     }
+
+    /// Staat een van de ringen van de stroom boven zijn vloer? De standaard
+    /// is nee: een nep-stroom heeft geen ringen.
+    fn has_grown(&self) -> bool {
+        false
+    }
 }
 
 impl Stream for TcpStream {
@@ -67,6 +77,10 @@ impl Stream for TcpStream {
 
     fn readable(&mut self) -> impl Future<Output = Result<(), NetError>> {
         TcpStream::readable(self)
+    }
+
+    fn has_grown(&self) -> bool {
+        TcpStream::has_grown(self)
     }
 }
 
@@ -167,6 +181,7 @@ pub struct Dialer {
     exec: &'static Exec,
     connect: Duration,
     last_error: Option<DialError>,
+    forced: bool,
 }
 
 /// Waarom een [`Dialer`] geen verbinding kreeg, voor de logregel.
@@ -204,7 +219,23 @@ impl Dialer {
             exec,
             connect,
             last_error: None,
+            forced: false,
         }
+    }
+
+    /// Dialt elke verbinding als een die er moet komen
+    /// ([`Net::tcp_connect_forced_timeout`](crate::appnet::Net::tcp_connect_forced_timeout)):
+    /// is de pot vol, dan breekt de stack inkomende verbindingen af tot de
+    /// dial past.
+    ///
+    /// Alleen voor een dialer van de paar verbindingen zonder welke de app
+    /// niet verder kan (de leasevernieuwing van een replica, een hartslag);
+    /// een gewone dialer houdt dit uit, anders gooit een vloed van eigen
+    /// dials de bezoekers van de app weg.
+    #[must_use]
+    pub fn forced(mut self) -> Self {
+        self.forced = true;
+        self
     }
 
     /// Waarom de laatste dial mislukte, als dat zo was.
@@ -224,7 +255,12 @@ impl Dial for Dialer {
                 return Err(leanhttp::Error::Dial);
             }
         };
-        let s = match TcpStream::connect_timeout(ip, t.port, self.connect).await {
+        let dial = if self.forced {
+            TcpStream::connect_forced_timeout(ip, t.port, self.connect).await
+        } else {
+            TcpStream::connect_timeout(ip, t.port, self.connect).await
+        };
+        let s = match dial {
             Ok(s) => s,
             Err(error) => {
                 self.last_error = Some(DialError::Connect {
@@ -305,6 +341,16 @@ impl<S: Stream> Close for TcpConn<S> {
             Some(s) => Poll::Ready(s.close().map_err(io_error)),
             None => Poll::Ready(Ok(())),
         }
+    }
+
+    /// Of de stroom gegroeid is (een ring boven zijn vloer, leannet). Zo ja,
+    /// dan sluit leanhttp's server haar na het verzoek en neemt een pool
+    /// haar niet aan: een stille keep-alive-verbinding met een bulkvenster
+    /// hield anders haar ringen uit de pot vast (21-11-2026: een
+    /// EasyFlor-instance verloor ruim 30 minuten elke uitgaande dial). Na
+    /// het sluiten is er niets meer gegroeid.
+    fn has_grown(&self) -> bool {
+        self.stream.as_ref().is_some_and(Stream::has_grown)
     }
 }
 

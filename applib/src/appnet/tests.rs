@@ -78,12 +78,21 @@ fn pair() -> Pair {
 
 /// Als [`pair`], met de pompen op `poll`.
 fn pair_with(poll: RxPoll) -> Pair {
+    pair_full(poll, |c| c)
+}
+
+/// Als [`pair`], met de config van de app door `app_cfg`.
+fn pair_cfg(app_cfg: impl FnOnce(Config) -> Config) -> Pair {
+    pair_full(POLL, app_cfg)
+}
+
+fn pair_full(poll: RxPoll, app_cfg: impl FnOnce(Config) -> Config) -> Pair {
     let exec: &'static Exec = leak(Exec::new());
     exec.set_clock(now);
     let up = leak(Backing::new(CAP));
     let down = leak(Backing::new(CAP));
     let kern = leak(Net::new(slot_config(0, BUDGET), [7; 16], exec, now).unwrap());
-    let app = leak(Net::new(slot_config(1, BUDGET), [9; 16], exec, now).unwrap());
+    let app = leak(Net::new(app_cfg(slot_config(1, BUDGET)), [9; 16], exec, now).unwrap());
     app.seed_neighbor(host_ip(), mac_of(0).0).unwrap();
     let k = spawn_pump(exec, kern, nic(down, up, 0), up, poll);
     let a = spawn_pump(exec, app, nic(up, down, 1), down, poll);
@@ -272,6 +281,229 @@ fn bulk_both_ways_then_close() {
     );
     let st = p.app.stats().unwrap();
     assert_eq!(st.refused_no_budget, 0);
+}
+
+/// Een echo op poort 7 van de kern: leest en schrijft terug tot EOF, sluit.
+fn spawn_echo(p: &Pair) {
+    let l = p.kern.tcp_listen(7).unwrap();
+    p.exec
+        .spawn(async move {
+            let mut c = l.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let n = c.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                c.write_all(&buf[..n]).await.unwrap();
+            }
+            c.close().unwrap();
+        })
+        .unwrap();
+}
+
+/// Wat een verbinding van de app zag: de ringen vers, na de bulk, en na
+/// het sluiten; plus de pot ervoor en tijdens.
+#[derive(Debug)]
+struct Growth {
+    fresh: TcpBuffers,
+    fresh_grown: bool,
+    bulk: TcpBuffers,
+    bulk_grown: bool,
+    closed: Result<TcpBuffers>,
+    closed_grown: bool,
+    pot_open: PotStats,
+}
+
+/// Verbindt met de echo, stuurt `rounds` keer 8 KiB heen en terug en sluit.
+fn grow_over_echo(p: &Pair, rounds: usize) -> Growth {
+    const CHUNK: usize = 8 << 10;
+    spawn_echo(p);
+    let result = slot();
+    let app = p.app;
+    p.exec
+        .spawn(async move {
+            let mut c = app.tcp_connect_timeout(HOST, 7, DIAL).await.unwrap();
+            let (fresh, fresh_grown) = (c.buffers().unwrap(), c.has_grown());
+            let pot_open = app.pot().unwrap();
+            let out = vec![0x5a; CHUNK];
+            let mut back = vec![0u8; CHUNK];
+            for _ in 0..rounds {
+                c.write_all(&out).await.unwrap();
+                c.read_exact(&mut back).await.unwrap();
+            }
+            let (bulk, bulk_grown) = (c.buffers().unwrap(), c.has_grown());
+            // Een kopie van het handvat: de stroom zelf is na close weg.
+            let ghost = TcpStream {
+                net: c.net,
+                h: c.h,
+                deadline: None,
+                slot: None,
+            };
+            c.close().unwrap();
+            let closed = ghost.buffers();
+            let closed_grown = ghost.has_grown();
+            core::mem::forget(ghost);
+            *result.borrow_mut() = Some(Growth {
+                fresh,
+                fresh_grown,
+                bulk,
+                bulk_grown,
+                closed,
+                closed_grown,
+                pot_open,
+            });
+        })
+        .unwrap();
+    p.run_until(|| result.borrow().is_some());
+    result.borrow_mut().take().unwrap()
+}
+
+#[test]
+fn a_bulk_connection_has_grown_and_a_closed_one_has_not() {
+    let p = pair();
+    let before = p.app.pot().unwrap();
+    assert_eq!(
+        (before.total, before.used, before.free),
+        (BUDGET, 0, BUDGET)
+    );
+    assert!(!before.pressure);
+    let g = grow_over_echo(&p, 40);
+    // Vers: precies op de vloer, dus niet gegroeid.
+    assert_eq!(
+        (g.fresh.rx, g.fresh.tx),
+        (TcpBuffers::RX_FLOOR, TcpBuffers::TX_FLOOR)
+    );
+    assert!(!g.fresh_grown);
+    assert!(g.pot_open.used >= TcpBuffers::RX_FLOOR + TcpBuffers::TX_FLOOR);
+    assert_eq!(g.pot_open.free, BUDGET - g.pot_open.used);
+    // 320 KiB heen en terug laat een ring groeien.
+    assert!(g.bulk_grown && g.bulk.grown(), "{:?}", g.bulk);
+    // Dicht: de stack kent het handvat niet meer, en dat is niet gegroeid.
+    assert_eq!(g.closed, Err(NetError::Stack(StackError::Closed)));
+    assert!(!g.closed_grown);
+    assert_eq!(p.app.pot().unwrap().refused_no_budget, 0);
+}
+
+#[test]
+fn only_a_forced_dial_evicts_an_inbound_connection() {
+    // Een pot voor precies drie verbindingen op hun vloer.
+    const FLOOR: usize = TcpBuffers::RX_FLOOR + TcpBuffers::TX_FLOOR;
+    let p = pair_cfg(|c| Config {
+        budget: 3 * FLOOR,
+        ..c
+    });
+    // Drie bezoekers: de kern dialt de app, de app neemt ze aan en houdt ze.
+    let l = p.app.tcp_listen(80).unwrap();
+    let held = leak(RefCell::new(Vec::new()));
+    p.exec
+        .spawn(async move {
+            for _ in 0..3 {
+                let c = l.accept().await.unwrap();
+                held.borrow_mut().push(c);
+            }
+        })
+        .unwrap();
+    let visitors = leak(RefCell::new(Vec::new()));
+    let kern = p.kern;
+    for _ in 0..3 {
+        p.exec
+            .spawn(async move {
+                let c = kern
+                    .tcp_connect_timeout(slot_ip(1), 80, DIAL)
+                    .await
+                    .unwrap();
+                visitors.borrow_mut().push(c);
+            })
+            .unwrap();
+    }
+    p.run_until(|| held.borrow().len() == 3 && visitors.borrow().len() == 3);
+    let full = p.app.pot().unwrap();
+    assert_eq!(full.free, 0, "{full:?}");
+    // De kern luistert op de lease-poort.
+    let lease = p.kern.tcp_listen(443).unwrap();
+    p.exec
+        .spawn(async move {
+            let c = lease.accept().await.unwrap();
+            core::mem::forget(c);
+        })
+        .unwrap();
+    let result = slot();
+    let app = p.app;
+    p.exec
+        .spawn(async move {
+            // Een gewone dial krijgt niets: geen reserve, geen offer.
+            let plain = app.tcp_connect_timeout(HOST, 443, DIAL).await.err();
+            // De geforceerde offert één bezoeker op.
+            let forced = app.tcp_connect_forced_timeout(HOST, 443, DIAL).await;
+            *result.borrow_mut() = Some((plain, forced.is_ok()));
+            if let Ok(c) = forced {
+                core::mem::forget(c);
+            }
+        })
+        .unwrap();
+    p.run_until(|| result.borrow().is_some());
+    let (plain, forced) = result.borrow_mut().take().unwrap();
+    assert!(
+        matches!(plain, Some(NetError::Stack(StackError::NoBudget { .. }))),
+        "{plain:?}"
+    );
+    assert!(forced);
+    let pot = p.app.pot().unwrap();
+    assert_eq!(pot.forced_evictions, 1, "{pot:?}");
+    assert_eq!(pot.refused_no_budget, full.refused_no_budget);
+    // Precies één bezoeker van de app is weg: afgebroken, ringen terug.
+    let gone = held
+        .borrow()
+        .iter()
+        .filter(|c| c.state() == Ok(TcpState::Closed))
+        .count();
+    assert_eq!(gone, 1);
+}
+
+#[test]
+fn net_max_buf_caps_each_ring() {
+    const CAP_32K: usize = 32 << 10;
+    let p = pair_cfg(|c| Config {
+        max_buf_per_conn: max_buf_for(Some("32k")),
+        ..c
+    });
+    let g = grow_over_echo(&p, 40);
+    assert!(g.bulk_grown, "{:?}", g.bulk);
+    assert!(g.bulk.rx <= CAP_32K && g.bulk.tx <= CAP_32K, "{:?}", g.bulk);
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn a_grown_stream_says_so_through_the_leanhttp_bridge() {
+    use crate::tcp::TcpConn;
+    use leanhttp::Close;
+    let p = pair();
+    spawn_echo(&p);
+    let result = slot();
+    let (app, exec) = (p.app, p.exec);
+    p.exec
+        .spawn(async move {
+            let c = app.tcp_connect_timeout(HOST, 7, DIAL).await.unwrap();
+            let mut conn = TcpConn::new(c, exec);
+            let fresh = conn.has_grown();
+            let mut back = vec![0u8; 8 << 10];
+            for _ in 0..40 {
+                leanhttp::write_all(&mut conn, &[0x5a; 8 << 10])
+                    .await
+                    .unwrap();
+                let mut got = 0;
+                while got < back.len() {
+                    got += leanhttp::read(&mut conn, &mut back[got..]).await.unwrap();
+                }
+            }
+            let grown = conn.has_grown();
+            leanhttp::close(&mut conn).await.unwrap();
+            *result.borrow_mut() = Some((fresh, grown, conn.has_grown()));
+        })
+        .unwrap();
+    p.run_until(|| result.borrow().is_some());
+    assert_eq!(result.borrow_mut().take(), Some((false, true, false)));
 }
 
 #[test]
@@ -587,6 +819,13 @@ fn budget_env_and_address_parsing() {
     );
     assert_eq!(c.mtu, NET_MTU);
     assert_eq!(sys::ADDRESS, (HOST, abi::systemapi::PORT));
+    // Het plafond per ring: zonder env de frame-ring, met env lager, nooit hoger.
+    assert_eq!(c.max_buf_per_conn, MAX_BUF);
+    assert_eq!(max_buf_for(None), MAX_BUF);
+    assert_eq!(max_buf_for(Some("256k")), 256 << 10);
+    assert_eq!(max_buf_for(Some("64m")), MAX_BUF);
+    assert_eq!(max_buf_for(Some("0")), MAX_BUF);
+    assert_eq!(max_buf_for(Some("junk")), MAX_BUF);
 }
 
 #[test]

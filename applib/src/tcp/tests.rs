@@ -42,6 +42,8 @@ struct Wire {
     stall_writes: bool,
     fail: Option<NetError>,
     closes: u32,
+    /// Wat de stroom over haar ringen zegt (leannet: boven de vloer).
+    grown: bool,
 }
 
 struct Fake(Rc<RefCell<Wire>>);
@@ -81,6 +83,10 @@ impl Stream for Fake {
     fn close(self) -> Result<(), NetError> {
         self.0.borrow_mut().closes += 1;
         Ok(())
+    }
+
+    fn has_grown(&self) -> bool {
+        self.0.borrow().grown
     }
 }
 
@@ -252,4 +258,54 @@ fn leanhttp_serves_a_request_over_the_bridge() {
     assert!(text.ends_with("\r\n\r\nok"), "{text}");
     // De server sloot de verbinding zelf, één keer.
     assert_eq!(w.borrow().closes, 1);
+}
+
+#[test]
+fn a_grown_stream_is_grown_until_it_closes() {
+    let (mut c, w, _) = conn(Wire::default());
+    assert!(!c.has_grown());
+    w.borrow_mut().grown = true;
+    assert!(c.has_grown());
+    assert_eq!(c.poll_close(&mut cx()), Poll::Ready(Ok(())));
+    // Dicht: geen stroom, dus niets dat budget vasthoudt.
+    assert!(!c.has_grown());
+}
+
+#[test]
+fn leanhttp_closes_a_grown_connection_after_its_request() {
+    let (c, w, _) = conn(Wire {
+        input: b"GET /bulk HTTP/1.1\r\nHost: n\r\n\r\n".to_vec(),
+        // Geen EOF: een browser zou de verbinding openhouden.
+        eof: false,
+        grown: true,
+        ..Wire::default()
+    });
+    let mut handler = async |ex: &mut leanhttp::Exchange<'_, TcpConn<Fake>>| {
+        ex.write_header(200)?;
+        ex.write(b"ok").await.map(|_| ())
+    };
+    let out = block_on(leanhttp::serve(c, &mut handler));
+    assert!(
+        matches!(out, Ok(leanhttp::Outcome::Closed)),
+        "een gegroeide verbinding hoort niet terug te komen"
+    );
+    let text = String::from_utf8(w.borrow().out.clone()).unwrap();
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(
+        text.to_ascii_lowercase().contains("connection: close"),
+        "{text}"
+    );
+    assert_eq!(w.borrow().closes, 1);
+}
+
+#[test]
+fn a_pool_refuses_a_grown_connection() {
+    let mut pool: leanhttp::Pool<TcpConn<Fake>> = leanhttp::Pool::default();
+    let (small, _, _) = conn(Wire::default());
+    assert!(pool.put_now("s3:443", small, Duration::ZERO));
+    let (grown, _, _) = conn(Wire {
+        grown: true,
+        ..Wire::default()
+    });
+    assert!(!pool.put_now("s3:443", grown, Duration::ZERO));
 }

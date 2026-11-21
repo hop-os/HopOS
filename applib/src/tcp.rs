@@ -181,6 +181,7 @@ pub struct Dialer {
     exec: &'static Exec,
     connect: Duration,
     last_error: Option<DialError>,
+    forced: bool,
 }
 
 /// Waarom een [`Dialer`] geen verbinding kreeg, voor de logregel.
@@ -218,7 +219,23 @@ impl Dialer {
             exec,
             connect,
             last_error: None,
+            forced: false,
         }
+    }
+
+    /// Dialt elke verbinding als een die er moet komen
+    /// ([`Net::tcp_connect_forced_timeout`](crate::appnet::Net::tcp_connect_forced_timeout)):
+    /// is de pot vol, dan breekt de stack inkomende verbindingen af tot de
+    /// dial past.
+    ///
+    /// Alleen voor een dialer van de paar verbindingen zonder welke de app
+    /// niet verder kan (de leasevernieuwing van een replica, een hartslag);
+    /// een gewone dialer houdt dit uit, anders gooit een vloed van eigen
+    /// dials de bezoekers van de app weg.
+    #[must_use]
+    pub fn forced(mut self) -> Self {
+        self.forced = true;
+        self
     }
 
     /// Waarom de laatste dial mislukte, als dat zo was.
@@ -238,7 +255,12 @@ impl Dial for Dialer {
                 return Err(leanhttp::Error::Dial);
             }
         };
-        let s = match TcpStream::connect_timeout(ip, t.port, self.connect).await {
+        let dial = if self.forced {
+            TcpStream::connect_forced_timeout(ip, t.port, self.connect).await
+        } else {
+            TcpStream::connect_timeout(ip, t.port, self.connect).await
+        };
+        let s = match dial {
             Ok(s) => s,
             Err(error) => {
                 self.last_error = Some(DialError::Connect {

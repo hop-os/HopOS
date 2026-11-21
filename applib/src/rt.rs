@@ -38,7 +38,11 @@ use executor::Executor;
 use sync::Local;
 
 /// Taken op de app-core: de heartbeat, de app, een RX-pomp en ruimte voor
-/// wat de app zelf spawnt.
+/// wat de app zelf spawnt. De beginmaat: de tabel groeit in blokken van 64
+/// tot [`executor::TASK_CEILING`] (512), en een spawn zonder plaats is een
+/// fout (`SpawnError::TooMany`), geen stille drop (tot 21-11 wel). Ook de
+/// maat van de spawn-rij: meer dan zoveel spawns in één ronde is
+/// `SpawnError::Full`.
 pub const TASKS: usize = 64;
 
 /// De beginmaat van de timertabel van de app-core: zoveel timers passen
@@ -153,6 +157,44 @@ mod tests {
         s.timers_peak.store(1_000, Relaxed);
         assert_eq!(l.check(&s).peak, Some(1_000));
         assert_eq!(l.check(&s).peak, None);
+        // De taken op dezelfde manier, met hun eigen beginmaat.
+        s.tasks_peak.store(TASKS as u64, Relaxed);
+        assert_eq!(l.check(&s).tasks, None);
+        s.tasks_peak.store(TASKS as u64 + 1, Relaxed);
+        assert_eq!(l.check(&s).tasks, Some(TASKS as u64 + 1));
+        s.tasks_peak.store(120, Relaxed);
+        assert_eq!(l.check(&s).tasks, None);
+    }
+
+    /// De executor van een app-core met 300 taken tegelijk: de tabel groeit
+    /// voorbij [`TASKS`], niets gaat stil weg, en boven het plafond is
+    /// `spawn` een fout.
+    #[test]
+    fn the_app_executor_holds_more_than_tasks_and_refuses_past_the_ceiling() {
+        let e: &'static Exec = Box::leak(Box::new(Exec::new()));
+        let mut n = 0;
+        while n < 300 {
+            for _ in 0..TASKS.min(300 - n) {
+                e.spawn(core::future::pending()).unwrap();
+                n += 1;
+            }
+            e.step();
+        }
+        assert_eq!(e.live_tasks(), 300);
+        assert_eq!(e.stats.dropped.load(Relaxed), 0);
+        while n < executor::TASK_CEILING {
+            e.spawn(core::future::pending()).unwrap();
+            n += 1;
+            if n % TASKS == 0 {
+                e.step();
+            }
+        }
+        e.step();
+        assert_eq!(
+            e.spawn(core::future::pending()),
+            Err(executor::SpawnError::TooMany)
+        );
+        assert_eq!(e.live_tasks(), executor::TASK_CEILING);
     }
 
     #[test]
@@ -230,8 +272,35 @@ struct Losses {
     overflows: u64,
     /// De vorige slag zag de overloop van de timers ook groeien.
     overflowing: bool,
-    /// De hoogste stand die al gemeld is (0: nog niets).
-    peak: u64,
+    /// De hoogste stand van de timers die al gemeld is.
+    peak: Peak,
+    /// De hoogste stand van de taken die al gemeld is.
+    tasks: Peak,
+}
+
+/// Een hoogste stand die de heartbeat meldt als hij de beginmaat passeert
+/// en daarna telkens als hij verdubbelt sinds de vorige melding: zo zegt
+/// de console wat een app echt nodig heeft, in een handvol regels per leven.
+#[derive(Default)]
+struct Peak {
+    /// De laatst gemelde stand (0: nog niets).
+    told: u64,
+}
+
+impl Peak {
+    /// De nieuwe stand `p`, als hij gemeld moet worden.
+    fn check(&mut self, p: u64, start: usize) -> Option<u64> {
+        let bar = if self.told == 0 {
+            u64::try_from(start).unwrap_or(u64::MAX)
+        } else {
+            self.told.saturating_mul(2)
+        };
+        let new = (p > bar).then_some(p);
+        if let Some(p) = new {
+            self.told = p;
+        }
+        new
+    }
 }
 
 /// Wat één slag nieuw zag.
@@ -243,11 +312,11 @@ struct Lost {
     /// een timer zonder slot telt bij elke poll zolang hij spint, en dat is
     /// één melding waard, niet één per slag.
     overflows: Option<u64>,
-    /// De nieuwe hoogste stand van de timers, als hij boven de beginmaat
-    /// [`TIMERS`] komt en daarna telkens als hij verdubbelt sinds de vorige
-    /// melding: zo zegt de console wat een app echt nodig heeft, in een
-    /// handvol regels per leven.
+    /// De nieuwe hoogste stand van de timers ([`Peak`], beginmaat
+    /// [`TIMERS`]).
     peak: Option<u64>,
+    /// De nieuwe hoogste stand van de taken ([`Peak`], beginmaat [`TASKS`]).
+    tasks: Option<u64>,
 }
 
 impl Losses {
@@ -260,21 +329,13 @@ impl Losses {
         let overflows = (grew && !self.overflowing).then_some(o);
         self.overflows = o;
         self.overflowing = grew;
-        let p = s.timers_peak.load(Relaxed);
-        let start = u64::try_from(TIMERS).unwrap_or(u64::MAX);
-        let bar = if self.peak == 0 {
-            start
-        } else {
-            self.peak.saturating_mul(2)
-        };
-        let peak = (p > bar).then_some(p);
-        if let Some(p) = peak {
-            self.peak = p;
-        }
+        let peak = self.peak.check(s.timers_peak.load(Relaxed), TIMERS);
+        let tasks = self.tasks.check(s.tasks_peak.load(Relaxed), TASKS);
         Lost {
             dropped,
             overflows,
             peak,
+            tasks,
         }
     }
 }
@@ -286,8 +347,8 @@ impl Losses {
 /// exit); is hij dan nog niet terug, dan doet de heartbeat dat afscheid
 /// zelf. Elke slag meldt ook wat de executor verloor ([`Losses`]): één
 /// regel per gedropte reeks taken, één per reeks timers zonder plaats, en
-/// de hoogste stand van de timers als die de beginmaat passeert of
-/// verdubbelt (`HOPOS_TIMERS_PEAK`). Tot
+/// de hoogste stand van de timers en van de taken als die de beginmaat
+/// passeert of verdubbelt (`HOPOS_TIMERS_PEAK`, `HOPOS_TASKS_PEAK`). Tot
 /// 05-10 was dit een kale `exit` op de slag die de vlag zag: geen
 /// afscheid, en niets dicht (SIGTERM, dan SIGKILL; wij deden alleen KILL).
 pub async fn watch(app: &'static App) {
@@ -312,6 +373,13 @@ pub async fn watch(app: &'static App) {
             crate::log!(
                 "applib: timers peak={n} capacity={} start={TIMERS} HOPOS_TIMERS_PEAK",
                 exec.timer_capacity()
+            );
+        }
+        if let Some(n) = lost.tasks {
+            crate::log!(
+                "applib: tasks peak={n} capacity={} start={TASKS} ceiling={} HOPOS_TASKS_PEAK",
+                exec.task_capacity(),
+                executor::TASK_CEILING
             );
         }
         if w.tick(app, exec.now(), HEAP.used()) == Tick::Forced {

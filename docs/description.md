@@ -948,7 +948,8 @@ Opgelost op 04-10 (f1917f0), op wat als open staat na.
   regelnummers. H.
 - De executor zet nog elke taak in een box, maar een taak die geen plaats
   krijgt, is luid: `Stats::dropped` en `HOPOS_TASK_DROPPED` op de tik.
-  Open: de handboekregel "statische taken" zelf (in `rustdoc/README.md`,
+  (21-11: `spawn` neemt zijn plaats zelf en geeft `SpawnError::TooMany`
+  bij een volle tabel; de tabel groeit in blokken van 64 tot 512.) Open: de handboekregel "statische taken" zelf (in `rustdoc/README.md`,
   buiten deze repo). H.
 
 ### 8.16 Dood of zonder gebruiker

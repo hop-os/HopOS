@@ -395,6 +395,14 @@ hem (`HOPOS_TIMERS_PEAK`). Een acceptor of werker die altijd een timer open
 heeft, kost toch een plaats en een wek; gebruik er alleen een zolang er
 iets te bewaken is.
 
+**Taken groeien tot 512.** De takentabel begint met 64 plaatsen
+(`applib::rt::TASKS`) en neemt blokken van 64 bij tot
+`executor::TASK_CEILING` (sinds 21-11). `spawn` neemt de plaats meteen:
+een volle tabel is `SpawnError::TooMany` en meer dan 64 spawns in één
+ronde `SpawnError::Full`, nooit meer een taak die stil wegvalt. Behandel
+die fout; de hoogste stand staat in `Stats::tasks_peak`
+(`HOPOS_TASKS_PEAK`).
+
 **Een sluitrace is geen fout.** Een write of close voor een stream die al
 weg is, is normaal na een herverbinding. Stulp maakte daar een fatale fout
 van, en de UniFi-plugin viel elke keer om.

@@ -565,7 +565,7 @@ fn write_node(w: &mut impl Write, sh: &Shared) -> fmt::Result {
     )?;
     write!(
         w,
-        ",\"heap_used_kb\":{},\"heap_peak_kb\":{},\"heap_capacity_kb\":{},\"heap_allocs\":{},\"heap_failed\":{},\"timer_overflows\":{},\"timers_peak\":{},\"smp_kicks\":{}}}",
+        ",\"heap_used_kb\":{},\"heap_peak_kb\":{},\"heap_capacity_kb\":{},\"heap_allocs\":{},\"heap_failed\":{},\"timer_overflows\":{},\"timers_peak\":{},\"tasks_peak\":{},\"smp_kicks\":{}}}",
         st.used >> 10,
         st.peak >> 10,
         st.capacity >> 10,
@@ -578,6 +578,10 @@ fn write_node(w: &mut impl Write, sh: &Shared) -> fmt::Result {
         sh.exec
             .stats
             .timers_peak
+            .load(core::sync::atomic::Ordering::Relaxed),
+        sh.exec
+            .stats
+            .tasks_peak
             .load(core::sync::atomic::Ordering::Relaxed),
         smp::KICKS.load(core::sync::atomic::Ordering::Relaxed)
     )

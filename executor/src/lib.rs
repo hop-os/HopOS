@@ -24,11 +24,15 @@
 //! predicaat nog één keer toetst mét interrupts gemaskeerd.
 //!
 //! Een taak is een future in een box op de heap ([`Executor::spawn`]; een
-//! volle heap is [`SpawnError::OutOfMemory`]), in een vaste tabel van
-//! `TASKS` plaatsen. `spawn` zet hem in een rij; de volgende ronde geeft
-//! hem een plaats, en is de tabel dan vol, dan gaat hij weg en telt
-//! [`Stats::dropped`] (de kern zegt dat op zijn tik, `HOPOS_TASK_DROPPED`).
-//! Het aantal taken staat dus niet bij de compiler, alleen het plafond.
+//! volle heap is [`SpawnError::OutOfMemory`]), in een tabel die met `TASKS`
+//! plaatsen in de executor zelf begint en in blokken van 64 op de heap
+//! groeit tot [`TASK_CEILING`] (de 512 van de gereed-bits). `spawn` neemt
+//! zijn plaats meteen (een teller, [`Executor::spawn`]) en zet de taak in
+//! een rij; de volgende ronde zet hem op die plaats. Geen plaats is dus een
+//! fout van `spawn` ([`SpawnError::TooMany`]), nooit een stille drop. Tot
+//! 21-11 was de tabel vast, gaf `spawn` toch `Ok`, en ging een taak die de
+//! ronde geen plaats gaf weg ([`Stats::dropped`], `HOPOS_TASK_DROPPED`; dat
+//! kan nu niet meer, de teller blijft als vangnet).
 //!
 //! De timers ([`timers`]) hebben geen vast plafond meer: `TIMERS` is de
 //! beginmaat, de tabel verdubbelt op het koude pad tot [`TIMER_CEILING`] en
@@ -61,7 +65,7 @@ use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{
-    AtomicPtr, AtomicU64,
+    AtomicPtr, AtomicU64, AtomicUsize,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
@@ -102,8 +106,11 @@ pub trait Sleeper {
 pub enum SpawnError {
     /// De heap kon de taak niet plaatsen.
     OutOfMemory,
-    /// De spawn-brievenbus zit vol: de executor heeft nog geen ronde gedraaid.
+    /// De spawn-brievenbus zit vol: er zijn al `TASKS` taken gespawnd sinds
+    /// de vorige ronde. Na een `yield_now` is er weer plaats.
     Full,
+    /// De takentabel is op [`TASK_CEILING`].
+    TooMany,
 }
 
 impl fmt::Display for SpawnError {
@@ -111,6 +118,7 @@ impl fmt::Display for SpawnError {
         match self {
             Self::OutOfMemory => f.write_str("out of memory placing the task"),
             Self::Full => f.write_str("spawn mailbox full"),
+            Self::TooMany => write!(f, "task table full ({TASK_CEILING} tasks)"),
         }
     }
 }
@@ -126,8 +134,13 @@ pub struct Stats {
     /// Keren geslapen.
     pub sleeps: AtomicU64,
     /// Taken die geen slot kregen (gedropt): `spawn` gaf `Ok`, maar de
-    /// tabel was vol toen de ronde hem een plaats wilde geven.
+    /// ronde vond geen plaats. Sinds 21-11 neemt `spawn` de plaats zelf,
+    /// dus dit blijft nul; een vangnet dat luid zegt als dat ooit niet zo is.
     pub dropped: AtomicU64,
+    /// De hoogste stand van taken tegelijk (geplaatst plus in de rij).
+    pub tasks_peak: AtomicU64,
+    /// Blokken van 64 plaatsen die de takentabel op de heap bijnam.
+    pub task_grows: AtomicU64,
     /// Polls van een timer die geen plaats kreeg: de heap kon de tabel niet
     /// laten groeien, of [`TIMER_CEILING`] is bereikt. De wachter spint dan
     /// op ronde-korrel, zoals tot 21-11 bij elke volle tabel van `TIMERS`.
@@ -202,6 +215,16 @@ unsafe fn drop_waker(_: *const ()) {}
 /// standaard van de kern.
 const READY_WORDS: usize = 8;
 
+/// Het plafond van de takentabel: de gereed-bits.
+pub const TASK_CEILING: usize = 64 * READY_WORDS;
+
+/// Plaatsen per blok dat de takentabel bijneemt.
+const CHUNK: usize = 64;
+
+/// Een blok van de takentabel op de heap. Eenmaal gezet blijft het: wakers
+/// wijzen naar zijn slots.
+type Chunk = [Slot; CHUNK];
+
 /// Een executor met plaats voor `TASKS` taken, en een timertabel die met
 /// plaats voor `TIMERS` timers begint en groeit (tot [`TIMER_CEILING`]).
 ///
@@ -209,6 +232,15 @@ const READY_WORDS: usize = 8;
 /// een test een gelekte `Box`. Wakers wijzen naar zijn slots.
 pub struct Executor<const TASKS: usize = 512, const TIMERS: usize = 256> {
     slots: [Slot; TASKS],
+    /// De blokken na `slots`: slot `TASKS + 64 k + j` is plaats `j` van blok
+    /// `k`. Gezet door wie de plaats als eerste nodig heeft ([`Self::spawn`],
+    /// van elke core: een compare-exchange op een lege pointer), nooit
+    /// weggehaald, dus een `&'static Slot` erin blijft geldig.
+    chunks: [AtomicPtr<Chunk>; READY_WORDS],
+    /// Taken met een plaats: geplaatst, of in de spawn-rij met een plaats
+    /// die voor hen bestaat. `spawn` hoogt hem op (en weigert boven
+    /// [`TASK_CEILING`]), een taak die klaar is verlaagt hem.
+    claimed: AtomicUsize,
     /// De gereed-bits: bit `i % 64` van woord `i / 64` is slot `i`.
     ready: [AtomicU64; READY_WORDS],
     /// Zo groot als de takentabel: bij boot spawnt de kern één servicer per
@@ -275,6 +307,8 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         Self {
             slots: [const { Slot::new() }; TASKS],
             ready: [const { AtomicU64::new(0) }; READY_WORDS],
+            chunks: [const { AtomicPtr::new(core::ptr::null_mut()) }; READY_WORDS],
+            claimed: AtomicUsize::new(0),
             spawn: Mailbox::new(),
             timers: RefCell::new(Timers::new()),
             rest: AtomicU64::new(0),
@@ -284,6 +318,8 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
                 polls: AtomicU64::new(0),
                 sleeps: AtomicU64::new(0),
                 dropped: AtomicU64::new(0),
+                tasks_peak: AtomicU64::new(0),
+                task_grows: AtomicU64::new(0),
                 timer_overflows: AtomicU64::new(0),
                 timers_peak: AtomicU64::new(0),
                 timer_grows: AtomicU64::new(0),
@@ -303,10 +339,93 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         self.clock.get().map_or(0, |c| c())
     }
 
-    /// Zet een taak in de rij; hij krijgt zijn slot in de volgende ronde.
+    /// Neemt een plaats voor een taak en zet hem in de rij; de volgende
+    /// ronde zet hem op een vrije plaats, en die is er dan (de teller
+    /// `claimed`: een taak met een plaats is geplaatst of in de rij, en elke
+    /// `spawn` zorgt dat er voor zijn nummer een slot bestaat). Mag van elke
+    /// core: het raakt alleen atomics, de rij en een vers blok.
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnError::OutOfMemory`] als de heap de taak of een nieuw blok niet
+    /// kon plaatsen, [`SpawnError::TooMany`] boven [`TASK_CEILING`] taken,
+    /// [`SpawnError::Full`] als de rij vol is (`TASKS` spawns in één ronde).
     pub fn spawn(&self, f: impl Future<Output = ()> + 'static) -> Result<(), SpawnError> {
         let task: Task = try_box(f).ok_or(SpawnError::OutOfMemory)?;
-        self.spawn.try_send(task).map_err(|_| SpawnError::Full)
+        let n = self
+            .claimed
+            .fetch_update(AcqRel, Acquire, |c| (c < TASK_CEILING).then_some(c + 1))
+            .map_err(|_| SpawnError::TooMany)?;
+        let placed = self
+            .ensure_slot(n)
+            .and_then(|()| self.spawn.try_send(task).map_err(|_| SpawnError::Full));
+        if placed.is_err() {
+            self.claimed.fetch_sub(1, AcqRel);
+            return placed;
+        }
+        let now = u64::try_from(n.saturating_add(1)).unwrap_or(u64::MAX);
+        self.stats.tasks_peak.fetch_max(now, Relaxed);
+        Ok(())
+    }
+
+    /// Zorgt dat slot `n` bestaat: elk blok tot en met het zijne staat.
+    /// Waarom dat genoeg is: van de taken met een plaats nam de laatste zijn
+    /// nummer toen de rest al een plaats had, dus dat nummer is minstens
+    /// hun aantal min één, en zijn `spawn` zette de slots tot en met dat
+    /// nummer neer. De ronde vindt dus voor elke taak in de rij een slot.
+    fn ensure_slot(&self, n: usize) -> Result<(), SpawnError> {
+        let Some(j) = n.checked_sub(TASKS) else {
+            return Ok(());
+        };
+        for cell in self.chunks.iter().take(j / CHUNK + 1) {
+            if !cell.load(Acquire).is_null() {
+                continue;
+            }
+            let fresh = new_chunk().ok_or(SpawnError::OutOfMemory)?;
+            match cell.compare_exchange(core::ptr::null_mut(), fresh, AcqRel, Acquire) {
+                Ok(_) => {
+                    self.stats.task_grows.fetch_add(1, Relaxed);
+                }
+                // Een andere core was eerder: zijn blok blijft, het onze gaat
+                // terug.
+                Err(_) => free_chunk(fresh),
+            }
+        }
+        Ok(())
+    }
+
+    /// Slot `i`: in de executor zelf, of in een blok dat al staat.
+    fn slot(&'static self, i: usize) -> Option<&'static Slot> {
+        if let Some(s) = self.slots.get(i) {
+            return Some(s);
+        }
+        if i >= TASK_CEILING {
+            return None;
+        }
+        let j = i.checked_sub(TASKS)?;
+        let p = self.chunks.get(j / CHUNK)?.load(Acquire);
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: een gezet blok is een geldige, geïnitialiseerde `Chunk`
+        // (`new_chunk`, gepubliceerd met Release en hier met Acquire
+        // gelezen) die nooit meer weggaat; de executor leeft voor altijd
+        // (`&'static self`), dus het blok ook.
+        let chunk: &'static Chunk = unsafe { &*p };
+        chunk.get(j % CHUNK)
+    }
+
+    /// Voor hoeveel taken de tabel nu plaats heeft.
+    #[must_use]
+    pub fn task_capacity(&self) -> usize {
+        let blocks = self
+            .chunks
+            .iter()
+            .filter(|c| !c.load(Relaxed).is_null())
+            .count();
+        TASKS
+            .saturating_add(blocks.saturating_mul(CHUNK))
+            .min(TASK_CEILING)
     }
 
     /// Slaapt `d` lang op de timers van de executor.
@@ -383,7 +502,9 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         let mut worked = false;
         while let Some(task) = self.spawn.try_recv() {
             worked = true;
-            let free = self.slots.iter().enumerate().find(|(_, s)| s.is_free());
+            let free = (0..TASK_CEILING)
+                .map_while(|i| self.slot(i).map(|s| (i, s)))
+                .find(|(_, s)| s.is_free());
             match free {
                 Some((i, slot)) => {
                     *slot.task.borrow_mut() = Some(task);
@@ -394,7 +515,10 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
                     word.fetch_or(1 << (i % 64), Release);
                 }
                 None => {
+                    // Kan niet (zie `ensure_slot`); als het toch gebeurt:
+                    // luid, en de plaats terug.
                     self.stats.dropped.fetch_add(1, Relaxed);
+                    self.claimed.fetch_sub(1, AcqRel);
                     drop(task);
                 }
             }
@@ -435,7 +559,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
                 let i = w * 64 + bits.trailing_zeros() as usize;
                 bits &= bits - 1;
                 self.rest.store(bits, Relaxed);
-                let Some(slot) = self.slots.get(i) else {
+                let Some(slot) = self.slot(i) else {
                     continue;
                 };
                 worked |= self.poll(slot);
@@ -463,6 +587,10 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         slot.polling.set(false);
         if pending {
             *slot.task.borrow_mut() = Some(task);
+        } else {
+            drop(task);
+            // Klaar: de plaats is weer vrij voor een volgende `spawn`.
+            self.claimed.fetch_sub(1, AcqRel);
         }
         true
     }
@@ -483,9 +611,9 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
 
     /// Hoeveel taken een slot hebben.
     #[must_use]
-    pub fn live_tasks(&self) -> usize {
-        self.slots
-            .iter()
+    pub fn live_tasks(&'static self) -> usize {
+        (0..TASK_CEILING)
+            .map_while(|i| self.slot(i))
             .filter(|s| s.task.borrow().is_some())
             .count()
     }
@@ -562,6 +690,31 @@ impl<const TASKS: usize, const TIMERS: usize> Drop for After<TASKS, TIMERS> {
             let waker = self.exec.timers.borrow_mut().remove(h);
             drop(waker);
         }
+    }
+}
+
+/// Een vers blok van de takentabel op de heap, of `None` bij een volle heap.
+fn new_chunk() -> Option<*mut Chunk> {
+    let layout = Layout::new::<Chunk>();
+    // SAFETY: een `Chunk` heeft een positieve grootte.
+    let p = unsafe { alloc::alloc::alloc(layout) }.cast::<Chunk>();
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: `p` is vers gealloceerd voor precies een `Chunk` en wordt hier
+    // geïnitialiseerd, vóór iemand hem ziet.
+    unsafe { p.write([const { Slot::new() }; CHUNK]) };
+    Some(p)
+}
+
+/// Geeft een blok terug dat nooit gepubliceerd is.
+fn free_chunk(p: *mut Chunk) {
+    // SAFETY: `p` komt uit `new_chunk` met dezelfde layout, is
+    // geïnitialiseerd en heeft nooit een andere eigenaar gehad (de
+    // compare-exchange die hem zou publiceren faalde).
+    unsafe {
+        core::ptr::drop_in_place(p);
+        alloc::alloc::dealloc(p.cast::<u8>(), Layout::new::<Chunk>());
     }
 }
 
@@ -978,20 +1131,101 @@ mod tests {
     }
 
     #[test]
-    fn full_table_drops_and_counts() {
-        // De bus is zo groot als de tabel: een negende spawn vóór de eerste
-        // ronde is Full; een spawn ná de ronde past in de bus en valt pas
-        // bij het leegmaken op de volle tabel, geteld.
+    fn a_spawn_burst_past_the_mailbox_is_an_error_and_the_table_grows() {
+        // De bus is zo groot als de beginmaat: een negende spawn vóór de
+        // eerste ronde is Full (een fout, geen stille drop). Na de ronde
+        // past hij, en de tabel neemt een blok bij in plaats van hem te
+        // droppen.
         let e = exec();
         for _ in 0..8 {
             e.spawn(core::future::pending()).unwrap();
         }
-        assert!(e.spawn(core::future::pending()).is_err());
+        assert_eq!(e.spawn(core::future::pending()), Err(SpawnError::Full));
         e.step();
         assert_eq!(e.live_tasks(), 8);
         e.spawn(core::future::pending()).unwrap();
         e.step();
-        assert_eq!(e.live_tasks(), 8);
-        assert_eq!(e.stats.dropped.load(SeqCst), 1);
+        assert_eq!(e.live_tasks(), 9);
+        assert_eq!(e.task_capacity(), 8 + 64);
+        assert_eq!(e.stats.task_grows.load(SeqCst), 1);
+        assert_eq!(e.stats.dropped.load(SeqCst), 0);
+    }
+
+    /// Tot het plafond van 512 groeit de tabel in blokken; de 513e spawn is
+    /// `TooMany`, en zodra een taak klaar is mag er weer een bij.
+    #[test]
+    fn the_task_table_grows_to_the_ceiling_and_then_refuses() {
+        static GO: Signal = Signal::new();
+        let e = exec();
+        let mut n = 0;
+        while n < TASK_CEILING {
+            for _ in 0..8 {
+                if n == 0 {
+                    e.spawn(async { GO.wait().await }).unwrap();
+                } else {
+                    e.spawn(core::future::pending()).unwrap();
+                }
+                n += 1;
+            }
+            e.step();
+        }
+        assert_eq!(e.live_tasks(), TASK_CEILING);
+        assert_eq!(e.task_capacity(), TASK_CEILING);
+        assert_eq!(e.stats.tasks_peak.load(SeqCst), TASK_CEILING as u64);
+        // 8 in de executor, (512 - 8) / 64 = 7,9: acht blokken, het laatste
+        // half bruikbaar.
+        assert_eq!(e.stats.task_grows.load(SeqCst), 8);
+        assert_eq!(e.spawn(core::future::pending()), Err(SpawnError::TooMany));
+        GO.set();
+        e.step();
+        assert_eq!(e.live_tasks(), TASK_CEILING - 1);
+        e.spawn(core::future::pending()).unwrap();
+        e.step();
+        assert_eq!(e.live_tasks(), TASK_CEILING);
+        assert_eq!(e.stats.dropped.load(SeqCst), 0);
+    }
+
+    /// Taken in de blokken worden gewekt en gepolld zoals die in de
+    /// executor zelf (hun bit staat in een ander woord), en een taak die
+    /// klaar is geeft zijn plaats terug: duizend korte taken na elkaar
+    /// blijven binnen één blok.
+    #[test]
+    fn tasks_in_grown_blocks_wake_and_finished_tasks_give_their_place_back() {
+        static CLOCK: AtomicU64 = AtomicU64::new(0);
+        static DONE: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            CLOCK.load(SeqCst)
+        }
+        let e: &'static Executor<8, 4> = Box::leak(Box::new(Executor::new()));
+        e.set_clock(clock);
+        for i in 0..200u64 {
+            e.spawn(async move {
+                e.after(Duration::from_nanos(1 + i)).await;
+                DONE.fetch_add(1, SeqCst);
+            })
+            .unwrap();
+            if i % 8 == 7 {
+                e.step();
+            }
+        }
+        while e.step() {}
+        assert_eq!(e.live_tasks(), 200);
+        CLOCK.store(1_000, SeqCst);
+        while e.step() {}
+        assert_eq!(DONE.load(SeqCst), 200);
+        assert_eq!(e.live_tasks(), 0);
+        let grown = e.stats.task_grows.load(SeqCst);
+        assert_eq!(grown, 3, "8 + 3 x 64 = 200");
+        // Duizend korte taken in rondes van acht: geen blok meer erbij.
+        for i in 0..1_000 {
+            e.spawn(async {}).unwrap();
+            if i % 8 == 7 {
+                e.step();
+            }
+        }
+        while e.step() {}
+        assert_eq!(e.live_tasks(), 0);
+        assert_eq!(e.stats.task_grows.load(SeqCst), grown);
+        assert_eq!(e.stats.dropped.load(SeqCst), 0);
     }
 }

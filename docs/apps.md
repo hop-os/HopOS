@@ -213,6 +213,26 @@ Bewust zo gelaten: burst-lezen in tg3 en frames op hun plek in de rijen
 zouden naar schatting ~20% schelen, maar ze voegen toestand toe voor
 capaciteit die niemand gebruikt.
 
+### De pot: gegroeide ringen komen terug
+
+Alle ringen van een app delen één bufferbudget, de pot (`NET_BUDGET`). Een
+ring groeit met zijn stroom en staat daarna boven zijn vloer (16 KiB rx,
+4 KiB tx); `TcpConn::has_grown` zegt dat, en leanhttp sluit zo'n
+verbinding na haar verzoek en een pool neemt haar niet terug. Boven 2/3
+bezet staat de pot onder druk: geen ring groeit meer en lege ringen krimpen
+tot hun vloer (lean v3.2.3, zoals Linux `tcp_mem`). Aanleiding: 21-11-2026
+verloor een EasyFlor-instance ruim 30 minuten elke uitgaande dial, omdat
+stille keep-alive-verbindingen hun gegroeide ringen vasthielden.
+
+- `NET_MAX_BUF` (bytes, of met `k`/`m`) klemt het plafond per ring lager
+  dan `MAX_BUF`, nooit hoger.
+- `appnet::pot()` leest vrij, bezet, de weigeringen, de druk, de gekrompen
+  ringen en de opgeofferde verbindingen, in O(1).
+- Een dial die er moet komen (leasevernieuwing, hartslag) gaat geforceerd:
+  `Dialer::forced()`, `TcpStream::connect_forced_timeout`. Past hij niet,
+  dan breekt de stack inkomende verbindingen af tot hij past; een dial wordt
+  nooit opgeofferd. Opt-in, nergens de standaard.
+
 ### Veel kleine lezingen: bundelen
 
 Elke call naar de kern is een rondreis door de OS-core en houdt één

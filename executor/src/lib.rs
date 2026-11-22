@@ -39,6 +39,15 @@
 //! krimpt nooit. [`Stats::timers_peak`] is de hoogste stand. Tot 21-11 was
 //! `TIMERS` een vaste tabel en spinde een timer zonder plaats.
 //!
+//! De langste beurt ([`Executor::longest_poll`]): per poll meet de ronde hoe
+//! lang de taak de core hield, en houdt de langste bij met de naam van de
+//! taak (zijn type, `core::any::type_name`). Dat is de regel van
+//! `docs/apps.md` ("Lange berekeningen": één poll blijft kort) als getal,
+//! zoals Erlangs `long_schedule` en Node's `monitorEventLoopDelay`. Eén
+//! kloklees per poll: het einde van de ene poll is het begin van de
+//! volgende. Een geneste ronde (een taak die zelf `step` draait) telt niet
+//! mee in de beurt van die taak: de taken erin hebben hun eigen beurt.
+//!
 //! Wat hier niet staat: prioriteiten, werk-stelen, een tweede core. Elke
 //! core heeft zijn eigen executor en zijn eigen taken; tussen cores gaan
 //! berichten door een ring.
@@ -156,6 +165,18 @@ pub struct Stats {
     pub slept_ns: AtomicU64,
 }
 
+/// De langste beurt: hoe lang één poll van één taak de core hield
+/// ([`Executor::longest_poll`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LongestPoll {
+    /// Nanoseconden op de klok van de executor; 0 = nog geen poll (of geen
+    /// klok).
+    pub ns: u64,
+    /// De taak: het type van zijn future (`core::any::type_name`), met zijn
+    /// generieke argumenten. Leeg zolang `ns` 0 is.
+    pub task: &'static str,
+}
+
 struct Slot {
     /// Het woord in [`Executor::ready`] en het bit van dit slot daarin: wat
     /// de waker zet. Gezet bij het plaatsen van een taak, vóór er een waker
@@ -172,6 +193,8 @@ struct Slot {
     /// weg. Gemeten 29-09 op QEMU virt: de pomp van Hop stond na 14
     /// timer-wekken stil en een SYN op :8080 kreeg nooit antwoord.
     polling: Cell<bool>,
+    /// De naam van de taak in dit slot, voor [`LongestPoll::task`].
+    name: Cell<&'static str>,
 }
 
 impl Slot {
@@ -181,6 +204,7 @@ impl Slot {
             bit: AtomicU64::new(0),
             task: RefCell::new(None),
             polling: Cell::new(false),
+            name: Cell::new(""),
         }
     }
 
@@ -247,7 +271,7 @@ pub struct Executor<const TASKS: usize = 512, const TIMERS: usize = 256> {
     /// slot vóór de eerste ronde van de executor, en de Altra heeft er 128
     /// (03-10, de eerste v3-boot: bus van 64 vol, "first placement not
     /// spawned: Full", geen Hop).
-    spawn: Mailbox<Task, TASKS>,
+    spawn: Mailbox<(Task, &'static str), TASKS>,
     /// De timers: twee min-heaps op een tabel die groeit ([`timers`]). Een
     /// ronde kijkt alleen naar de vroegste (03-10: elke ronde scande de
     /// hele tabel, en op de OS-core draait de kern tussen twee beurten van
@@ -263,6 +287,15 @@ pub struct Executor<const TASKS: usize = 512, const TIMERS: usize = 256> {
     /// het, hop-cost5).
     rest: AtomicU64,
     clock: Cell<Option<Clock>>,
+    /// De langste beurt sinds de start ([`Self::longest_poll`]).
+    longest: Cell<LongestPoll>,
+    /// De langste beurt sinds de vorige [`Self::take_longest_poll`].
+    window: Cell<LongestPoll>,
+    /// Hoe diep we in polls zitten: boven 0 is een ronde genest.
+    depth: Cell<u32>,
+    /// Nanoseconden in geneste rondes tijdens de lopende poll: die gaan van
+    /// zijn beurt af.
+    nested: Cell<u64>,
     /// De meetlat.
     pub stats: Stats,
 }
@@ -313,6 +346,10 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
             timers: RefCell::new(Timers::new()),
             rest: AtomicU64::new(0),
             clock: Cell::new(None),
+            longest: Cell::new(LongestPoll { ns: 0, task: "" }),
+            window: Cell::new(LongestPoll { ns: 0, task: "" }),
+            depth: Cell::new(0),
+            nested: Cell::new(0),
             stats: Stats {
                 rounds: AtomicU64::new(0),
                 polls: AtomicU64::new(0),
@@ -351,14 +388,17 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
     /// kon plaatsen, [`SpawnError::TooMany`] boven [`TASK_CEILING`] taken,
     /// [`SpawnError::Full`] als de rij vol is (`TASKS` spawns in één ronde).
     pub fn spawn(&self, f: impl Future<Output = ()> + 'static) -> Result<(), SpawnError> {
+        let name = core::any::type_name_of_val(&f);
         let task: Task = try_box(f).ok_or(SpawnError::OutOfMemory)?;
         let n = self
             .claimed
             .fetch_update(AcqRel, Acquire, |c| (c < TASK_CEILING).then_some(c + 1))
             .map_err(|_| SpawnError::TooMany)?;
-        let placed = self
-            .ensure_slot(n)
-            .and_then(|()| self.spawn.try_send(task).map_err(|_| SpawnError::Full));
+        let placed = self.ensure_slot(n).and_then(|()| {
+            self.spawn
+                .try_send((task, name))
+                .map_err(|_| SpawnError::Full)
+        });
         if placed.is_err() {
             self.claimed.fetch_sub(1, AcqRel);
             return placed;
@@ -500,7 +540,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
 
     fn drain_spawns(&'static self) -> bool {
         let mut worked = false;
-        while let Some(task) = self.spawn.try_recv() {
+        while let Some((task, name)) = self.spawn.try_recv() {
             worked = true;
             let free = (0..TASK_CEILING)
                 .map_while(|i| self.slot(i).map(|s| (i, s)))
@@ -508,6 +548,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
             match free {
                 Some((i, slot)) => {
                     *slot.task.borrow_mut() = Some(task);
+                    slot.name.set(name);
                     let word = &self.ready[i / 64];
                     slot.bit.store(1 << (i % 64), Relaxed);
                     slot.word
@@ -543,8 +584,12 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
     /// Eén ronde: spawns plaatsen, verstreken timers wekken, gereed taken
     /// pollen. `true` als er iets gebeurd is.
     pub fn step(&'static self) -> bool {
+        let start = self.now();
         let mut worked = self.drain_spawns();
-        worked |= self.expire_timers(self.now());
+        worked |= self.expire_timers(start);
+        // Het begin van de eerste beurt; daarna is het einde van elke poll
+        // het begin van de volgende (één kloklees per poll).
+        let mut mark = self.now();
         // Een geneste ronde (een taak die zelf rondes draait) laat de rest
         // van de buitenste zoals hij hem vond.
         let outer = self.rest.load(Relaxed);
@@ -562,10 +607,15 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
                 let Some(slot) = self.slot(i) else {
                     continue;
                 };
-                worked |= self.poll(slot);
+                worked |= self.poll(slot, &mut mark);
             }
         }
         self.rest.store(outer, Relaxed);
+        if self.depth.get() > 0 {
+            // Genest: deze ronde gaat van de beurt van de taak die hem draait af.
+            let spent = self.now().saturating_sub(start);
+            self.nested.set(self.nested.get().saturating_add(spent));
+        }
         if worked {
             self.stats.rounds.fetch_add(1, Relaxed);
         }
@@ -573,7 +623,8 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
     }
 
     /// Pollt de taak van `slot`, als hij er een heeft. `true` = gepolld.
-    fn poll(&'static self, slot: &'static Slot) -> bool {
+    /// `mark` is het begin van deze beurt; na de poll het einde ervan.
+    fn poll(&'static self, slot: &'static Slot, mark: &mut u64) -> bool {
         // De taak komt uit zijn slot zolang hij gepolld wordt: zo houdt
         // niemand een lening op de tabel terwijl vreemde code draait.
         let Some(mut task) = slot.task.borrow_mut().take() else {
@@ -583,7 +634,16 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         let mut cx = Context::from_waker(&waker);
         self.stats.polls.fetch_add(1, Relaxed);
         slot.polling.set(true);
+        let outer = self.nested.replace(0);
+        self.depth.set(self.depth.get().saturating_add(1));
         let pending = task.as_mut().poll(&mut cx).is_pending();
+        self.depth.set(self.depth.get().saturating_sub(1));
+        let end = self.now();
+        let held = end
+            .saturating_sub(*mark)
+            .saturating_sub(self.nested.replace(outer));
+        *mark = end;
+        self.note(held, slot.name.get());
         slot.polling.set(false);
         if pending {
             *slot.task.borrow_mut() = Some(task);
@@ -593,6 +653,32 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
             self.claimed.fetch_sub(1, AcqRel);
         }
         true
+    }
+
+    /// Legt een beurt van `ns` van taak `task` vast als hij de langste is.
+    fn note(&self, ns: u64, task: &'static str) {
+        if ns <= self.window.get().ns {
+            return;
+        }
+        let poll = LongestPoll { ns, task };
+        self.window.set(poll);
+        if ns > self.longest.get().ns {
+            self.longest.set(poll);
+        }
+    }
+
+    /// De langste beurt sinds de start: de langste poll van één taak, met
+    /// die taak.
+    #[must_use]
+    pub fn longest_poll(&self) -> LongestPoll {
+        self.longest.get()
+    }
+
+    /// De langste beurt sinds de vorige aanroep (of de start), en begint
+    /// opnieuw: wat een periodieke regel meldt. Eén lezer per executor,
+    /// anders ziet elk de helft.
+    pub fn take_longest_poll(&self) -> LongestPoll {
+        self.window.take()
     }
 
     /// De hoofdlus: rondes draaien, en slapen als een ronde niets deed.
@@ -1183,6 +1269,81 @@ mod tests {
         e.step();
         assert_eq!(e.live_tasks(), TASK_CEILING);
         assert_eq!(e.stats.dropped.load(SeqCst), 0);
+    }
+
+    /// Een taak die 20 ms rekent zonder yield is de langste beurt, met zijn
+    /// naam; korte taken eromheen niet. Op de echte klok van de host.
+    #[test]
+    fn a_task_that_computes_for_20_ms_is_the_longest_poll() {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        fn clock() -> u64 {
+            let t0 = START.get_or_init(std::time::Instant::now);
+            u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        }
+        async fn compute_20_ms() {
+            let t = std::time::Instant::now();
+            let mut x = 0u64;
+            while t.elapsed() < Duration::from_millis(20) {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+        }
+        let e: &'static Executor<8, 4> = Box::leak(Box::new(Executor::new()));
+        e.set_clock(clock);
+        assert_eq!(e.longest_poll(), LongestPoll::default());
+        for _ in 0..3 {
+            e.spawn(async { sync::yield_now().await }).unwrap();
+        }
+        e.spawn(compute_20_ms()).unwrap();
+        while e.step() {}
+        let l = e.longest_poll();
+        assert!(l.ns >= 20_000_000, "{l:?}");
+        assert!(l.ns < 2_000_000_000, "{l:?}");
+        assert!(l.task.contains("compute_20_ms"), "{l:?}");
+        assert_eq!(e.take_longest_poll(), l);
+        // Het venster begint opnieuw; de langste sinds de start blijft.
+        assert_eq!(e.take_longest_poll(), LongestPoll::default());
+        e.spawn(async {}).unwrap();
+        while e.step() {}
+        let w = e.take_longest_poll();
+        assert!(w.ns < l.ns, "{w:?}");
+        assert_eq!(e.longest_poll(), l);
+    }
+
+    /// Op een nepklok: de beurt is precies wat de poll de klok liet lopen,
+    /// en een geneste ronde gaat van de beurt van de buitenste taak af (de
+    /// taak erin heeft zijn eigen beurt).
+    #[test]
+    fn a_nested_round_is_not_the_outer_tasks_poll() {
+        static CLOCK: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            CLOCK.load(SeqCst)
+        }
+        async fn inner_7_ms() {
+            CLOCK.fetch_add(7_000_000, SeqCst);
+        }
+        async fn outer_2_plus_3_ms(e: &'static Executor<8, 4>) {
+            CLOCK.fetch_add(2_000_000, SeqCst);
+            e.spawn(inner_7_ms()).unwrap();
+            e.step();
+            CLOCK.fetch_add(3_000_000, SeqCst);
+        }
+        let e: &'static Executor<8, 4> = Box::leak(Box::new(Executor::new()));
+        e.set_clock(clock);
+        e.spawn(outer_2_plus_3_ms(e)).unwrap();
+        while e.step() {}
+        let l = e.longest_poll();
+        assert_eq!(l.ns, 7_000_000, "{l:?}");
+        assert!(l.task.contains("inner_7_ms"), "{l:?}");
+        // De buitenste: 5 ms, dus nooit de langste; een taak van 6 ms wel
+        // in een vers venster, niet sinds de start.
+        e.take_longest_poll();
+        e.spawn(async {
+            CLOCK.fetch_add(6_000_000, SeqCst);
+        })
+        .unwrap();
+        while e.step() {}
+        assert_eq!(e.take_longest_poll().ns, 6_000_000);
+        assert_eq!(e.longest_poll(), l);
     }
 
     /// Taken in de blokken worden gewekt en gepolld zoals die in de

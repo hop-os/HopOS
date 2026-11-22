@@ -174,6 +174,13 @@ maat: één poll van één taak blijft onder een milliseconde op het traagste
 board waar de app voor bedoeld is. Wat langer duurt, is werk voor een
 `stacktask` (zie [stacktask.md](stacktask.md)) of voor meer `yield_now`.
 
+Meten: `applib::longest_poll()` geeft de langste poll van één taak op deze
+core sinds de start, met het type van die taak (`LongestPoll { ns, task }`);
+`applib::take_longest_poll()` hetzelfde sinds de vorige aanroep, voor een
+periodieke regel (één lezer per core). De executor meet elke poll (één
+kloklees per poll, ~3 ns op een M-serie-core); een geneste ronde telt bij de
+taken erin, niet bij de taak die hem draait.
+
 ### Pools, geen taak per verbinding
 
 Het aantal taken staat vast bij de compiler (het handboek, §2). Een werker

@@ -90,6 +90,6 @@ pub mod text;
 
 pub use app::{App, AppError, Beat};
 pub use ctrl::{AppStatus, Ctrl, Env};
-pub use rt::{EXEC, Exec, app, park};
+pub use rt::{EXEC, Exec, LongestPoll, app, longest_poll, park, take_longest_poll};
 pub use sleep::AppSleeper;
 pub use tail::{Tail, TailError, tail_of};

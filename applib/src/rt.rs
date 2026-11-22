@@ -60,6 +60,31 @@ pub type Exec = Executor<TASKS, TIMERS>;
 /// is de eerste.
 pub static EXEC: &Local<Exec> = &crate::smp::EXECS[0];
 
+pub use executor::LongestPoll;
+
+/// De executor van de core waarop de aanroeper draait.
+fn this_exec() -> &'static Exec {
+    crate::smp::EXECS
+        .get(crate::smp::current())
+        .unwrap_or(EXEC)
+        .get()
+}
+
+/// De langste beurt op deze core sinds de start: de langste poll van één
+/// taak zonder yield, met het type van die taak ([`LongestPoll`]). De regel
+/// van `docs/apps.md` ("Lange berekeningen") als getal: een rekenlus zonder
+/// `yield_now` tussen twee SQL-statements, een wachtwoordhash, een render.
+#[must_use]
+pub fn longest_poll() -> LongestPoll {
+    this_exec().longest_poll()
+}
+
+/// De langste beurt op deze core sinds de vorige aanroep, en begint
+/// opnieuw: voor een periodieke regel. Eén lezer per core.
+pub fn take_longest_poll() -> LongestPoll {
+    this_exec().take_longest_poll()
+}
+
 /// Het App van dit image, gezet door de main-schil vóór de eerste taak.
 static APP: Local<OnceCell<App>> = Local::new(OnceCell::new());
 
@@ -105,6 +130,30 @@ mod tests {
         assert_eq!(w.tick(&app, t0 + 2_499_999_999, 0), Tick::Alive);
         assert_eq!(w.tick(&app, t0 + 2_500_000_000, 0), Tick::Forced);
         assert_eq!(app.ctrl().get(CTRL_HEARTBEAT), 4);
+    }
+
+    /// De leesfunctie ziet de executor van deze core: een taak die de klok
+    /// 20 ms laat lopen zonder yield is de langste beurt.
+    #[test]
+    fn longest_poll_reads_this_cores_executor() {
+        use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+        static CLOCK: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            CLOCK.load(SeqCst)
+        }
+        async fn hash_for_20_ms() {
+            CLOCK.fetch_add(20_000_000, SeqCst);
+        }
+        let exec: &'static Exec = EXEC.get();
+        exec.set_clock(clock);
+        exec.spawn(hash_for_20_ms()).unwrap();
+        while exec.step() {}
+        let l = crate::longest_poll();
+        assert_eq!(l.ns, 20_000_000);
+        assert!(l.task.contains("hash_for_20_ms"), "{l:?}");
+        assert_eq!(crate::take_longest_poll(), l);
+        assert_eq!(crate::take_longest_poll(), LongestPoll::default());
+        assert_eq!(crate::longest_poll(), l);
     }
 
     /// De executor van een app-core met duizend timers tegelijk: geen

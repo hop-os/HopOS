@@ -29,8 +29,12 @@
 //! werker (Meet: de rate-limit per adres en een `Io` per werker).
 //!
 //! Opt-in: applib weet hier niets van. Een app die het anders wil (een
-//! eigen lus, `hijack` voor WebSocket), gebruikt deze crate niet; een
-//! overgenomen verbinding sluit hier.
+//! eigen lus), gebruikt deze crate niet. Een overgenomen verbinding
+//! (`Exchange::hijack`) sluit hier, tenzij de handler haar met
+//! [`Http::take_over`] doorgaf: dan krijgt de app haar, buiten de werkers en
+//! buiten het park. Zo houdt een lange stroom (SSE, een WebSocket) geen
+//! werker vast: de app schrijft haar events en keep-alives zelf, vanuit een
+//! eigen taak (EasyFlor, 24-11-2026: printclients over SSE).
 //!
 //! ```ignore
 //! static HTTP: applibhttp::Http<8, 512> = applibhttp::Http::new();
@@ -58,7 +62,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::task::Wake;
 use alloc::vec::Vec;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::future::{Future, poll_fn};
 use core::pin::{Pin, pin};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -68,7 +72,7 @@ use core::time::Duration;
 use applib::appnet::TcpListener;
 use applib::rt::Exec;
 use applib::tcp::TcpConn;
-use leanhttp::{Exchange, Kept, Outcome, serve};
+use leanhttp::{Exchange, Hijacked, Kept, Outcome, serve};
 use sync::Doors;
 use sync::Local;
 use sync::mpsc::Mailbox;
@@ -106,6 +110,54 @@ pub struct Ctx {
     /// De werker die dit verzoek bedient (`0..W`): voor staat per werker,
     /// zoals een eigen client of een eigen buffer.
     pub worker: usize,
+}
+
+/// Wie een overgenomen verbinding krijgt ([`Http::take_over`]): de
+/// verbinding met de bytes die al binnen waren, en de client.
+pub type Taker = Box<dyn FnOnce(Hijacked<TcpConn>, Peer)>;
+
+/// Per werker hoogstens één [`Taker`]: gezet door de handler van het verzoek
+/// dat die werker nu bedient, genomen zodra `serve` terugkomt. Eén eigenaar:
+/// werker `i` leest en wist plaats `i`, en zijn handler is de enige die er
+/// schrijft.
+pub struct Takers<const W: usize> {
+    slots: [RefCell<Option<Taker>>; W],
+}
+
+impl<const W: usize> Default for Takers<W> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const W: usize> Takers<W> {
+    /// Geen enkele.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            slots: [const { RefCell::new(None) }; W],
+        }
+    }
+
+    /// Zet de taker van werker `i` (een tweede vervangt de eerste); `false`
+    /// als er geen werker `i` is.
+    pub fn set(&self, i: usize, taker: Taker) -> bool {
+        match self.slots.get(i).map(RefCell::try_borrow_mut) {
+            Some(Ok(mut slot)) => {
+                *slot = Some(taker);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Neemt de taker van werker `i` (daarna is de plaats leeg).
+    pub fn take(&self, i: usize) -> Option<Taker> {
+        self.slots
+            .get(i)
+            .and_then(|s| s.try_borrow_mut().ok())
+            .and_then(|mut s| s.take())
+    }
 }
 
 /// Wat de acceptor aan een werker geeft.
@@ -229,8 +281,10 @@ pub struct Stats {
     pub last_error: Option<leanhttp::Error>,
     /// Verbindingen die dichtgingen omdat de terugweg naar het park vol was.
     pub back_full: u64,
-    /// Overgenomen verbindingen (hier gesloten).
+    /// Overgenomen verbindingen die hier sloten (de handler gaf ze niet door).
     pub hijacked: u64,
+    /// Overgenomen verbindingen die de app kreeg ([`Http::take_over`]).
+    pub handed_over: u64,
 }
 
 /// De server van een app: `W` werkers, hoogstens `P` verbindingen in het
@@ -241,6 +295,8 @@ pub struct Http<const W: usize, const P: usize> {
     doors: Local<Doors<Job, W>>,
     back: Local<Mailbox<(Kept<TcpConn>, Peer), W>>,
     stats: Local<Cell<Stats>>,
+    /// Per werker wie een overgenomen verbinding krijgt.
+    takers: Local<Takers<W>>,
     /// Kap op elke leestermijn van leanhttp (kop, body); `None` laat ze.
     read_cap: Option<Duration>,
     /// Hoe lang een verbinding tussen twee verzoeken in het park mag staan.
@@ -272,7 +328,9 @@ impl<const W: usize, const P: usize> Http<W, P> {
                 last_error: None,
                 back_full: 0,
                 hijacked: 0,
+                handed_over: 0,
             })),
+            takers: Local::new(Takers::new()),
             read_cap: None,
             idle: IDLE,
         }
@@ -301,6 +359,26 @@ impl<const W: usize, const P: usize> Http<W, P> {
     pub fn stats(&self) -> Stats {
         let cell: &Cell<Stats> = &self.stats;
         cell.get()
+    }
+
+    /// Geeft de verbinding van dit verzoek na de handler aan `taker` in
+    /// plaats van haar te sluiten. Alleen samen met `Exchange::hijack` in
+    /// dezelfde handler: wat leanhttp als `Outcome::Hijacked` teruggeeft,
+    /// gaat met de client naar `taker`, en de werker is meteen vrij voor het
+    /// volgende verzoek. Zonder hijack vervalt de taker als het verzoek af
+    /// is; de verbinding gaat dan zoals altijd terug naar het park.
+    ///
+    /// De taker draait op de werker, synchroon: hij hoort de verbinding
+    /// alleen door te geven (een mailbox, een register), niet te bedienen.
+    /// Wie haar krijgt, is eigenaar: sluiten, termijnen en de grens op het
+    /// aantal zulke verbindingen zijn van de app (ze tellen niet mee in `W`
+    /// en `P`).
+    pub fn take_over(
+        &self,
+        ctx: &Ctx,
+        taker: impl FnOnce(Hijacked<TcpConn>, Peer) + 'static,
+    ) -> bool {
+        self.takers.set(ctx.worker, Box::new(taker))
     }
 
     fn count(&self, f: impl FnOnce(&mut Stats)) {
@@ -377,7 +455,11 @@ impl<const W: usize, const P: usize> Http<W, P> {
                 self.count(|s| s.calls += 1);
                 match out {
                     // Al gepijplijnd: wachten op leesbaar zou nooit eindigen.
-                    Ok(Outcome::Kept(k)) if k.has_buffered() => out = k.serve(&h).await,
+                    Ok(Outcome::Kept(k)) if k.has_buffered() => {
+                        // De taker van het vorige verzoek geldt niet voor het volgende.
+                        drop(self.takers.take(i));
+                        out = k.serve(&h).await;
+                    }
                     Ok(Outcome::Kept(k)) => {
                         if let Err(full) = self.back.try_send((k, peer)) {
                             self.count(|s| s.back_full += 1);
@@ -386,9 +468,17 @@ impl<const W: usize, const P: usize> Http<W, P> {
                         break;
                     }
                     Ok(Outcome::Hijacked(h)) => {
-                        self.count(|s| s.hijacked += 1);
-                        let mut conn = h.conn;
-                        let _ = leanhttp::close(&mut conn).await;
+                        match self.takers.take(i) {
+                            Some(taker) => {
+                                self.count(|s| s.handed_over += 1);
+                                taker(h, peer);
+                            }
+                            None => {
+                                self.count(|s| s.hijacked += 1);
+                                let mut conn = h.conn;
+                                let _ = leanhttp::close(&mut conn).await;
+                            }
+                        }
                         break;
                     }
                     Ok(Outcome::Closed) => {
@@ -404,6 +494,8 @@ impl<const W: usize, const P: usize> Http<W, P> {
                     }
                 }
             }
+            // Een taker zonder hijack vervalt met zijn verzoek.
+            drop(self.takers.take(i));
             self.doors.free(i);
         }
     }
@@ -576,4 +668,29 @@ impl<const W: usize, const P: usize> Http<W, P> {
 
 fn nanos(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::rc::Rc;
+    use core::cell::Cell;
+
+    /// Een taker per werker: gezet door de handler, één keer genomen, daarna
+    /// leeg; een tweede vervangt de eerste, en een werker die er niet is,
+    /// krijgt er geen.
+    #[test]
+    fn a_taker_is_taken_once_per_worker() {
+        let takers: Takers<2> = Takers::new();
+        let called = Rc::new(Cell::new(0));
+        let first = called.clone();
+        assert!(takers.set(1, Box::new(move |_, _| first.set(1))));
+        let second = called.clone();
+        assert!(takers.set(1, Box::new(move |_, _| second.set(2))));
+        assert!(takers.take(0).is_none());
+        assert!(takers.take(1).is_some(), "the second replaced the first");
+        assert!(takers.take(1).is_none(), "taken once");
+        assert!(!takers.set(2, Box::new(|_, _| {})), "no worker 2");
+        assert_eq!(called.get(), 0, "taking does not call");
+    }
 }

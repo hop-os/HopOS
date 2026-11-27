@@ -44,12 +44,14 @@
     )
 )]
 
+pub mod chip;
 pub mod console;
 pub mod cores;
 pub mod fwinfo;
 mod head;
 mod irq;
 mod mmu;
+pub mod nic;
 pub mod pcie;
 pub mod pmgr;
 pub mod slots;
@@ -62,8 +64,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use cpu::el2::Flavor;
 use cpu::println;
 use dev::Pa;
-use driver_tg3::Tg3;
-use netdev::Mac;
+use nic::Nic;
 use sync::Signal;
 
 /// De DRAM-basis van élk Apple-silicon-systeem sinds de M1 (GEMETEN 28-08:
@@ -92,7 +93,7 @@ pub const DMA: Region = Region {
     base: Pa(RAM_BASE + 0x1000_0000),
     size: 0x0100_0000,
 };
-/// De NIC-helft van de DMA-regio (de tg3 vraagt 4 MB).
+/// De NIC-helft van de DMA-regio (de tg3 vraagt 4 MB, de Realtek 2,6).
 pub const NET_DMA: Region = Region {
     base: Pa(RAM_BASE + 0x1000_0000),
     size: 0x0080_0000,
@@ -103,7 +104,7 @@ pub const NET_DMA: Region = Region {
 /// dan werkt alles nog, alleen op ~100MB/s aan ongecachete loads"). Het
 /// mag omdat de driver het onderhoud zelf doet: `dev::push` vóór de
 /// TX-descriptor, `dev::pull` na de RX-completion (`driver_tg3::BUF_OFF`).
-pub(crate) const NET_BUF: (u64, u64) = (NET_DMA.base.0 + driver_tg3::BUF_OFF, driver_tg3::BUF_LEN);
+pub(crate) const NET_BUF: (u64, u64) = (NET_DMA.base.0 + nic::BUF.0, nic::BUF.1);
 /// De opslag-helft: de queues en TCB's van de ANS, de databuffer, en de
 /// buffers die de coprocessor bij zijn opstart vraagt.
 pub const BLK_DMA: Region = Region {
@@ -129,7 +130,7 @@ const _: () = {
     assert!(NET_DMA.end().0 == BLK_DMA.base.0 && BLK_DMA.end().0 == DMA.end().0);
     assert!(ADMIN.end().0 == LOADER.base.0 && LOADER.end().0 == WINDOW_END);
     assert!(RAM_BASE.is_multiple_of(2 << 20) && WINDOW_END.is_multiple_of(2 << 20));
-    assert!(driver_tg3::DMA_NEED <= NET_DMA.size);
+    assert!(nic::DMA_NEED <= NET_DMA.size);
     // Het WB-blok op eigen 2 MB-grenzen (de korrel van de map), binnen de
     // NIC-helft en na de ringen.
     assert!(NET_BUF.0.is_multiple_of(2 << 20) && NET_BUF.1 == 2 << 20);
@@ -147,7 +148,7 @@ pub const FLAVOR: Flavor = Flavor::AppleVhe;
 /// boot).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 
-/// De Mac mini M4.
+/// De Mac mini (de chip: [`chip::CHIP`]).
 pub struct Apple;
 
 /// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
@@ -176,6 +177,13 @@ impl Apple {
     /// bewuste knop per installatie.
     fn report_temp(&self) {
         if self.boot_param("hopos.smc") != "1" {
+            if !chip::CHIP.measured {
+                println!(
+                    "smc: off on {} (not measured on this chip; hopos.smc=1 tries) HOPOS_APPLE_SMC_OFF",
+                    chip::CHIP.soc
+                );
+                return;
+            }
             println!(
                 "smc: no die temperature (hopos.smc=1 measures once at boot; the SMC answer is unproven on metal, 31-08) HOPOS_APPLE_SMC_OFF"
             );
@@ -216,22 +224,34 @@ impl Apple {
         let p = (0..fwinfo::cpus())
             .filter(|&i| fwinfo::is_p_core(i))
             .count();
+        let m = (0..fwinfo::cpus())
+            .filter(|&i| fwinfo::is_m_core(i))
+            .count();
         println!(
-            "adt: {} bytes, {} ({}), {} cores ({} E + {p} P), this is core {}, serial {}",
+            "adt: {} bytes, {} ({}), {} cores ({} E + {m} M + {p} P), this is core {}, serial {}",
             t.size(),
             t.str(fw::adt::Node::ROOT, "model").unwrap_or("?"),
             t.str(fw::adt::Node::ROOT, "target-type").unwrap_or("?"),
             fwinfo::cpus(),
-            fwinfo::cpus() - p,
+            fwinfo::cpus() - p - m,
             self.this_core(),
             fwinfo::serial().unwrap_or("?")
         );
-        if let Some((d, _)) = fwinfo::reg("/arm-io/dockchannel-uart", 0)
-            && d != console::DOCKCHANNEL
-        {
+        let id = fwinfo::chip_id();
+        if id != Some(chip::CHIP.chip_id) {
             println!(
-                "console: the ADT puts the dockchannel at {d:#x}, not {:#x} HOPOS_APPLE_CONSOLE_MISMATCH",
-                console::DOCKCHANNEL
+                "chip: this image is for {} ({}), the ADT says chip-id {:#x} HOPOS_APPLE_CHIP_MISMATCH",
+                chip::CHIP.soc,
+                chip::CHIP.board,
+                id.unwrap_or(0)
+            );
+        }
+        if let Some(n) = t.path("/arm-io/aic") {
+            println!(
+                "adt: aic compatible {} at {:#x}, pmgr at {}",
+                t.str(n, "compatible").unwrap_or("?"),
+                fwinfo::reg("/arm-io/aic", 0).map_or(0, |r| r.0),
+                fwinfo::pmgr_path()
             );
         }
         match cores::own_cores(0) {
@@ -283,6 +303,13 @@ impl board::ClockKnob for Apple {
     type KnobError = board::NoKnob;
 
     fn no_knob(&self, exec: &'static executor::Executor) {
+        if !chip::CHIP.measured && self.boot_param("hopos.pstate").is_empty() {
+            println!(
+                "dvfs: no p-state watch on {} (the cluster blocks are not measured on this chip) HOPOS_CLOCK_NONE",
+                chip::CHIP.soc
+            );
+            return;
+        }
         let w = wdt::PStateWatch::new();
         if w.is_empty() {
             println!("dvfs: no cluster blocks in the ADT, the boot clock stays HOPOS_CLOCK_NONE");
@@ -311,12 +338,12 @@ async fn pstate_watch(exec: &'static executor::Executor, mut w: wdt::PStateWatch
 }
 
 impl Board for Apple {
-    type Nic = Tg3;
+    type Nic = Nic;
     type Sleeper = cpu::idle::ArmSleeper;
     /// De ANS-NVMe.
     type Disk = storage::Disk;
 
-    const NAME: &'static str = "apple-m4";
+    const NAME: &'static str = chip::CHIP.board;
     const FLAVOR: Flavor = FLAVOR;
     const PSCI: bool = false;
     /// De kern mapt de pool Device (`mmu`, `dram_attr`); de ringen van een
@@ -354,6 +381,17 @@ impl Board for Apple {
             head::FIRMWARE_X0.load(Relaxed)
         };
         let args = fwinfo::load(x0);
+        // De console zo vroeg mogelijk naar de dockchannel van de boom: op
+        // een chip zonder gemeten adres gingen de regels tot hier alleen
+        // naar uart0. De regel gaat al naar de nieuwe plek; de oude staat
+        // erin voor wie hem in `chip.rs` of `DOCK=` zet.
+        if let Some((d, _)) = fwinfo::reg("/arm-io/dockchannel-uart", 0)
+            && let Some(old) = console::adopt_adt(d)
+        {
+            println!(
+                "console: the ADT puts the dockchannel at {d:#x}, not {old:#x}: the console follows the ADT HOPOS_APPLE_CONSOLE_MISMATCH"
+            );
+        }
         println!("watchdog: {}", wdt::quiet().as_str());
         serror_check("silencing the firmware watchdogs");
         self.report(x0, args);
@@ -438,9 +476,18 @@ impl Board for Apple {
     /// tune is precies wat op ijzer bewezen moet worden (01-10).
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
         let ps = self.boot_param("hopos.pstate");
-        match wdt::pstate_targets(ps) {
-            Some(t) => wdt::pstate_tune(t, false, &serror_check),
-            None => wdt::pstate_tune(wdt::PS_DEFAULT, true, &serror_check),
+        if !chip::CHIP.measured && ps.is_empty() {
+            // Ook "off" leest de clusterblokken; op een chip waar die niet
+            // gemeten zijn, raakt de kern ze zonder vraag niet aan.
+            println!(
+                "cpufreq: the clusters keep the boot clock on {} (hopos.pstate=E,P tries the M4 recipe) HOPOS_APPLE_PSTATE_SKIP",
+                chip::CHIP.soc
+            );
+        } else {
+            match wdt::pstate_targets(ps) {
+                Some(t) => wdt::pstate_tune(t, false, &serror_check),
+                None => wdt::pstate_tune(wdt::PS_DEFAULT, true, &serror_check),
+            }
         }
         let target = irq::start().map_err(Error::Irq)?;
         serror_check("the AIC bring-up");
@@ -475,7 +522,19 @@ impl Board for Apple {
             return Err(Error::Twice("probe_nic"));
         }
         serror_check("the disk and everything before the NIC");
-        let how = pcie::init().map_err(Error::Nic)?;
+        if self.boot_param("hopos.nic") == "off" {
+            println!("net: hopos.nic=off HOPOS_NIC_NONE");
+            return Ok(None);
+        }
+        if chip::CHIP.eth.is_none() {
+            pcie::survey();
+            println!(
+                "net: no ethernet table for {} yet: the survey above fills board/apple/src/chip.rs HOPOS_NIC_NONE",
+                chip::CHIP.soc
+            );
+            return Ok(None);
+        }
+        let how = pcie::init(self.boot_param("hopos.apcie")).map_err(Error::Nic)?;
         println!("{how}");
         serror_check("the apcie bring-up");
         let ep = match pcie::enumerate_nic() {
@@ -485,41 +544,14 @@ impl Board for Apple {
                 return Ok(None);
             }
         };
-        println!("apcie: link up, endpoint {} bar0 {:#x}", ep.f, ep.bar0);
+        println!(
+            "apcie: link up, endpoint {} {:04x}:{:04x} bar0 {:#x} bar2 {:#x}",
+            ep.f, ep.f.vendor, ep.f.device, ep.bar0, ep.bar2
+        );
         serror_check("the link and the enumeration");
-        if !driver_tg3::drives(ep.f.vendor, ep.f.device) {
-            println!("net: {} is not the tg3 we know", ep.f);
+        let Some(mut nic) = nic::bring_up(&ep)? else {
             return Ok(None);
-        }
-        let mac = fwinfo::nic_mac().ok_or(Error::Nic("no local-mac-address in the ADT"))?;
-        // SAFETY: BAR0 is net toegewezen uit het 64-bit venster (onder 512 GB,
-        // Device-gemapt) en `cfg` is de ECAM-config-space van deze functie;
-        // NET_DMA is van deze driver alleen, Normal-NC met het bufferblok
-        // Normal WB (`NET_BUF`, de driver veegt het zelf), en de DART staat
-        // in bypass, dus een DMA-adres is een fysiek adres.
-        let mut nic = unsafe {
-            Tg3::new(
-                Pa(ep.bar0),
-                Pa(ep.cfg),
-                Mac(mac),
-                NET_DMA.base,
-                NET_DMA.size,
-                cpu::idle::now,
-            )
-        }
-        .map_err(|e| {
-            println!("tg3: {e} HOPOS_TG3_FAIL");
-            Error::Nic("tg3 init failed")
-        })?;
-        println!("tg3: {}", nic.describe());
-        serror_check("the tg3 init");
-        // De autonegotiatie aan, zonder te wachten: de link-wacht is van de
-        // taak (`netdev::Device::link`), en de tg3 zet dan zijn poortmodus.
-        nic.start_link().map_err(|e| {
-            println!("tg3: {e} HOPOS_TG3_FAIL");
-            Error::Nic("tg3 PHY did not start")
-        })?;
-        println!("tg3: link pending (autoneg)");
+        };
         wire_nic(&mut nic)?;
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
@@ -571,8 +603,21 @@ impl Board for Apple {
     }
 
     /// De schijf: de ANS-NVMe, met het schrijfvenster uit de GPT.
+    /// Op een chip waar de ANS niet gemeten is, alleen met `hopos.disk=on`.
     fn probe_disk(&self) -> Result<Option<storage::Disk>, Error> {
-        storage::probe_disk(self.boot_param("hopos.disk") == "off")
+        let ask = self.boot_param("hopos.disk");
+        let off = if chip::CHIP.measured {
+            ask == "off"
+        } else {
+            ask != "on"
+        };
+        if off && !chip::CHIP.measured && ask.is_empty() {
+            println!(
+                "disk: off on {} (the ANS is not measured on this chip; hopos.disk=on tries)",
+                chip::CHIP.soc
+            );
+        }
+        storage::probe_disk(off)
     }
 
     fn map_tail_normal(&self, pa: u64, size: u64) -> Option<Result<(), board::TailError>> {
@@ -593,32 +638,39 @@ impl Board for Apple {
 /// 1253); één weg, geen knop (`hopos.nicirq` is weg, 01-11). Komt de lijn
 /// niet aan, dan is dat een fout: de pomp pollt niet (docs/sequence-hopos.md
 /// §14.1 O3).
-fn wire_nic(nic: &mut Tg3) -> Result<(), Error> {
+fn wire_nic(nic: &mut Nic) -> Result<(), Error> {
+    let name = nic::NAME;
     let base = pcie::port_irq_base();
     let l = base
         .and_then(|b| b.checked_add(pcie::INTA))
         .ok_or_else(|| {
             println!(
-                "net: tg3 has no line: no interrupts word for the port on /arm-io/apcie HOPOS_NIC_IRQ"
+                "net: {name} has no line: no interrupts word for the port on /arm-io/apcie HOPOS_NIC_IRQ"
             );
-            Error::Irq("the tg3 line")
+            Error::Irq("the NIC line")
         })?;
     let base = base.unwrap_or(0);
+    let port = pcie::eth_port();
     match irq::wire_nic(nic, l) {
-        Ok(us) => {
+        Ok(Some(us)) => {
             println!(
-                "net: tg3 INTx on AIC irq {l} (port {} block {base} + INTA {}), first interrupt after {us} us HOPOS_NIC_IRQ",
-                pcie::ETH_PORT,
+                "net: {name} INTx on AIC irq {l} (port {port} block {base} + INTA {}), first interrupt after {us} us HOPOS_NIC_IRQ",
+                pcie::INTA
+            );
+            Ok(())
+        }
+        Ok(None) => {
+            println!(
+                "net: {name} INTx on AIC irq {l} (port {port} block {base} + INTA {}), not tested: no forced interrupt on this NIC, the first RX tells HOPOS_NIC_IRQ",
                 pcie::INTA
             );
             Ok(())
         }
         Err((why, (st, msk))) => {
             println!(
-                "net: tg3 has no line, AIC irq {l} (port {} block {base}): {why}, port INTSTAT {st:#x} INTMSK {msk:#x} HOPOS_NIC_IRQ",
-                pcie::ETH_PORT
+                "net: {name} has no line, AIC irq {l} (port {port} block {base}): {why}, port INTSTAT {st:#x} INTMSK {msk:#x} HOPOS_NIC_IRQ"
             );
-            Err(Error::Irq("the tg3 line did not come up"))
+            Err(Error::Irq("the NIC line did not come up"))
         }
     }
 }

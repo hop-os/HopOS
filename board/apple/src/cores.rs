@@ -150,7 +150,7 @@ pub fn release(i: usize, entry: u64, ctx: u64) -> Result<(), Error> {
 
 /// Het PMGR-startblok, uit de ADT.
 fn pmgr_base() -> Option<u64> {
-    fwinfo::reg("/arm-io/pmgr", 0).map(|(b, _)| b + PMGR_CPU_START_OFF)
+    fwinfo::reg(fwinfo::pmgr_path(), 0).map(|(b, _)| b + PMGR_CPU_START_OFF)
 }
 
 /// Zet core `i` aan in het PMGR-blok: eerst de systeemkant ("zonder dit

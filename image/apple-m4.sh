@@ -11,6 +11,12 @@
 #                                           image/cfg/headless.cfg; CFG=
 #                                           zonder pad: een leeg venster)
 #   APP=hop image/apple-m4.sh               + Hop (../hop/hop, rol hop)
+#   MODEL=m6 DOCK=0x... image/apple-m4.sh   de Mac mini M6 (t8152, feature
+#                                           board-apple-m6) → target/apple-m6;
+#                                           DOCK = de dockchannel uit ioreg
+#                                           (docs/boards-apple.md "De M6");
+#                                           zonder DOCK alleen uart0 tot de
+#                                           ADT gelezen is
 #   image/apple/boot-cycle.sh target/apple-m4/hopos-apple.img [s]
 #                                           → via m1n1's proxy laden en starten
 #
@@ -41,8 +47,18 @@ set -e
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 . "$DIR/tools/lib.sh"
 TARGET=aarch64-unknown-none-softfloat
-OUT="$DIR/target/apple-m4"
+case "${MODEL:-m4}" in
+m4) FEATURE=board-apple ;;
+m6) FEATURE=board-apple-m6 ;;
+*)
+	echo "apple-m4: MODEL=${MODEL} is m4 or m6" >&2
+	exit 64
+	;;
+esac
+OUT="$DIR/target/apple-${MODEL:-m4}"
 RAM_BASE=0x10100000000
+# DOCK=<adres>: de dockchannel voor de eerste regel (board/apple/build.rs).
+export HOPOS_APPLE_DOCK="${DOCK-}"
 
 cd "$DIR"
 mkdir -p "$OUT"
@@ -57,7 +73,7 @@ if [ -n "${EMBED-}" ]; then
 else
 	export HOPOS_EMBED=""
 fi
-cargo build --quiet --release --target "$TARGET" -p hopos --features board-apple
+cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURE"
 ELF="$DIR/target/$TARGET/release/hopos"
 IMG="$OUT/hopos-apple.img"
 "$OBJCOPY" -O binary "$ELF" "$IMG"
@@ -74,7 +90,11 @@ fi
 # De toets: het parameterblok op 0x100 ("HOPASTUB", doel, grootte, entry)
 # moet kloppen met het ELF, de stub-ingang op 0x800 moet code zijn, en
 # 0xF000 (de plek van de loader) leeg: de linker legt er niets, head.rs.
-CFG="${CFG-$DIR/image/cfg/headless.cfg $DIR/image/cfg/apple.cfg}"
+if [ "${MODEL:-m4}" = m6 ]; then
+	CFG="${CFG-$DIR/image/cfg/headless.cfg $DIR/image/cfg/apple-m6.cfg}"
+else
+	CFG="${CFG-$DIR/image/cfg/headless.cfg $DIR/image/cfg/apple.cfg}"
+fi
 for f in $CFG; do
 	[ -f "$f" ] || {
 		echo "apple-m4: CFG: $f does not exist" >&2

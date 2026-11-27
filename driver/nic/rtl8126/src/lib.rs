@@ -224,6 +224,24 @@ impl Rtl8126 {
     /// driver en het device gebruiken, nu en zolang het programma draait, op
     /// een adres dat het device ziet zoals de CPU.
     pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64, now: fn() -> u64) -> Result<Self> {
+        // SAFETY: dezelfde voorwaarde.
+        unsafe { Self::with_mac(base, dma, dma_size, now, None) }
+    }
+
+    /// [`new`](Self::new) met het MAC van het platform (de ADT van een
+    /// Mac): dat gaat vóór wat de chip draagt, en komt in MAC0/MAC4. Een
+    /// ongeldig of afwezig MAC valt terug op de chip.
+    ///
+    /// # Safety
+    ///
+    /// Als [`new`](Self::new).
+    pub unsafe fn with_mac(
+        base: Pa,
+        dma: Pa,
+        dma_size: u64,
+        now: fn() -> u64,
+        mac: Option<Mac>,
+    ) -> Result<Self> {
         if dma_size < DMA_NEED || !dma.is_aligned(BUF_OFF) || dma.0 == 0 {
             return Err(Error::Dma {
                 base: dma.0,
@@ -231,6 +249,9 @@ impl Rtl8126 {
             });
         }
         let mut n = Self::at(base, dma, now, &variant::V8126A);
+        if let Some(m) = mac.filter(|m| valid_unicast(m.0)) {
+            n.mac = m;
+        }
         n.reset()?;
         n.init()?;
         Ok(n)
@@ -390,10 +411,14 @@ impl Rtl8126 {
         self.hw_init()?;
         self.hw_reset()?;
 
-        // MAC0_BKP (zes bytes in draadvolgorde), terugval MAC0.
-        let mut m = [0u8; 6];
-        for (b, reg) in m.iter_mut().zip(&r.mac0_bkp) {
-            *b = reg.read();
+        // Het MAC van het platform (`with_mac`) eerst, zoals mainline
+        // (`rtl_init_mac_address`: `eth_platform_get_mac_address` vóór de
+        // chip); dan MAC0_BKP (zes bytes in draadvolgorde), terugval MAC0.
+        let mut m = self.mac.0;
+        if !valid_unicast(m) {
+            for (b, reg) in m.iter_mut().zip(&r.mac0_bkp) {
+                *b = reg.read();
+            }
         }
         if !valid_unicast(m) {
             let [a, b, c, d] = r.mac0.read().to_le_bytes();
@@ -722,6 +747,14 @@ impl Rtl8126 {
     pub fn set_irq(&mut self, bell: &'static Signal) {
         self.irq = Some(bell);
         self.rearm();
+    }
+
+    /// Terug naar geen lijn, voor een board waarvan de lijn niet aankwam:
+    /// de bel eraf en het masker dicht (`rtl_irq_disable`).
+    pub fn clear_irq(&mut self) {
+        self.irq = None;
+        self.regs().intr_mask.write(0);
+        self.commit();
     }
 
     /// IntrStatus schoon en dán het masker open, de volgorde van

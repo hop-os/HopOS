@@ -66,7 +66,7 @@ pub(crate) struct Pmgr<'a> {
 impl<'a> Pmgr<'a> {
     /// Leest de tabel uit de boom.
     pub(crate) fn open(t: Adt<'a>) -> Option<Self> {
-        let chain = t.trace("/arm-io/pmgr")?;
+        let chain = t.trace(crate::fwinfo::pmgr_path())?;
         let n = chain.node();
         let ps = t.prop(n, "ps-regs").filter(|p| !p.is_empty())?;
         let devs = t.prop(n, "devices").filter(|d| d.len() >= 2 * REC)?;

@@ -110,6 +110,7 @@ dependencies = [
  "driver-nvme",
  "driver-pcie",
  "driver-rtkit",
+ "driver-rtl8126",
  "driver-smc",
  "driver-tg3",
  "executor",

@@ -272,6 +272,62 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
     zonder loader meekwam. Stap 13 loopt dan via PMGR en de brievenbus.
     Terug: dezelfde regel met `m1n1.bin`.
 
+## De M6 (t8152, Mac18,5): voorbereid 27-11, nog niet op ijzer
+
+Hetzelfde board met de chip-feature `t8152` (`board/apple/src/chip.rs`):
+`MODEL=m6 DOCK=0x... sh image/apple-m4.sh` bouwt `target/apple-m6/`,
+`sh image/flip-bundle.sh apple-m6` de flip-bundel. Zonder de feature is het
+crate de M4, ongewijzigd.
+
+Afgekeken (27-11):
+
+| Wat | Waarvandaan | In de code |
+| --- | --- | --- |
+| uart0 op 0x3_3120_0000 | m1n1 `soc.h` (PR #679, gemerged 27-09) | `chip.rs` |
+| CPU-start op de PMGR-offset van de t8112-familie | m1n1 `smp.c` | ongewijzigd (`cores.rs`) |
+| de PMGR-functies onder `/arm-io/pmgr-child` als `/arm-io/pmgr` `pmgr2,arch` is | m1n1 `pmgr.c` | `fwinfo::pmgr_path` |
+| cores E, P én M (MPIDR bit 16 P, bit 18 M) | m1n1 `midr.h` | `fwinfo::kind`, `slots::mpidr` |
+| geen chickens (`features_m4`, init NULL) | m1n1 `chickens.c` | niets te doen |
+| boot_args rev 3 of lager | m1n1 weigert > 3 en boot de M6 | niets te doen |
+| ethernet: Realtek RTL8125CPA | ChargerLAB-teardown A3534 (één bron) | `nic.rs` met de driver van de O6N (`RTL8125CP`), MAC uit de ADT eerst (Linux `rtl_init_mac_address`) |
+| het MAC uit `/chosen` `mac-address-ethernet0` | m1n1 `kboot.c` | `fwinfo::nic_mac` (terugval) |
+| PCIe-recept van de M5 (8 gedeelde vensters, PHY op +0x20000, refclk, gen4) | m1n1 PR #747 (niet gemerged) | `pcie::T8142`, alleen met `hopos.apcie=t8142` |
+
+Niet te vinden, dus niet geraden: de dockchannel (`DOCK=` uit `ioreg`, en
+anders volgt de console de ADT zodra die gelezen is,
+`HOPOS_APPLE_CONSOLE_MISMATCH`), het PCIe-recept van de t8152 (m1n1 heeft er
+geen), en de poortadressen van de ethernet-poort (`chip.rs` `eth: None`: de
+probe meldt de APCIe uit de ADT, `HOPOS_APCIE_SURVEY`, en start geen NIC).
+Standaard dicht op de M6 (`measured: false`): de p-state-tune en zijn
+wachter (`hopos.pstate=E,P`), de SMC (`hopos.smc=1`), de schijf
+(`hopos.disk=on`). `image/cfg/apple-m6.cfg` pint geen OS-core.
+
+De Realtek heeft geen gedwongen interrupt: zijn lijn gaat scherp zonder de
+toets van de tg3 (`not tested ... HOPOS_NIC_IRQ`), en de eerste RX zegt of
+het AIC-nummer klopt.
+
+### Draaiboek 28-11
+
+1. In macOS, vóór alles: `sysctl hw.model`, `sw_vers`, en
+   `ioreg -p IODeviceTree -l -x > m6-adt.txt` (bewaren naast de M4-dump).
+   Daaruit de dockchannel: `dockchannel-uart` reg plus de `ranges` van
+   `arm-io`. Ook kijken: `/chosen` `chip-id` (0x8152), `/cpus` met
+   `cluster-type`, `/arm-io/aic` compatible, `/arm-io/apcie` compatible.
+2. `macvdmtool reboot serial` en `debugusb`: verschijnt
+   `/dev/cu.kis-*`? m1n1 zegt: debugusb werkt op de M6, CDC-ACM (m1n1's
+   USB-gadget, waarover `load.py` laadt) nog niet (`dart,gen3`). Laden via
+   m1n1 is op de M6 dus nog geen route.
+3. `MODEL=m6 DOCK=0x... sh image/apple-m4.sh`, installeren in 1TR
+   (`image/apple/install.sh`, het image zelf als bootobject, zonder m1n1).
+4. Op de console: `hopos x...` (eerste licht), `xnuboot: rev ...`,
+   `adt: ... cores (E + M + P)`, geen `HOPOS_APPLE_CHIP_MISMATCH`,
+   `adt: aic compatible ...`, `cores: ours`, en dan de AIC
+   (`irq: ...`), de watchdog en `HOPOS_OS_SELFTEST ok`.
+5. De survey (`HOPOS_APCIE_SURVEY` tot `..._END`) in `chip.rs` zetten:
+   `eth: Some(Eth { .. })`, en in `pcie.rs` een recept bij de compatible
+   (of eerst `hopos.apcie=t8142` proberen). Opnieuw installeren. Met
+   netwerk gaat de rest via de warme flip (`flip-bundle.sh apple-m6`).
+
 ## Op ijzer gezien op M1 (03-10)
 
 - **De scrub van de Device-gemapte pool**: dezelfde Go-app (tamago,

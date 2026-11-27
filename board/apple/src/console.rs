@@ -22,12 +22,33 @@
 //! een lezerloze FIFO geen 2 ms per byte, maar komt een lezer die later
 //! aanhaakt wél weer in beeld (Go `console.go`).
 
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use dev::{Pa, Stall};
 
-/// De dockchannel van de t8132 (GEMETEN 28-08).
-pub const DOCKCHANNEL: u64 = crate::head::DOCK_FALLBACK;
-/// uart0 van de t8132 (GEMETEN 28-08).
-pub const UART0: u64 = 0x3_ad20_0000;
+/// De dockchannel uit de chip-tabel (de t8132: GEMETEN 28-08), tot de ADT
+/// iets anders zegt ([`adopt_adt`]); 0 = nog geen.
+static DOCK: AtomicU64 = AtomicU64::new(crate::chip::CHIP.dock);
+/// uart0 van de chip (de t8132: GEMETEN 28-08; de t8152: m1n1
+/// `EARLY_UART_BASE`).
+pub const UART0: u64 = crate::chip::CHIP.uart0;
+
+/// De dockchannel waar de console nu naartoe schrijft (0 = geen).
+#[must_use]
+pub fn dockchannel() -> u64 {
+    DOCK.load(Relaxed)
+}
+
+/// De dockchannel volgens de ADT, zodra die gelezen is. Wijkt hij af van
+/// de vaste waarde, dan gaat de console erheen: op een chip die we nog
+/// niet maten is de boom de betere bron (de eerste regels gingen dan naar
+/// uart0 of nergens heen). Geeft de oude waarde als hij wisselde.
+pub fn adopt_adt(d: u64) -> Option<u64> {
+    if d == 0 || d >= 512 << 30 {
+        return None;
+    }
+    let old = DOCK.swap(d, Relaxed);
+    (old != d).then_some(old)
+}
 
 const DOCK_TX: u64 = 0x4004;
 const DOCK_TX_FREE: u64 = 0x4014;
@@ -53,14 +74,17 @@ fn put(status: Pa, ready: impl Fn(u32) -> bool, data: Pa, c: u8, tx: &Stall) {
 }
 
 fn put_both(c: u8) {
-    let d = Pa(DOCKCHANNEL);
-    put(
-        d.add(DOCK_TX_FREE),
-        |v| v != 0,
-        d.add(DOCK_TX),
-        c,
-        &DOCK_LINE,
-    );
+    let d = dockchannel();
+    if d != 0 {
+        let d = Pa(d);
+        put(
+            d.add(DOCK_TX_FREE),
+            |v| v != 0,
+            d.add(DOCK_TX),
+            c,
+            &DOCK_LINE,
+        );
+    }
     let u = Pa(UART0);
     put(
         u.add(UTRSTAT),

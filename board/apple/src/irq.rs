@@ -19,11 +19,11 @@
 //! eeuwig terwijl de timer wél afgaat. `apple.TimerWakes` in Go.
 
 use crate::fwinfo;
+use crate::nic::{IrqAck, Nic};
 use core::sync::atomic::Ordering::Relaxed;
 use cpu::irq::Line;
 use dev::Pa;
 use driver_aic::{Aic, Props};
-use driver_tg3::{IrqAck, Tg3};
 use netdev::AckSlot;
 use sync::Signal;
 
@@ -86,12 +86,13 @@ fn find_target() -> Option<u32> {
     hit
 }
 
-/// De ack van de tg3, gezet vóór de lijn scherp gaat; de dispatch roept
+/// De ack van de NIC, gezet vóór de lijn scherp gaat; de dispatch roept
 /// hem op HOP's core, waar ook de probe draait.
 static NIC_ACK: AckSlot<IrqAck> = AckSlot::new();
 
-/// De device-ack van de NIC-lijn: de interrupt-mailbox dicht, INTA valt.
-fn tg3_ack() {
+/// De device-ack van de NIC-lijn: de tg3 sluit zijn interrupt-mailbox, de
+/// Realtek zijn masker; INTA valt.
+fn nic_ack() {
     NIC_ACK.ack();
 }
 
@@ -109,10 +110,16 @@ const NIC_TEST_NS: u64 = 50_000_000;
 /// lijn, met een reden, en geen pomp die nooit iets hoort. Geeft de microseconden tot de aflevering, of de reden met
 /// INTSTAT en INTMSK van de poort, gelezen vóór de NIC weer dichtgaat (bij
 /// een poort die INTA wél zag, staat bit 0 dan nog).
-pub(crate) fn wire_nic(nic: &mut Tg3, line: u32) -> Result<u64, (&'static str, (u32, u32))> {
+///
+/// Zonder gedwongen interrupt (`nic::FORCED_IRQ`, de Realtek) gaat de lijn
+/// scherp zonder toets en is het antwoord `Ok(None)`.
+pub(crate) fn wire_nic(
+    nic: &mut Nic,
+    line: u32,
+) -> Result<Option<u64>, (&'static str, (u32, u32))> {
     NIC_ACK.set(nic.irq_ack());
     let bell = &NIC_BELL;
-    cpu::irq::enable(Line(line), Some(tg3_ack), Some(bell)).map_err(|e| {
+    cpu::irq::enable(Line(line), Some(nic_ack), Some(bell)).map_err(|e| {
         let why = match e {
             cpu::irq::Error::NoController => "no AIC",
             _ => "the AIC refused the line",
@@ -121,6 +128,9 @@ pub(crate) fn wire_nic(nic: &mut Tg3, line: u32) -> Result<u64, (&'static str, (
     })?;
     let _ = bell.take();
     nic.set_irq(bell);
+    if !crate::nic::FORCED_IRQ {
+        return Ok(None);
+    }
     let why = match fires_within(bell, NIC_TEST_NS) {
         // De ack sloot de mailbox, dus nu moet de lijn stil zijn: één
         // naloper mag (de deassert reist nog door de poort), maar blijft
@@ -128,9 +138,9 @@ pub(crate) fn wire_nic(nic: &mut Tg3, line: u32) -> Result<u64, (&'static str, (
         // niets laat zakken, houdt de dispatch voor altijd bezig.
         Some(ns) if hits_within(bell, NIC_QUIET_NS) < NIC_QUIET_MAX => {
             // De eerste lege ring van de pomp heropent de mailbox.
-            return Ok(ns / 1_000);
+            return Ok(Some(ns / 1_000));
         }
-        Some(_) => "the line keeps firing with the NIC masked, not the tg3's",
+        Some(_) => "the line keeps firing with the NIC masked, not the NIC's",
         None => "the forced interrupt did not arrive within 50 ms",
     };
     let port = crate::pcie::port_intx();

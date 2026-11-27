@@ -131,12 +131,14 @@ fn load_cpus() {
 }
 
 /// De soort van een core: `cluster-type` ("E"/"P", GEMETEN in de ADT-dump
-/// van 31-08), anders de compatible (`apple,sawtooth` E, `apple,everest`
-/// P).
+/// van 31-08; "M" voor de middencores die m1n1 sinds de M6 kent, PR #679:
+/// `MPIDR_CORE_TYPE_M`), anders de compatible (`apple,sawtooth` E,
+/// `apple,everest` P).
 fn kind(cluster_type: Option<&str>, compatible: Option<&str>) -> u8 {
     match (cluster_type, compatible) {
         (Some("E"), _) => b'E',
         (Some("P"), _) => b'P',
+        (Some("M"), _) => b'M',
         (_, Some("apple,sawtooth")) => b'E',
         (_, Some("apple,everest")) => b'P',
         _ => 0,
@@ -168,6 +170,41 @@ pub fn is_p_core(i: usize) -> bool {
     CPU_KIND.get(i).is_some_and(|k| k.load(Relaxed) == b'P')
 }
 
+/// Is core `i` een M-core (het midden, vanaf de M6)?
+#[must_use]
+pub fn is_m_core(i: usize) -> bool {
+    CPU_KIND.get(i).is_some_and(|k| k.load(Relaxed) == b'M')
+}
+
+/// `/chosen` `chip-id`: de SoC volgens de firmware (0x8132 op de M4).
+#[must_use]
+pub fn chip_id() -> Option<u32> {
+    let t = adt()?;
+    t.u32(t.path("/chosen")?, "chip-id")
+}
+
+/// Draagt `n` de compatible `want`? De property is een lijst teksten,
+/// elk tot een NUL (ADT, net als een FDT).
+#[must_use]
+pub fn compatible(t: &Adt<'_>, n: fw::adt::Node, want: &str) -> bool {
+    t.prop(n, "compatible")
+        .is_some_and(|v| v.split(|&c| c == 0).any(|s| s == want.as_bytes()))
+}
+
+/// Waar de PMGR-functies wonen: `/arm-io/pmgr`, of sinds de M6
+/// `/arm-io/pmgr-child` als `/arm-io/pmgr` alleen nog de generieke
+/// `pmgr2,arch` is (afgekeken van m1n1 `pmgr_adt_path_offset_trace`).
+#[must_use]
+pub fn pmgr_path() -> &'static str {
+    const OLD: &str = "/arm-io/pmgr";
+    const CHILD: &str = "/arm-io/pmgr-child";
+    let Some(t) = adt() else { return OLD };
+    match t.path(OLD) {
+        Some(n) if compatible(&t, n, "pmgr2,arch") && t.path(CHILD).is_some() => CHILD,
+        _ => OLD,
+    }
+}
+
 /// De core met aff1:aff0 == `mpidr & 0xffff` (Apple's MPIDR: aff0 core,
 /// aff1 cluster, aff2 een vaste bit; GEMETEN 28-08: cpu6 = 0x80010100).
 #[must_use]
@@ -182,10 +219,14 @@ pub fn core_of(mpidr: u64) -> Option<usize> {
 #[must_use]
 pub fn nic_mac() -> Option<[u8; 6]> {
     let t = adt()?;
-    let n = t.path("/arm-io/apcie/pci-bridge2/lan-1gb")?;
-    let v = t.prop(n, "local-mac-address")?;
-    let m = v.get(..6)?;
-    Some([m[0], m[1], m[2], m[3], m[4], m[5]])
+    let six = |v: &[u8]| v.get(..6).map(|m| [m[0], m[1], m[2], m[3], m[4], m[5]]);
+    // De M4: de node van de poort (GEMETEN). Een andere chip: waar m1n1 hem
+    // voor Linux haalt (`dt_set_mac_addresses`: `/chosen`
+    // `mac-address-ethernet0`), want de naam van de node is daar onbekend.
+    t.path("/arm-io/apcie/pci-bridge2/lan-1gb")
+        .and_then(|n| t.prop(n, "local-mac-address"))
+        .and_then(six)
+        .or_else(|| six(t.prop(t.path("/chosen")?, "mac-address-ethernet0")?))
 }
 
 /// Het serienummer uit de wortel van de boom: de identiteit die een node

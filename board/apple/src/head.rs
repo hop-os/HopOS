@@ -42,11 +42,12 @@ use dev::Pa;
 /// een sprong wat de feitenpagina draagt.
 pub(crate) static FIRMWARE_X0: AtomicU64 = AtomicU64::new(0);
 
-/// De dockchannel-basis van de t8132, voor de eerste regel vóór alles
-/// (`aapl,dock-channels`, ADT reg + arm-io-range, GEMETEN 28-08). Een
+/// De dockchannel-basis voor de eerste regel vóór alles, uit de
+/// chip-tabel (de t8132: `aapl,dock-channels`, ADT reg + arm-io-range,
+/// GEMETEN 28-08; een andere chip: `HOPOS_APPLE_DOCK` bij het bouwen). Een
 /// foutmelder die van een boom afhangt, zwijgt juist wanneer het misgaat
-/// (Go `cpuinit.s`, `DOCK_FALLBACK`).
-pub(crate) const DOCK_FALLBACK: u64 = 0x3_8812_8000;
+/// (Go `cpuinit.s`, `DOCK_FALLBACK`). 0 = onbekend: dan geen eerste regel.
+pub(crate) const DOCK_FALLBACK: u64 = crate::chip::CHIP.dock;
 
 /// Wat de assembly na de BSS en de stack aanroept, met de MMU nog uit: de
 /// eerste regel op de dockchannel en de identity map. Geeft TTBR0.
@@ -69,8 +70,9 @@ extern "C" fn apple_early(x0: u64, pool: u64) -> u64 {
         x0
     };
     FIRMWARE_X0.store(x0, Relaxed);
-    let dock = Pa(DOCK_FALLBACK);
-    crate::console::raw_line(dock, b"hopos x", x0);
+    if DOCK_FALLBACK != 0 {
+        crate::console::raw_line(Pa(DOCK_FALLBACK), b"hopos x", x0);
+    }
     let actual = crate::fwinfo::early_mem_size(x0);
     // SAFETY: `pool` is `__apple_tables` in de BSS (`hopos/link-apple.ld`):
     // 4 KB-gealigneerd, `mmu::TABLES` pagina's, van niemand anders, en de

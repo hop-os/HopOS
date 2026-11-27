@@ -4,7 +4,7 @@
 # Hop) doordraaien (image/flip-bundle.sh op tag v2.2.8, docs/flip.md).
 #
 #   image/flip-bundle.sh <board>    -> target/hopos-<board>.flip (+ .sha256)
-#       board: virt, uefi, o6n, altra, rpi4, rpi5, radxa, apple
+#       board: virt, uefi, o6n, altra, rpi4, rpi5, radxa, apple, apple-m6
 #              (riscv64 flipt niet: hopos/src/flip.rs `FLIPS`)
 #   HOPOS_STAMP=B image/flip-bundle.sh virt   een ander versie-stempel op
 #                                   de boot-regel (tools/qemu-test-flip.sh)
@@ -79,8 +79,10 @@ altra) FEATURE=board-altra COLD=0 PIE=1 FLAVOR=nvhe ;;
 # De M4: vast linkadres (hopos/link-apple.ld KERN_BASE), de apple-switcher;
 # board/apple/build.rs wil HOPOS_EMBED (de Hop-ELF, of leeg).
 apple) FEATURE=board-apple COLD=0x10100000000 PIE=0 FLAVOR=apple ;;
+# De M6: hetzelfde board met de chip-feature t8152 (board/apple/src/chip.rs).
+apple-m6) FEATURE=board-apple-m6 COLD=0x10100000000 PIE=0 FLAVOR=apple ;;
 *)
-	echo "gebruik: $0 virt|uefi|o6n|altra|rpi4|rpi5|radxa|apple" >&2
+	echo "gebruik: $0 virt|uefi|o6n|altra|rpi4|rpi5|radxa|apple|apple-m6" >&2
 	exit 64
 	;;
 esac

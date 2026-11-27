@@ -36,6 +36,7 @@
 //! bits, nam het hele blok onderuit, en pas de tik na elke schrijf wees het
 //! aan).
 
+use crate::chip::Eth;
 use crate::fwinfo;
 use crate::pmgr::{self, Pmgr};
 use cpu::idle::now;
@@ -44,27 +45,36 @@ use dev::Pa;
 use driver_pcie::{Bdf, Config, Ecam, Function, MmioWindow};
 use fw::adt::{Adt, Node};
 
-/// De ECAM van `/arm-io/apcie` (reg[0]; 32 KB per poort op bus 0).
-pub const ECAM: u64 = 0x1c_b000_0000;
-/// Het 64-bit prefetch-venster, 512 MB, PCI-adres == CPU-adres (de
-/// ADT-ranges: het 32-bit venster vertaalt, dit niet).
-pub const MMIO: u64 = 0xb_c000_0000;
-/// De maat van dat venster.
-pub const MMIO_SIZE: u64 = 0x2000_0000;
-/// De ethernet-poort: device 2 op bus 0 (`pci-bridge2`, `lan-1gb`).
-pub const ETH_PORT: u8 = 2;
-/// Het busnummer achter de brug.
-pub const ETH_BUS: u8 = 2;
-/// Het poortregisterblok (reg[7 + 8 * 2] van de apcie-node, GEMETEN).
-const ETH_PORT_BASE: u64 = 0x4_9202_8000;
-/// De PERST#-GPIO van de poort (ADT `function-perst`).
-const ETH_PERST_PIN: u64 = 165;
-/// De DART van de poort (`dart,t8110`).
-const ETH_DART: u64 = 0x4_9200_0000;
-/// `/arm-io/gpio0` (`gpio,t8101`): één register per pin; DATA bit 0, MODE
-/// 3:1. Alleen de onderste vier bits aanraken: de rest is de pinconfig van
-/// iBoot, en die wissen maakt de pin dood (GEMETEN: 0x74a02 → 0x2).
-const GPIO_BASE: u64 = 0x3_9a00_0000;
+/// De ethernet-poort van deze chip ([`crate::chip::Eth`]). Op de M4,
+/// allemaal GEMETEN:
+///
+/// - `ecam`: de ECAM van `/arm-io/apcie` (reg[0]; 32 KB per poort op bus 0);
+/// - `mmio`: het 64-bit prefetch-venster, 512 MB, PCI-adres == CPU-adres
+///   (de ADT-ranges: het 32-bit venster vertaalt, dit niet);
+/// - `port`: device 2 op bus 0 (`pci-bridge2`, `lan-1gb`), en bus 2 erachter;
+/// - `port_base`: het poortregisterblok (reg[7 + 8 * 2] van de apcie-node);
+/// - `perst_pin`: de PERST#-GPIO van de poort (ADT `function-perst`);
+/// - `dart`: de DART van de poort (`dart,t8110`);
+/// - `gpio`: `/arm-io/gpio0` (`gpio,t8101`): één register per pin; DATA
+///   bit 0, MODE 3:1. Alleen de onderste vier bits aanraken: de rest is de
+///   pinconfig van iBoot, en die wissen maakt de pin dood (GEMETEN: 0x74a02
+///   → 0x2).
+///
+/// `None` op een chip die nog niet gemeten is: dan meldt [`survey`] wat de
+/// ADT zegt, en komt er geen NIC.
+static ETH: Option<Eth> = crate::chip::CHIP.eth;
+
+/// De tabel, of waarom er geen is.
+fn eth() -> Result<&'static Eth, Why> {
+    ETH.as_ref()
+        .ok_or("apcie: no ethernet table for this chip yet (board/apple/src/chip.rs)")
+}
+
+/// Het poortnummer van de ethernet-poort (0 zonder tabel).
+#[must_use]
+pub fn eth_port() -> u8 {
+    ETH.as_ref().map_or(0, |e| e.port)
+}
 
 // De poortregisters (Linux `pcie-apple.c`; m1n1 dezelfde).
 const PORT_LTSSMCTL: u64 = 0x080;
@@ -99,15 +109,83 @@ const DART_TCR: u64 = 0x1000;
 const DART_BYPASS: u32 = (1 << 1) | (1 << 2);
 const DART_STREAMS: u64 = 16;
 
-// De apcie-node van t8132 (m1n1 `regs_t8132`).
+// De apcie-node: config, RC en het PHY-blok staan op elke chip van de
+// T8122-tak op dezelfde plek; de rest per recept ([`Recipe`]).
 const IDX_CONFIG: usize = 0;
 const IDX_RC: usize = 1;
 const IDX_PHY: usize = 2;
-const IDX_PHY_IP: usize = 3;
-const IDX_AXI: usize = 4;
-const SHARED_REGS: usize = 7;
-const PHY_OFF: u64 = 0x8000;
 const PHY_CMN_OFF: u64 = 0x4000;
+/// PHYCMN_CLK: bit 31 = de referentieklok van 100 MHz staat (m1n1
+/// `APCIE_PHYCMN_CLK_100MHZ`; alleen de M5-tak wacht erop).
+const PHYCMN_CLK_100MHZ: u32 = 1 << 31;
+
+/// Wat per chip verschilt in m1n1's T8122-tak (`struct reg_info` en de
+/// takken op `type`), letterlijk overgenomen: de M4 uit `regs_t8132`
+/// (BEWEZEN 29-08), de M5 uit PR #747 (`regs_t8142`, nog niet gemerged op
+/// 27-11, niet op ons ijzer geweest). Voor de M6 heeft m1n1 nog niets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Recipe {
+    /// De naam, zoals `hopos.apcie` hem noemt.
+    pub name: &'static str,
+    /// Gedeelde reg-vensters vóór die van de poorten.
+    shared_regs: usize,
+    /// De reg-index van PHY-IP en van AXI2AF.
+    idx_phy_ip: usize,
+    idx_axi: usize,
+    /// De PHY op het PHY-blok (m1n1: `phy_base[0] += 0x8000`, op de M5
+    /// 0x20000, "the PHY-PHY block is reg[3] = reg[2] + 0x20000").
+    phy_off: u64,
+    /// Wachten op de referentieklok vóór de PHY-klokken (M5, T602X).
+    refclk_wait: bool,
+    /// `AppleT8142PCIe::_initializeGen4Phy`: bit 16 van PHY-IP + 0x90 wissen.
+    gen4_clear: bool,
+    /// Wat de PHY_CTRL na de klok krijgt (0x200 op de T8122-tak, bit 27 op
+    /// de M5: `APCIECoreRCGen4::_apcieGPInit`).
+    phy_run: u32,
+}
+
+/// De M4 (`apcie,t8132`).
+pub const T8132: Recipe = Recipe {
+    name: "t8132",
+    shared_regs: 7,
+    idx_phy_ip: 3,
+    idx_axi: 4,
+    phy_off: 0x8000,
+    refclk_wait: false,
+    gen4_clear: false,
+    phy_run: 0x200,
+};
+
+/// De M5 (`apcie,t8142`, m1n1 PR #747).
+pub const T8142: Recipe = Recipe {
+    name: "t8142",
+    shared_regs: 8,
+    idx_phy_ip: 4,
+    idx_axi: 5,
+    phy_off: 0x2_0000,
+    refclk_wait: true,
+    gen4_clear: true,
+    phy_run: 1 << 27,
+};
+
+/// Het recept bij de compatible van `/arm-io/apcie`, of wat `hopos.apcie`
+/// afdwingt (`t8132`, `t8142`): op een chip zonder recept is proberen een
+/// keuze van de mens, niet van de kern.
+#[must_use]
+pub fn recipe(compatible: impl Fn(&str) -> bool, force: &str) -> Option<Recipe> {
+    match force {
+        "t8132" => return Some(T8132),
+        "t8142" => return Some(T8142),
+        _ => {}
+    }
+    if compatible("apcie,t8132") {
+        Some(T8132)
+    } else if compatible("apcie,t8142") {
+        Some(T8142)
+    } else {
+        None
+    }
+}
 
 const PHY_CTRL: u64 = 0x000;
 const PHY_CLK0REQ: u32 = 1 << 0;
@@ -137,7 +215,9 @@ const LNKCTL2_TLS: u16 = 0xf;
 const _: () = {
     assert!(LNKCAP2_SLS == 0b0111_1110);
     assert!(PORT_RID2SID < PORT_MSIMAP);
-    assert!(MMIO.is_multiple_of(1 << 20) && MMIO_SIZE.is_power_of_two());
+    if let Some(e) = &crate::chip::CHIP.eth {
+        assert!(e.mmio.is_multiple_of(1 << 20) && e.mmio_size.is_power_of_two());
+    }
 };
 
 const MS: u64 = 1_000_000;
@@ -165,30 +245,41 @@ pub type Why = &'static str;
 
 /// Brengt de controller en zijn poorten op. Draait hij al (m1n1 deed het
 /// onder de loader), dan blijft alles staan: de bring-up twee keer doen zou
-/// een werkende link neerhalen. Geeft de bootregel.
-pub fn init() -> Result<&'static str, Why> {
-    let root = dev::read32(Pa(ECAM));
+/// een werkende link neerhalen. Geeft de bootregel. `force` is
+/// `hopos.apcie` ([`recipe`]).
+pub fn init(force: &str) -> Result<&'static str, Why> {
+    let e = eth()?;
+    let root = dev::read32(Pa(e.ecam));
     if root != u32::MAX && root != 0 {
         return Ok("apcie: already up, left as the boot loader set it");
     }
     let t = fwinfo::adt().ok_or("no device tree")?;
     let chain = t.trace("/arm-io/apcie").ok_or("no /arm-io/apcie")?;
     let node = chain.node();
+    let r = recipe(|c| fwinfo::compatible(&t, node, c), force).ok_or(
+        "apcie: no recipe for this controller's compatible (m1n1 has none either); hopos.apcie=t8132|t8142 forces one",
+    )?;
     let reg = |i: usize| t.reg_at(&chain, i).map_or(0, |r| r.0);
-    let (config, rc, phy_ip, axi) = (reg(IDX_CONFIG), reg(IDX_RC), reg(IDX_PHY_IP), reg(IDX_AXI));
+    let (config, rc, phy_ip, axi) = (
+        reg(IDX_CONFIG),
+        reg(IDX_RC),
+        reg(r.idx_phy_ip),
+        reg(r.idx_axi),
+    );
     let phy_blk = reg(IDX_PHY);
     if config == 0 || rc == 0 || phy_blk == 0 || phy_ip == 0 || axi == 0 {
         return Err("incomplete reg set on /arm-io/apcie");
     }
-    let (phy, phy_cmn) = (phy_blk + PHY_OFF, phy_blk + PHY_CMN_OFF);
+    let (phy, phy_cmn) = (phy_blk + r.phy_off, phy_blk + PHY_CMN_OFF);
     let ports = t.u32(node, "#ports").unwrap_or(0) as usize;
     let nregs = t.prop(node, "reg").map_or(0, |r| r.len() / 16);
-    if ports == 0 || nregs <= SHARED_REGS {
+    if ports == 0 || nregs <= r.shared_regs || !(nregs - r.shared_regs).is_multiple_of(ports) {
         return Err("apcie: ports and reg windows do not divide");
     }
-    let per_port = (nregs - SHARED_REGS) / ports;
+    let per_port = (nregs - r.shared_regs) / ports;
     step(format_args!(
-        "apcie: config {config:#x} rc {rc:#x} phy {phy:#x} phy-ip {phy_ip:#x} axi {axi:#x}, {ports} ports, {per_port} reg/port"
+        "apcie: recipe {} config {config:#x} rc {rc:#x} phy {phy:#x} phy-ip {phy_ip:#x} axi {axi:#x}, {ports} ports, {per_port} reg/port",
+        r.name
     ));
 
     // 1. Stroom. Zonder dit antwoordt geen register hieronder.
@@ -207,6 +298,9 @@ pub fn init() -> Result<&'static str, Why> {
     dev::mb();
     apply(node, "apcie-common-tunables", rc);
     apply(node, "apcie-phy-tunables", phy_blk);
+    if r.refclk_wait && !poll(phy_cmn, PHYCMN_CLK_100MHZ, PHYCMN_CLK_100MHZ, 250 * MS) {
+        return Err("apcie: reference clock not available");
+    }
 
     // 3. De PHY: twee klokken, dan uit reset.
     phy_clocks(phy)?;
@@ -215,6 +309,9 @@ pub fn init() -> Result<&'static str, Why> {
     rmw(phy + 4, 0, 0x01);
     apply(node, "apcie-phy-ip-pll-tunables", phy_ip);
     apply(node, "apcie-phy-ip-auspma-tunables", phy_ip);
+    if r.gen4_clear {
+        rmw(phy_ip + 0x90, 1 << 16, 0);
+    }
     rmw(phy + 4, 0, 0x10);
 
     // 4. De referentieklok en het root complex.
@@ -222,7 +319,7 @@ pub fn init() -> Result<&'static str, Why> {
     if !poll(phy + 0x8, 1, 1, 250 * MS) {
         return Err("apcie: PHY clock did not start");
     }
-    rmw(phy + PHY_CTRL, 0, 0x200);
+    rmw(phy + PHY_CTRL, 0, r.phy_run);
     dev::write32(Pa(rc + 0x54), 0x140);
     dev::write32(Pa(rc + 0x50), 0x1);
     dev::mb();
@@ -239,7 +336,7 @@ pub fn init() -> Result<&'static str, Why> {
         let Some(bridge) = t.child(node, bridge_name(port)) else {
             continue;
         };
-        let i = port * per_port + SHARED_REGS;
+        let i = port * per_port + r.shared_regs;
         let (pb, pphy) = (reg(i), reg(i + 2));
         if pb == 0 || pphy == 0 {
             return Err("apcie: a port has no register windows");
@@ -406,8 +503,8 @@ fn max_link_speed(t: &Adt<'_>, bridge: Node) -> u32 {
 }
 
 /// Zet een GPIO als uitgang op `v` (alleen DATA en MODE).
-fn gpio_set(pin: u64, v: bool) {
-    let a = GPIO_BASE + 4 * pin;
+fn gpio_set(e: &Eth, pin: u64, v: bool) {
+    let a = e.gpio + 4 * pin;
     rmw(a, 0xf, (1 << 1) | u32::from(v));
 }
 
@@ -415,15 +512,16 @@ fn gpio_set(pin: u64, v: bool) {
 /// GPIO, de register-PERST, en de training. Tijden uit de ADT
 /// (`t-refclk-to-perst`, `perst-to-config`: beide 100 ms).
 pub fn link_up(timeout_ns: u64) -> Result<(), Why> {
-    let b = ETH_PORT_BASE;
+    let e = eth()?;
+    let b = e.port_base;
     if dev::read32(Pa(b + PORT_LINKSTS)) & 1 != 0 {
         return Ok(());
     }
     rmw(b + PORT_APPCLK, 0, 1);
-    gpio_set(ETH_PERST_PIN, false);
+    gpio_set(e, e.perst_pin, false);
     dev::delay(now, 10 * MS);
     rmw(b + PORT_PERST, 0, 1);
-    gpio_set(ETH_PERST_PIN, true);
+    gpio_set(e, e.perst_pin, true);
     dev::delay(now, 100 * MS);
     if dev::read32(Pa(b + PORT_STATUS)) & 1 == 0 {
         return Err("apcie: ethernet port not ready");
@@ -437,12 +535,12 @@ pub fn link_up(timeout_ns: u64) -> Result<(), Why> {
 }
 
 /// Het eerste AIC-nummer van het blok van de ethernet-poort: woord
-/// [`ETH_PORT`] van `/arm-io/apcie` "interrupts".
+/// [`eth_port`] van `/arm-io/apcie` "interrupts".
 #[must_use]
 pub fn port_irq_base() -> Option<u32> {
     let t = fwinfo::adt()?;
     let v = t.prop(t.path("/arm-io/apcie")?, "interrupts")?;
-    let at = usize::from(ETH_PORT) * 4;
+    let at = usize::from(ETH.as_ref()?.port) * 4;
     let w = v.get(at..at.checked_add(4)?)?;
     Some(u32::from_le_bytes(w.try_into().ok()?))
 }
@@ -451,7 +549,8 @@ pub fn port_irq_base() -> Option<u32> {
 /// niet aankwam (INTMSK 0xfffffff0 laat INTA tot en met INTD door).
 #[must_use]
 pub fn port_intx() -> (u32, u32) {
-    let b = ETH_PORT_BASE;
+    let Some(e) = ETH.as_ref() else { return (0, 0) };
+    let b = e.port_base;
     (
         dev::read32(Pa(b + PORT_INTSTAT)),
         dev::read32(Pa(b + PORT_INTMSK)),
@@ -461,36 +560,38 @@ pub fn port_intx() -> (u32, u32) {
 /// Alle streams van de ethernet-DART op bypass: welke stream de poort aan
 /// de RID van de NIC hangt, is niet gegarandeerd, en bypass op een
 /// ongebruikte stream kost niets.
-fn dart_bypass() {
+fn dart_bypass(e: &Eth) {
     for sid in 0..DART_STREAMS {
-        dev::write32(Pa(ETH_DART + DART_TCR + 4 * sid), DART_BYPASS);
+        dev::write32(Pa(e.dart + DART_TCR + 4 * sid), DART_BYPASS);
     }
     dev::mb();
 }
 
 /// Koppelt RID `bdf` aan DART-stream 0 op plek `idx`.
-fn map_rid(idx: u64, bdf: Bdf) {
+fn map_rid(e: &Eth, idx: u64, bdf: Bdf) {
     let v =
         RID2SID_VALID | (u32::from(bdf.bus) << 8) | (u32::from(bdf.dev) << 3) | u32::from(bdf.func);
-    dev::write32(Pa(ETH_PORT_BASE + PORT_RID2SID + 4 * idx), v);
+    dev::write32(Pa(e.port_base + PORT_RID2SID + 4 * idx), v);
     dev::mb();
 }
 
-/// De config-space van de APCIe (bussen 0 tot en met [`ETH_BUS`]).
-#[must_use]
-pub fn ecam() -> Ecam {
+/// De config-space van de APCIe (bussen 0 tot en met de bus achter de
+/// ethernet-poort).
+fn ecam(e: &Eth) -> Ecam {
     // SAFETY: de ECAM van `/arm-io/apcie` (reg[0], 256 MB), onder 512 GB en
     // dus Device-gemapt (`mmu::build`); na [`init`] antwoordt hij.
-    unsafe { Ecam::new(Pa(ECAM), 0, ETH_BUS) }
+    unsafe { Ecam::new(Pa(e.ecam), 0, e.port) }
 }
 
-/// Wat de enumeratie opleverde: het endpoint, zijn BAR0 en zijn
+/// Wat de enumeratie opleverde: het endpoint, zijn BAR's en zijn
 /// config-space.
 pub struct Endpoint {
     /// De functie.
     pub f: Function,
-    /// BAR0 (CPU-adres).
+    /// BAR0 (CPU-adres; de tg3).
     pub bar0: u64,
+    /// BAR2 (CPU-adres, 0 = geen; de Realtek: BAR0 is daar de I/O-alias).
+    pub bar2: u64,
     /// De ECAM-config-space van de functie (4 KB).
     pub cfg: u64,
 }
@@ -499,53 +600,209 @@ pub struct Endpoint {
 /// endpoint achter de ethernet-poort.
 pub fn enumerate_nic() -> Result<Endpoint, Why> {
     link_up(500 * MS)?;
-    dart_bypass();
-    let e = ecam();
-    let br = Bdf::new(0, ETH_PORT, 0).ok_or("bad bridge address")?;
+    let t = eth()?;
+    let (mmio, mmio_size, bus_n) = (t.mmio, t.mmio_size, t.port);
+    dart_bypass(t);
+    let e = ecam(t);
+    let br = Bdf::new(0, t.port, 0).ok_or("bad bridge address")?;
     // Busnummers: primary 0, secondary en subordinate ETH_BUS.
     let bus = e.read32(br, 0x18);
     e.write32(
         br,
         0x18,
-        (bus & !0x00ff_ffff) | (u32::from(ETH_BUS) << 8) | (u32::from(ETH_BUS) << 16),
+        (bus & !0x00ff_ffff) | (u32::from(bus_n) << 8) | (u32::from(bus_n) << 16),
     );
     // Het prefetch-venster (64-bit) en het niet-prefetchbare venster uit.
-    let end = MMIO + MMIO_SIZE - 1;
+    let end = mmio + mmio_size - 1;
     e.write32(
         br,
         0x24,
         ((((end >> 20) & 0xfff) as u32) << 20)
             | (1 << 16)
-            | ((((MMIO >> 20) & 0xfff) as u32) << 4)
+            | ((((mmio >> 20) & 0xfff) as u32) << 4)
             | 1,
     );
-    e.write32(br, 0x28, (MMIO >> 32) as u32);
+    e.write32(br, 0x28, (mmio >> 32) as u32);
     e.write32(br, 0x2c, (end >> 32) as u32);
     e.write32(br, 0x20, 0x0000_fff0);
     dev::mb();
     dev::delay(now, 10 * MS);
-    let f = driver_pcie::find(&e, ETH_BUS, |f| !f.is_bridge()).ok_or("link up but no endpoint")?;
-    let mut win = MmioWindow::new(MMIO, MMIO_SIZE);
+    let f = driver_pcie::find(&e, bus_n, |f| !f.is_bridge()).ok_or("link up but no endpoint")?;
+    let mut win = MmioWindow::new(mmio, mmio_size);
     let bars = f
         .assign_bars(&e, &mut win)
         .map_err(|_| "BAR assignment failed")?;
-    let bar0 = bars
-        .first()
-        .and_then(driver_pcie::Bar::mem)
-        .ok_or("no BAR0")?
-        .0;
-    map_rid(0, f.bdf);
+    // Alleen memory-BAR's (`assign_bars` laat I/O leeg): de tg3 heeft BAR0,
+    // de Realtek BAR2 (zijn BAR0 is de I/O-alias).
+    let mem = |i: usize| {
+        bars.get(i)
+            .and_then(driver_pcie::Bar::mem)
+            .map_or(0, |b| b.0)
+    };
+    let (bar0, bar2) = (mem(0), mem(2));
+    if bar0 == 0 && bar2 == 0 {
+        return Err("no memory BAR on the endpoint");
+    }
+    map_rid(t, 0, f.bdf);
     f.enable(&e);
     // De brug: memory-decode en bus-master.
     e.write32(br, 0x04, e.read32(br, 0x04) | 0x6);
     dev::mb();
-    let cfg = ECAM + f.bdf.ecam_offset();
-    Ok(Endpoint { f, bar0, cfg })
+    let cfg = t.ecam + f.bdf.ecam_offset();
+    Ok(Endpoint { f, bar0, bar2, cfg })
+}
+
+/// Een property als 32-bit-woorden (LE), hoogstens 48: genoeg voor
+/// `function-perst`, `interrupts` en `ranges`, zonder een regel van een
+/// kilometer.
+struct Words<'a>(&'a [u8]);
+
+impl core::fmt::Display for Words<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (i, w) in self.0.chunks(4).take(48).enumerate() {
+            let mut b = [0u8; 4];
+            for (d, s) in b.iter_mut().zip(w) {
+                *d = *s;
+            }
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{:x}", u32::from_le_bytes(b))?;
+        }
+        if self.0.len() > 48 * 4 {
+            write!(f, " ... ({} bytes)", self.0.len())?;
+        }
+        Ok(())
+    }
+}
+
+/// De teksten van een compatible, met `|` ertussen.
+struct Compat<'a>(Option<&'a [u8]>);
+
+impl core::fmt::Display for Compat<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Some(v) = self.0 else {
+            return f.write_str("-");
+        };
+        let mut first = true;
+        for part in v.split(|&c| c == 0).filter(|p| !p.is_empty()) {
+            if !first {
+                f.write_str("|")?;
+            }
+            first = false;
+            f.write_str(core::str::from_utf8(part).unwrap_or("?"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Wat de ADT over de PCIe van een chip zonder [`ETH`]-tabel zegt: elk
+/// getal dat `chip::Eth` en het [`Recipe`] nodig hebben, één keer in de
+/// bootlog (`HOPOS_APCIE_SURVEY`). Alleen lezen uit de boom; geen register
+/// van de controller wordt aangeraakt. Op de M6 (28-11) is dit de eerste
+/// boot: daarna gaan de getallen in `chip.rs`.
+pub fn survey() {
+    let Some(t) = fwinfo::adt() else {
+        println!("apcie: survey: no ADT HOPOS_APCIE_SURVEY");
+        return;
+    };
+    let Some(chain) = t.trace("/arm-io/apcie") else {
+        println!("apcie: survey: no /arm-io/apcie HOPOS_APCIE_SURVEY");
+        return;
+    };
+    let n = chain.node();
+    let nregs = t.prop(n, "reg").map_or(0, |r| r.len() / 16);
+    println!(
+        "apcie: survey: compatible {} #ports {} {} reg windows HOPOS_APCIE_SURVEY",
+        Compat(t.prop(n, "compatible")),
+        t.u32(n, "#ports").unwrap_or(0),
+        nregs
+    );
+    for i in 0..nregs {
+        if let Some((a, l)) = t.reg_at(&chain, i) {
+            println!("apcie: survey:   reg[{i}] {a:#x}+{l:#x}");
+        }
+    }
+    for p in ["interrupts", "ranges", "#address-cells", "#size-cells"] {
+        if let Some(v) = t.prop(n, p) {
+            println!("apcie: survey:   {p}: {}", Words(v));
+        }
+    }
+    for port in 0..8 {
+        let Some(b) = t.child(n, bridge_name(port)) else {
+            continue;
+        };
+        println!(
+            "apcie: survey: {} max-speed {} function-perst [{}]",
+            bridge_name(port),
+            t.u32(b, "maximum-link-speed").unwrap_or(0),
+            Words(t.prop(b, "function-perst").unwrap_or(&[]))
+        );
+        for c in t.children(b) {
+            println!(
+                "apcie: survey:   child {} compatible {} mac [{}]",
+                t.name(c).unwrap_or("?"),
+                Compat(t.prop(c, "compatible")),
+                Words(t.prop(c, "local-mac-address").unwrap_or(&[]))
+            );
+        }
+    }
+    const DARTS: [&str; 4] = [
+        "/arm-io/dart-apcie0",
+        "/arm-io/dart-apcie1",
+        "/arm-io/dart-apcie2",
+        "/arm-io/dart-apcie3",
+    ];
+    for d in DARTS.into_iter().chain(["/arm-io/gpio0"]) {
+        if let (Some(node), Some((a, l))) = (t.path(d), t.reg(d, 0)) {
+            println!(
+                "apcie: survey: {d} {a:#x}+{l:#x} compatible {}",
+                Compat(t.prop(node, "compatible"))
+            );
+        }
+    }
+    let mac = t
+        .path("/chosen")
+        .and_then(|c| t.prop(c, "mac-address-ethernet0"));
+    println!(
+        "apcie: survey: /chosen mac-address-ethernet0 [{}] HOPOS_APCIE_SURVEY_END",
+        Words(mac.unwrap_or(&[]))
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_recipe_follows_the_compatible_or_the_knob() {
+        let m4 = |c: &str| c == "apcie,t8132";
+        let m5 = |c: &str| c == "apcie,t8142";
+        let m6 = |c: &str| c == "apcie,t8152";
+        assert_eq!(recipe(m4, ""), Some(T8132));
+        assert_eq!(recipe(m5, ""), Some(T8142));
+        assert_eq!(recipe(m6, ""), None);
+        assert_eq!(recipe(m6, "t8142"), Some(T8142));
+        assert_eq!(recipe(m6, "nonsense"), None);
+        // De M4 blijft wat op 29-08 bewezen is.
+        assert_eq!(
+            (T8132.shared_regs, T8132.idx_phy_ip, T8132.idx_axi),
+            (7, 3, 4)
+        );
+        assert_eq!((T8132.phy_off, T8132.phy_run), (0x8000, 0x200));
+        assert_eq!((T8132.refclk_wait, T8132.gen4_clear), (false, false));
+    }
+
+    #[test]
+    fn words_and_compat_print_short() {
+        let w = [1u8, 0, 0, 0, 0xa5, 0, 0, 0];
+        assert_eq!(format!("{}", Words(&w)), "1 a5");
+        assert_eq!(
+            format!("{}", Compat(Some(b"apcie,t8152\0apcie\0"))),
+            "apcie,t8152|apcie"
+        );
+        assert_eq!(format!("{}", Compat(None)), "-");
+    }
 
     #[test]
     fn bridge_names_and_masks() {

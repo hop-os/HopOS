@@ -145,7 +145,14 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
 #[must_use]
 pub fn mpidr(core: usize) -> u64 {
     let reg = u64::from(fwinfo::cpu_reg(core).unwrap_or(0));
-    let aff2 = if fwinfo::is_p_core(core) { 1 << 16 } else { 0 };
+    // m1n1 `midr.h`: P is bit 16, M (vanaf de M6) bit 18.
+    let aff2 = if fwinfo::is_p_core(core) {
+        1 << 16
+    } else if fwinfo::is_m_core(core) {
+        1 << 18
+    } else {
+        0
+    };
     0x8000_0000 | aff2 | reg
 }
 

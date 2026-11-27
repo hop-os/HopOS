@@ -18,9 +18,17 @@ board = { path = "../../board" }
 driver-aic = { path = "../../driver/aic" }
 driver-pcie = { path = "../../driver/pcie" }
 driver-tg3 = { path = "../../driver/nic/tg3" }
+driver-rtl8126 = { path = "../../driver/nic/rtl8126", optional = true }
 driver-rtkit = { path = "../../driver/rtkit" }
 driver-smc = { path = "../../driver/smc" }
 driver-nvme = { path = "../../driver/nvme" }
+
+[features]
+# De Mac mini M6 (Apple t8152, Mac18,5): de chip-tabel van `chip.rs`, de
+# Realtek RTL8125 als NIC (`nic.rs`), en de recepten die alleen op de t8132
+# gemeten zijn (p-states, SMC, schijf) standaard dicht. Zonder deze feature
+# is het crate de M4, ongewijzigd.
+t8152 = ["dep:driver-rtl8126"]
 
 [lints]
 workspace = true

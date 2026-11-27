@@ -231,6 +231,28 @@ fn the_mac0_fallback_is_used_when_the_backup_is_empty() {
 }
 
 #[test]
+fn the_platform_mac_wins_and_lands_in_mac0() {
+    // De Mac mini M6: het MAC komt uit de ADT, en de chip mag leeg zijn
+    // (na een PERST). Een 8125CP, de XID van de teardown-chip.
+    let m = chip(0x708, false);
+    dev::copy_in(at(m.base, 0x19e0), &[0; 6]);
+    let adt = Mac([0x1c, 0xf6, 0x4c, 1, 2, 3]);
+    // SAFETY: registers en DMA liggen in `m`, dat de test overleeft.
+    let n = unsafe { Rtl8126::with_mac(m.base, m.dma, DMA_NEED, now, Some(adt)) }.unwrap();
+    assert_eq!((n.mac(), n.name()), (adt, "RTL8125CP"));
+    assert_eq!(
+        dev::read32(at(m.base, 0x00)),
+        u32::from_le_bytes([0x1c, 0xf6, 0x4c, 1])
+    );
+    // Een ongeldig platform-MAC valt terug op de chip.
+    let m = chip(0x708, false);
+    // SAFETY: zie hierboven.
+    let n =
+        unsafe { Rtl8126::with_mac(m.base, m.dma, DMA_NEED, now, Some(Mac([0xff; 6]))) }.unwrap();
+    assert_eq!(n.mac(), Mac(MAC));
+}
+
+#[test]
 fn link_on_the_8126a_advertises_5g_and_reads_physr() {
     let m = chip(0x64a, true);
     let mut n = up(&m);

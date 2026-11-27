@@ -252,7 +252,7 @@ const STEPS: [[&str; 4]; 2] = [
 /// bij welke stap.
 pub fn pstate_tune(target: [u64; 2], off: bool, serror: &dyn Fn(&'static str) -> bool) {
     let Some(t) = fwinfo::adt() else { return };
-    let Some(pm) = t.path("/arm-io/pmgr") else {
+    let Some(pm) = t.path(crate::fwinfo::pmgr_path()) else {
         return;
     };
     let apsc = t.u32(pm, "cpu-apsc").unwrap_or(0) != 0;

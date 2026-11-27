@@ -57,6 +57,9 @@ board-licheerv = ["dep:board-licheerv"]
 # bootobject (image/apple-m4.sh, docs/boards-apple.md); `link-apple.ld`,
 # gelinkt op 1 TiB + 4 GB (build.rs).
 board-apple = ["dep:board-apple"]
+# De Mac mini M6 (Apple t8152): hetzelfde board met de chip-feature
+# (image/apple-m4.sh met MODEL=m6, docs/boards-apple.md "De M6").
+board-apple-m6 = ["board-apple", "board-apple/t8152"]
 
 # De drie builds (docs/sequence-hopos.md §14.3): headless is zonder flag (het
 # hok, het netwerk, opslag; geen regel scherm, media of USB), `gui` en

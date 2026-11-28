@@ -296,7 +296,11 @@ zonder regel (bisect: main landt, de M6-commit landt, de knop met die lees
 reset koud, zonder landt hij).
 
 Niet bekend: de temperatuur onder vol (de SMC meet alleen bij de boot) en
-de throttle-registers van de M4-familie. `hopos.mhz` is de rem. Vitals
+de throttle-registers van de M4-familie. De chip begrenst zelf: het
+commando negeert volgens Linux de "boost limitations", en per core zakte
+het tempo van 1102 (één core) naar 983 (drie cores) bij dezelfde vraag;
+thermiek en ventilator zijn van de SMC. `hopos.mhz` is een knop, geen
+noodzaak. Vitals
 `burn` 180 s op 3 P-cores (28-11, vol): 2951 Msteps/s van begin tot eind,
 degradation 0,00, geen SError; de temperatuur leest daar 0 (geen
 thermometer op de tik). Vier P-cores kreeg de job niet ("no free run of 4

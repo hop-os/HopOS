@@ -284,17 +284,21 @@ Linux' `apple-soc-cpufreq.c`: BUSY af, PS1 en SET schrijven): vol is per
 cluster de snelste p-state uit `voltage-states1`/`5` (begrensd door
 `hopos.mhz`), stil de traagste, en `hopos.clock` (`dvfs`, `max`, `quiet`,
 `firmware`) en het beleid van de kern (`telemetry.rs`, `driver/dvfs`) doen
-de rest. De bootregel `HOPOS_CLOCK_UP` noemt beide standen per cluster en
-STATUS (+0x20050) rauw: de veldindeling daarvan is op de t8132 nog niet
-gemeten (t8112: bits 9:5).
+de rest. De bootregel `HOPOS_CLOCK_UP` noemt beide standen per cluster.
+
+Op ijzer 28-11 (de M4, warme flip naar 3.2.3 plus de knop, stempel
+`clk-nostatus`, gen 4): `E full 8/8 (2892 MHz) quiet 1 (900 MHz), P full
+20/20 (4464 MHz) quiet 1 (912 MHz)`, de flanken full bij de boot, quiet na
+30 s idle, full onder last, geen SError. Vitals `cpu` op een big core: 1102
+Msteps/s (was 542 op de klok van de boot). Het statusregister van Linux
+(+0x20050) NIET lezen: één lees legde de geflipte kern om, vóór het net en
+zonder regel (bisect: main landt, de M6-commit landt, de knop met die lees
+reset koud, zonder landt hij).
 
 Niet bekend: de temperatuur onder vol (de SMC meet alleen bij de boot) en
-de throttle-registers van de M4-familie. `hopos.mhz` is de rem. Op de M6
-(`measured: false`) alleen met `hopos.pstate`.
-
-Te meten: de bootregel en de flanken (`HOPOS_CLOCK_EDGE`), STATUS volgt
-het commando, een rekenmeting (secs=5) vol tegen stil in verhouding tot de
-MHz van de tabel, en geen `HOPOS_APPLE_SERROR_FIRST`.
+de throttle-registers van de M4-familie. `hopos.mhz` is de rem; een lange
+burn is nog niet gedraaid. Op de M6 (`measured: false`) alleen met
+`hopos.pstate`.
 
 ## De M6 (t8152, Mac18,5): voorbereid 27-11, nog niet op ijzer
 

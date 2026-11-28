@@ -31,10 +31,11 @@ use driver_dvfs::{Knob, Level};
 pub const MAX_STATES: usize = 32;
 
 const CL_PSTATE: u64 = 0x20020;
-/// Linux `APPLE_DVFS_STATUS`: de huidige p-state staat erin, maar de
-/// veldindeling op de t8132 is niet bekend (t8112: bits 9:5). Alleen rauw
-/// in de bootregel, als tweede blik naast het commando.
-const CL_STATUS: u64 = 0x20050;
+// Linux leest de huidige p-state uit `APPLE_DVFS_STATUS` (+0x20050). Op de
+// t8132 NIET doen: één lees van dat woord legde kern B na een flip om,
+// vóór het net en zonder SError-regel (de M4, 28-11, bisect: met de lees
+// een koude reset, zonder geland en vol op 4464 MHz). Wat de chip echt
+// draait, zegt de rekenmeting (vitals cpu), niet een register.
 const PS_BUSY: u64 = 1 << 31;
 const PS_SET: u64 = 1 << 25;
 const PS1: u64 = 0x1f;
@@ -175,8 +176,6 @@ pub fn plan(mhz: [&[u32]; 2], cap_mhz: Option<u32>) -> Result<Plan, Error> {
 pub struct PstateKnob {
     plan: Plan,
     base: [Pa; 2],
-    /// STATUS bij het openen, rauw (voor de bootregel).
-    status: [u64; 2],
 }
 
 impl PstateKnob {
@@ -215,17 +214,14 @@ impl fmt::Display for PstateKnob {
         let p = self.plan;
         f.write_str("p-states per cluster")?;
         for (c, name) in NAMES.iter().enumerate() {
-            let (Some(full), Some(quiet), Some(n), Some(st)) = (
-                p.full.get(c),
-                p.quiet.get(c),
-                p.states.get(c),
-                self.status.get(c),
-            ) else {
+            let (Some(full), Some(quiet), Some(n)) =
+                (p.full.get(c), p.quiet.get(c), p.states.get(c))
+            else {
                 continue;
             };
             write!(
                 f,
-                ", {name} full {}/{n} ({} MHz) quiet {} ({} MHz) status {st:#x}",
+                ", {name} full {}/{n} ({} MHz) quiet {} ({} MHz)",
                 full.0, full.1, quiet.0, quiet.1
             )?;
         }
@@ -289,18 +285,7 @@ pub(crate) fn knob(cap_mhz: Option<u32>, asked: bool) -> Result<PstateKnob, Erro
         ],
         cap_mhz,
     )?;
-    // STATUS één keer lezen, met de SError-toets erachter: op de t8132 is
-    // het register ongetoetst, en een lees die niet bestaat landt hier
-    // later als SError (de les van +0x48400).
-    let mut status = [0u64; 2];
-    for (s, b) in status.iter_mut().zip(base) {
-        *s = dev::read64(b.add(CL_STATUS));
-        if crate::serror_check("the DVFS status register") {
-            *s = u64::MAX;
-            break;
-        }
-    }
-    Ok(PstateKnob { plan, base, status })
+    Ok(PstateKnob { plan, base })
 }
 
 #[cfg(test)]

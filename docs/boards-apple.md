@@ -296,8 +296,11 @@ zonder regel (bisect: main landt, de M6-commit landt, de knop met die lees
 reset koud, zonder landt hij).
 
 Niet bekend: de temperatuur onder vol (de SMC meet alleen bij de boot) en
-de throttle-registers van de M4-familie. `hopos.mhz` is de rem; een lange
-burn is nog niet gedraaid. Op de M6 (`measured: false`) alleen met
+de throttle-registers van de M4-familie. `hopos.mhz` is de rem. Vitals
+`burn` 180 s op 3 P-cores (28-11, vol): 2951 Msteps/s van begin tot eind,
+degradation 0,00, geen SError; de temperatuur leest daar 0 (geen
+thermometer op de tik). Vier P-cores kreeg de job niet ("no free run of 4
+app core(s)"). Op de M6 (`measured: false`) alleen met
 `hopos.pstate`.
 
 ## De M6 (t8152, Mac18,5): voorbereid 27-11, nog niet op ijzer

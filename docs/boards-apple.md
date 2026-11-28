@@ -20,7 +20,7 @@ niets ervan heeft in v3 op ijzer gedraaid. De gedateerde lessen (28-08 tot
 | RTKit-mailbox (ASC) en de SART v3 | `driver/rtkit` | 16 host-tests tegen een nep-coprocessor |
 | SMC: sleutels, floats, sensoren, de warmste | `driver/smc` | 7 host-tests |
 | ANS-NVMe: het ANS-transport onder de NVMe-core (lineaire SQ, TCB's, NVMMU, coprocessor), de GPT als capaciteit, het schrijfvenster, nette shutdown | `driver/nvme/src/apple.rs` | 7 host-tests op de nep-controller van de core: de vier ANS-lessen, secure-bar, CID en TCB per slot met de invalidatie, weigering buiten of zonder venster, 512-naar-4K, een omgevallen coprocessor; tickets en read-ahead in de core-toetsen |
-| Board: bootstub, VHE-ingang, 48-bit-map met PXN, console, boot_args en ADT, cores met klasse, de CPU_ON-haak, AIC, timer-FIQ, fast IPI, PCIe-bring-up, tg3 met zijn INTx-lijn, ANS, SMC, watchdogs, p-states en hun wachter, het config-venster, slot-plan | `board/apple` | host-tests (map en PXN, plan, pool uit het contract, tunables, os-core-keuze, config-venster, watchdog-alarm, p-state-plafond) |
+| Board: bootstub, VHE-ingang, 48-bit-map met PXN, console, boot_args en ADT, cores met klasse, de CPU_ON-haak, AIC, timer-FIQ, fast IPI, PCIe-bring-up, tg3 met zijn INTx-lijn, ANS, SMC, watchdogs, de klokknop (p-states per cluster), het config-venster, slot-plan | `board/apple` | host-tests (map en PXN, plan, pool uit het contract, tunables, os-core-keuze, config-venster, watchdog-alarm, p-state van de boot, het plan van de klokknop) |
 | OS-core-rotatie voor `AppleVhe`: de fast IPI als bel, de ack op EL2, de FIQ als `Back::Timer`/`Back::Ipi`; de Apple-kick in de switcher; de CPU_ON-haak en de SCTLR-wis in `cpu::smp`; de VHE-bewuste event-stream | `cpu/src/el2`, `cpu/src/smp.rs`, `cpu/src/idle.rs` | host-tests (het kick-woord, de vectorindex, de haak, de stream-bits); de gedeelde paden op QEMU (virt, UEFI, UEFI+VHE) |
 | Linkscript: raw image op 0x101_0000_0000, stub op 0, kern op 0x10000 | `hopos/link-apple.ld` | link-asserties; `image/apple-m4.sh` toetst het parameterblok |
 | Loader (m1n1-proxy), meetcyclus, console, installer | `image/apple/` | de meetbank |
@@ -63,8 +63,10 @@ Debug-USB-device vast: dicht voor je begint (29-08). De loader springt met
 overdracht als na `kmutil configure-boot --raw --entry-point 2048`.
 
 `hopos.cfg`-sleutels van dit board: `hopos.system.core=small|big|N`,
-`hopos.pstate=off|E,P` (het plafond per cluster, standaard 5,6),
-`hopos.disk=off`, `hopos.smc=1`. Kooien zijn er altijd (`hopos.cages` en
+`hopos.pstate=off|E,P` (de p-state van de boot per cluster, standaard
+5,6; daarna is de klok van het beleid), `hopos.clock` en `hopos.mhz` (de
+klokknop, zoals op de Pi's: zie "De klokknop"), `hopos.disk=off`,
+`hopos.smc=1`. Kooien zijn er altijd (`hopos.cages` en
 de voorproef zijn weg, 10-11): de zelftest van de kern,
 `HOPOS_OS_SELFTEST`, toetst de rotatie en is fataal als hij zakt.
 
@@ -213,11 +215,10 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
     at 24 MHz ...) HOPOS_WD_ARMED`. `no /arm-io/wdt` of `refuses to arm`:
     onbewaakt, luid. Reset de node binnen 30 s na deze regel, dan aait de
     taak niet (de executor staat) of telt de teller niet op 24 MHz (dan
-    schaalt de timeout: meet de tijd tot de reset). `dvfs: the APSC governs
-    ... HOPOS_APPLE_PSTATE_WATCH`, en daarna alleen regels als een cluster
-    springt (`cpufreq: cluster 1 (P) 6 -> 3 HOPOS_APPLE_PSTATE`). Geen enkele
-    sprong in minuten idle: de APSC klokt niet terug (het antwoord op de
-    vraag van 01-09).
+    schaalt de timeout: meet de tijd tot de reset). `dvfs: p-states per
+    cluster, E full 8/8 (... MHz) quiet 1 ... HOPOS_CLOCK_UP`, dan `dvfs: ->
+    ... MHz (full, boot) HOPOS_CLOCK_EDGE`, na 30 s zonder last een flank
+    naar quiet, en onder last weer naar full (zie "De klokknop").
 11. `apcie: config 0x1cb0000000 ...`, per stap een regel (een uitgestelde
     abort landt bij de stap die hem veroorzaakte), `apcie: brought up by
     HopOS, 6 power gate(s), 263 tunable(s), 2 of 3 port(s)` (29-08), `apcie:
@@ -271,6 +272,29 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
     dat zijn de metingen dat RVBAR naar ons image wijst en dat de config
     zonder loader meekwam. Stap 13 loopt dan via PMGR en de brievenbus.
     Terug: dezelfde regel met `m1n1.bin`.
+
+## De klokknop (28-11)
+
+Tot 28-11 stond de node op de p-state die `pstate_tune` bij de boot
+schreef (m1n1's default 5/6: E 2172, P 2352 MHz), in de veronderstelling
+dat de APSC daaronder zelf governde. Dat staat nergens in m1n1 of Linux:
+het register is de gevraagde p-state, en Linux governt in software. Nu heeft
+het board een knop zoals de Pi's (`board/apple/src/clock.rs`, het recept van
+Linux' `apple-soc-cpufreq.c`: BUSY af, PS1 en SET schrijven): vol is per
+cluster de snelste p-state uit `voltage-states1`/`5` (begrensd door
+`hopos.mhz`), stil de traagste, en `hopos.clock` (`dvfs`, `max`, `quiet`,
+`firmware`) en het beleid van de kern (`telemetry.rs`, `driver/dvfs`) doen
+de rest. De bootregel `HOPOS_CLOCK_UP` noemt beide standen per cluster en
+STATUS (+0x20050) rauw: de veldindeling daarvan is op de t8132 nog niet
+gemeten (t8112: bits 9:5).
+
+Niet bekend: de temperatuur onder vol (de SMC meet alleen bij de boot) en
+de throttle-registers van de M4-familie. `hopos.mhz` is de rem. Op de M6
+(`measured: false`) alleen met `hopos.pstate`.
+
+Te meten: de bootregel en de flanken (`HOPOS_CLOCK_EDGE`), STATUS volgt
+het commando, een rekenmeting (secs=5) vol tegen stil in verhouding tot de
+MHz van de tabel, en geen `HOPOS_APPLE_SERROR_FIRST`.
 
 ## De M6 (t8152, Mac18,5): voorbereid 27-11, nog niet op ijzer
 

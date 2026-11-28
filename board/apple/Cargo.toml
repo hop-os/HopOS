@@ -16,6 +16,7 @@ executor = { path = "../../executor" }
 netdev = { path = "../../netdev" }
 board = { path = "../../board" }
 driver-aic = { path = "../../driver/aic" }
+driver-dvfs = { path = "../../driver/dvfs" }
 driver-pcie = { path = "../../driver/pcie" }
 driver-tg3 = { path = "../../driver/nic/tg3" }
 driver-rtl8126 = { path = "../../driver/nic/rtl8126", optional = true }

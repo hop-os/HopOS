@@ -45,6 +45,7 @@
 )]
 
 pub mod chip;
+pub mod clock;
 pub mod console;
 pub mod cores;
 pub mod fwinfo;
@@ -295,45 +296,21 @@ impl board::Watchdog for Apple {
 /// een oude waarde op de heartbeat van Hop zou liegen, dus hier 0 (`-`).
 impl board::Thermal for Apple {}
 
-/// De klok regelt het silicium zelf (de APSC, die `discover` aanzette onder
-/// het plafond van `hopos.pstate`); in plaats van een knop meldt de wachter
-/// elke sprong (Go `PStateWatch`, `wdt`).
+/// De klokknop: de p-state per cluster, zoals Linux hem zet
+/// ([`clock::PstateKnob`]); het beleid van de kern (`hopos.clock`,
+/// `hopos.mhz`) draait hem op en neer, zoals op de Pi's. Op een chip waar
+/// de clusterblokken niet gemeten zijn (de M6) alleen met `hopos.pstate`.
 impl board::ClockKnob for Apple {
-    type Knob = board::NoKnob;
-    type KnobError = board::NoKnob;
+    type Knob = clock::PstateKnob;
+    type KnobError = clock::Error;
 
-    fn no_knob(&self, exec: &'static executor::Executor) {
-        if !chip::CHIP.measured && self.boot_param("hopos.pstate").is_empty() {
-            println!(
-                "dvfs: no p-state watch on {} (the cluster blocks are not measured on this chip) HOPOS_CLOCK_NONE",
-                chip::CHIP.soc
-            );
-            return;
-        }
-        let w = wdt::PStateWatch::new();
-        if w.is_empty() {
-            println!("dvfs: no cluster blocks in the ADT, the boot clock stays HOPOS_CLOCK_NONE");
-            return;
-        }
-        println!(
-            "dvfs: the APSC governs under the hopos.pstate ceiling; watching the p-states every {} s HOPOS_APPLE_PSTATE_WATCH",
-            PSTATE_WATCH_EVERY.as_secs()
-        );
-        if let Err(e) = exec.spawn(pstate_watch(exec, w)) {
-            println!("dvfs: p-state watch not spawned ({e:?})");
-        }
-    }
-}
+    const HAS_KNOB: bool = true;
 
-/// De cadans van de wachter op de p-states (Go: twee seconden). Een poll
-/// met een reden: docs/description.md §4.11.
-const PSTATE_WATCH_EVERY: core::time::Duration = core::time::Duration::from_secs(2);
-
-/// De wachter: alleen-lezen, één regel per sprong.
-async fn pstate_watch(exec: &'static executor::Executor, mut w: wdt::PStateWatch) {
-    loop {
-        w.poll();
-        exec.after(PSTATE_WATCH_EVERY).await;
+    fn clock_knob(&self, mhz: Option<u32>) -> Option<Result<clock::PstateKnob, clock::Error>> {
+        Some(clock::knob(
+            mhz,
+            !self.boot_param("hopos.pstate").is_empty(),
+        ))
     }
 }
 

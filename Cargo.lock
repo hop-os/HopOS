@@ -107,6 +107,7 @@ dependencies = [
  "cpu",
  "dev",
  "driver-aic",
+ "driver-dvfs",
  "driver-nvme",
  "driver-pcie",
  "driver-rtkit",
